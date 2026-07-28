@@ -26,7 +26,8 @@ const (
 	FaultHbmUCE          FaultType = "hbm_uce"           // HBM double-bit (uncorrectable) ECC
 	FaultDdrUCE          FaultType = "ddr_uce"           // DDR double-bit ECC
 	FaultRoceLinkDown    FaultType = "roce_link_down"    // RoCE link down / unhealthy
-	FaultDriverUnhealthy FaultType = "driver_unhealthy"  // NPU driver health non-zero
+	FaultDriverUnhealthy FaultType = "driver_unhealthy" // NPU driver health non-zero
+	FaultStragglerDetected FaultType = "straggler_detected" // slow-node (straggler) detection hit (ingested from external detector)
 )
 
 // AllFaultTypes returns every known FaultType, used by the REST discovery
@@ -40,6 +41,7 @@ func AllFaultTypes() []FaultType {
 		FaultDdrUCE,
 		FaultRoceLinkDown,
 		FaultDriverUnhealthy,
+		FaultStragglerDetected,
 	}
 }
 

@@ -1,8 +1,8 @@
 # CATHelper 使用手册 (User Manual)
 
-> 本文档说明 CATHelper 的构建、安装、配置，以及底座（CATMonitor）与上层特性（EEP）的协同用法。
+> 本文档说明 CATHelper 的构建、安装、配置，以及底座（CATMonitor）与上层特性（EEP、Straggler）的协同用法。
 > 功能概览见 [SPEC.md](SPEC.md)，版本记录见 [Release_Notes.md](Release_Notes.md)。
-> 底座详细用法见 [CATMonitor/docs/User_Manual.md](CATMonitor/docs/User_Manual.md)，EEP 详细用法见 [feature/elastic-ep/README.md](feature/elastic-ep/README.md)。
+> 底座详细用法见 [CATMonitor/docs/User_Manual.md](CATMonitor/docs/User_Manual.md)，EEP 见 [feature/elastic-ep/README.md](feature/elastic-ep/README.md)，Straggler 见 [feature/straggler/README.md](feature/straggler/README.md)。
 
 ---
 
@@ -15,8 +15,8 @@ cd CATHelper/CATMonitor && make build
 # 2. 启动底座守护进程（采集 + Prometheus :9100）
 ./bin/catmonitor daemon
 
-# 3. （可选）启用故障订阅：编辑配置设 faultsub.enabled: true 后重启 daemon
-#    daemon 将额外提供故障订阅 REST :9101 + HTTP Webhook 推送
+# 3. （可选）启用故障订阅/KPI 输出：编辑配置设 faultsub.enabled / straggler_output.enabled: true 后重启 daemon
+#    faultsub → 故障订阅 REST :9101 + Webhook；straggler_output → straggler_kpi_{date}.jsonl
 
 # 4. 部署带容错能力的 vLLM 服务（NPU 服务器上）
 cd CATHelper
@@ -27,6 +27,11 @@ bash feature/elastic-ep/examples/fault_tolerance_scale/ft_vllm_serve_qwen.sh \
 python feature/elastic-ep/examples/fault_tolerance_scale/scale_down_demo.py \
     --npu-ids 0,1,2,3 --catmonitor-host localhost --catmonitor-rest-port 9101 \
     --callback-port 9102 --advertise-url http://localhost:9102/fault_event --port 8006
+
+# 6.（可选）慢节点检测：CATMonitor 启用 straggler_output 后，定时跑 straggler CLI
+cd feature/straggler && go build -o slowNodeDetection .
+./slowNodeDetection --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
+    --faultsub-url=http://localhost:9101 --baseline-hours=360 --detection-hours=1
 ```
 
 ## 目录
@@ -36,9 +41,10 @@ python feature/elastic-ep/examples/fault_tolerance_scale/scale_down_demo.py \
 - [3. 底座用法（CATMonitor）](#3-底座用法catmonitor)
 - [4. 故障订阅机制（faultsub）](#4-故障订阅机制faultsub)
 - [5. 上层特性用法（EEP）](#5-上层特性用法eep)
-- [6. 端到端部署示例](#6-端到端部署示例)
-- [7. 配置参考](#7-配置参考)
-- [8. 排错与常见问题](#8-排错与常见问题)
+- [6. 慢节点检测用法（Straggler）](#6-慢节点检测用法straggler)
+- [7. 端到端部署示例](#7-端到端部署示例)
+- [8. 配置参考](#8-配置参考)
+- [9. 排错与常见问题](#9-排错与常见问题)
 
 ---
 
@@ -276,9 +282,58 @@ REST API 规格详见 [feature/elastic-ep/SPEC.md §5.3](feature/elastic-ep/SPEC
 
 ---
 
-## 6. 端到端部署示例
+## 6. 慢节点检测用法（Straggler）
 
-### 6.1 单机部署（CATMonitor 与 vLLM 同机）
+Straggler 是两道防线慢节点检测器（独立 Go module，`feature/straggler/`）。完整用法见 [feature/straggler/README.md](feature/straggler/README.md)，整合设计见 [straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)。
+
+### 6.1 启用 CATMonitor KPI 输出（第一道数据来源）
+
+编辑 `catmonitor.yaml`，开启 `straggler_output`（替代 straggler 自带 `kpi_collect.sh`）：
+
+```yaml
+straggler_output:
+  enabled: true
+  data_dir: /var/lib/catmonitor/straggler   # 产出 straggler_kpi_{date}.jsonl
+  retention: 360h            # 保留 15 天（匹配基线窗口）
+  flush_interval: 60s
+```
+
+daemon 启动后会持续写 `straggler_kpi_{YYYY-MM-DD}.jsonl`（每时刻含全部卡的 11 项 KPI）。
+
+### 6.2 运行 straggler 检测（CLI/定时）
+
+```bash
+cd feature/straggler
+go build -o slowNodeDetection .
+./slowNodeDetection \
+    --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
+    --faultsub-url=http://localhost:9101 \
+    --baseline-hours=360 --detection-hours=1 \
+    [degradation=0.3]
+```
+
+读最近 15 天 KPI → 第一道检测 → 报告（`npu_resource_detection_result.json` + 文本报告）+ 命中卡回注 faultsub。建议由 cron/定时器周期调度（如每 1h）。
+
+### 6.3 第二道 Profiler 检测（按需，独立）
+
+KPI 未发现异常但怀疑性能问题时，启用 Profiler：
+
+```bash
+./slowNodeDetection path=/data/profiler_output degradation=0.3
+# 读 ascend_pytorch_profiler_*.db，检测慢计算/慢通信/慢CPU/NPU Bubble
+```
+
+可与第一道联合：`--kpi-jsonl-dir=... path=/data/profiler_output`（先 KPI，未命中则 fallback Profiler）。
+
+### 6.4 回注 faultsub 与闭环
+
+`--faultsub-url` 非空时，straggler 把每个命中卡作为 `straggler_detected` 事件 POST 给 faultsub（`POST /faultsub/events`），由 faultsub 推送给订阅者（EEP/运维）。root_cause（thermal_throttle/network_link_issue/straggler/...）放在 `detail`，订阅者据此决策卡隔离/排查。
+
+---
+
+## 7. 端到端部署示例
+
+### 7.1 单机部署（CATMonitor 与 vLLM 同机）
 
 ```bash
 # 终端 1：底座（启用 faultsub）
@@ -299,7 +354,7 @@ python feature/elastic-ep/examples/fault_tolerance_scale/scale_down_demo.py \
 curl http://localhost:8006/v1/chat/completions ...   # 略
 ```
 
-### 6.2 跨机部署（CATMonitor 与 vLLM 分离）
+### 7.2 跨机部署（CATMonitor 与 vLLM 分离）
 
 | 角色 | 主机 | 关键配置 |
 |------|------|---------|
@@ -308,7 +363,7 @@ curl http://localhost:8006/v1/chat/completions ...   # 略
 
 确保 `10.0.0.10` → `10.0.0.5:9102` 网络可达（CATMonitor 反向 POST webhook）。
 
-### 6.3 故障注入验证
+### 7.3 故障注入验证
 
 ```bash
 # 模拟 NPU 故障：kill 某个 Worker 进程
@@ -320,9 +375,9 @@ kill -9 <worker_pid>
 
 ---
 
-## 7. 配置参考
+## 8. 配置参考
 
-### 7.1 底座配置（`catmonitor.yaml`）
+### 8.1 底座配置（`catmonitor.yaml`）
 
 完整字段说明见 [CATMonitor/docs/User_Manual.md §2](CATMonitor/docs/User_Manual.md)。关键字段：
 
@@ -336,21 +391,26 @@ kill -9 <worker_pid>
 | `faultsub.rest_addr` | 订阅 REST API 监听地址（默认 `:9101`） |
 | `faultsub.webhook_timeout` / `webhook_retry` | webhook 推送超时与重试次数 |
 | `faultsub.rules.*` | 各故障判定规则开关 |
+| `straggler_output.enabled` | 是否启用慢节点检测 KPI 文件输出（默认 false） |
+| `straggler_output.data_dir` | KPI 文件目录（默认 `/var/lib/catmonitor/straggler`） |
+| `straggler_output.retention` | KPI 文件保留期（默认 15 天，匹配基线窗口） |
+| `straggler_output.flush_interval` | 内存缓冲 flush 周期（默认 60s） |
 
-### 7.2 端口一览
+### 8.2 端口一览
 
 | 端口 | 提供方 | 用途 |
 |------|--------|------|
 | `9100` | CATMonitor | Prometheus `/metrics` |
-| `9101` | CATMonitor（faultsub） | 故障订阅 REST API |
+| `9101` | CATMonitor（faultsub） | 故障订阅 REST API（含 `POST /faultsub/events` ingest） |
 | `9527` | CATMonitor-web | Web 仪表盘（占用时自动 +1） |
 | `9102` | EEP 故障管理中心 | 接收 CATMonitor webhook |
 | `8006` | vLLM | 推理服务 + 容错 REST API |
 | `22867` | vLLM | 引擎健康 ZMQ PUB |
+| — | straggler CLI | 无监听端口；读 KPI 文件 + `--faultsub-url` 回注（定时调度） |
 
 ---
 
-## 8. 排错与常见问题
+## 9. 排错与常见问题
 
 | 现象 | 原因 / 解决 |
 |------|-------------|
@@ -362,9 +422,12 @@ kill -9 <worker_pid>
 | GPU/NPU/Chassis 无数据 | 对应命令缺失即优雅降级返回空，非错误；NPU 仍输出 `npu_num=0` |
 | 容错缩容失败 | 见 [feature/elastic-ep/Release_Notes.md §已知问题](feature/elastic-ep/Release_Notes.md)；冗余专家数须满足约束 |
 | 持续故障重复推送 | faultsub 为变迁驱动（仅出现/恢复推送）；如仍重复检查 `debounce_ms` 是否为 0 |
+| straggler 无 KPI 文件可读 | 检查 `straggler_output.enabled: true`；确认 `data_dir` 与 `--kpi-jsonl-dir` 一致；保留期内有数据 |
+| straggler 回注 faultsub 失败 | 检查 `--faultsub-url` 正确且 faultsub 已启用；faultsub 不可用时 straggler 仍出报告（best-effort 回注） |
+| straggler 构建失败（modernc.org/sqlite） | 首次 `go mod tidy` 拉取依赖；离线环境需预置模块缓存 |
 
-> 底座更多排错见 [CATMonitor/docs/User_Manual.md §11](CATMonitor/docs/User_Manual.md)，EEP 已知问题见 [feature/elastic-ep/Release_Notes.md](feature/elastic-ep/Release_Notes.md)。
+> 底座更多排错见 [CATMonitor/docs/User_Manual.md §11](CATMonitor/docs/User_Manual.md)，EEP 已知问题见 [feature/elastic-ep/Release_Notes.md](feature/elastic-ep/Release_Notes.md)，Straggler 见 [feature/straggler/README.md](feature/straggler/README.md)。
 
 ---
 
-*文档版本：v1.0 · 对应 CATHelper v0.1.0*
+*文档版本：v2.0 · 对应 CATHelper v0.2.0*

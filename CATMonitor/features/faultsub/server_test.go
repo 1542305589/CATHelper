@@ -200,6 +200,71 @@ func TestAPIHealthyReady(t *testing.T) {
 	}
 }
 
+func TestAPIIngestEvent(t *testing.T) {
+	// POST /faultsub/events (external ingest) should dispatch to subscribers
+	// and return 202. Build the dispatcher ourselves to control the pusher.
+	rp := &recordingPusher{}
+	subs := NewSubscriptionManager()
+	subs.Add(&Subscription{Delivery: DeliveryWebhook, Endpoint: "http://eep/f"})
+	disp := NewDispatcher(rp, subs, 0, 16, nil)
+	det := NewDetector(nil)
+	fs := NewFaultStorage(&mockStorage{}, det, disp, nil)
+	s := &apiServer{disp: disp, fstore: fs, logger: nil}
+	mux := muxFor(s)
+
+	rec := httptest.NewRecorder()
+	body := bytes.NewReader([]byte(`{"type":"straggler_detected","npu_id":"3","severity":"critical","detail":{"root_cause":"thermal_throttle"}}`))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/faultsub/events", body))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body:%s", rec.Code, rec.Body.String())
+	}
+
+	// The webhook delivery is async; wait for it.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && rp.count() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rp.count() != 1 {
+		t.Fatalf("expected 1 webhook push from ingest, got %d", rp.count())
+	}
+	if rp.calls[0].ev.Type != FaultStragglerDetected || rp.calls[0].ev.NPUID != "3" {
+		t.Errorf("ingested event wrong: %+v", rp.calls[0].ev)
+	}
+	// Event should also be in the events buffer (for GET /faultsub/events).
+	got := disp.Events(time.Time{}, "straggler_detected", "")
+	if len(got) != 1 {
+		t.Errorf("ingest should record in buffer, got %d events", len(got))
+	}
+}
+
+func TestAPIIngestEventFillsMissing(t *testing.T) {
+	// Missing event_id/timestamp should be filled by the server.
+	s, _, _ := newTestAPI(t)
+	mux := muxFor(s)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/faultsub/events",
+		bytes.NewReader([]byte(`{"type":"straggler_detected","npu_id":"1","severity":"warning"}`))))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rec.Code)
+	}
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["event_id"] == "" {
+		t.Error("server should fill event_id")
+	}
+}
+
+func TestAPIIngestEventBadJSON(t *testing.T) {
+	s, _, _ := newTestAPI(t)
+	mux := muxFor(s)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/faultsub/events",
+		bytes.NewReader([]byte(`not json`))))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
 func TestServeAPIShutdown(t *testing.T) {
 	// Smoke test: ServeAPI starts and stops cleanly on ctx cancel.
 	ctx, cancel := context.WithCancel(context.Background())

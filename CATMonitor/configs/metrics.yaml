@@ -970,6 +970,11 @@ components:
         priority: Medium
         unit: "个"
         static: false
+      - name: roce_new_pkt_rty
+        cn_name: "ROCE重传报文数"
+        priority: Medium
+        unit: "个"
+        static: false
       - name: nic_tx_all_pkg_num
         cn_name: "NIC发送总报文数"
         priority: Medium

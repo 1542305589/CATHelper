@@ -4,6 +4,57 @@
 
 ---
 
+## v0.2.0
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.0 |
+| 发布时间 | 2026-07-28 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器 |
+| 组成 | 底座 CATMonitor v0.3.3 + 上层特性 Elastic EP v0.1.0 + Straggler 慢节点检测 v0.2.0 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.1.0（底座 + EEP 弹性容错）基础上，新增上层特性 **Straggler 慢节点（慢卡）检测**，并与 CATMonitor 底座有机整合。至此 CATHelper 形成"采集 → 故障容错（EEP） + 性能劣化检测（straggler）"的双特性上层，二者共享底座的指标采集与故障订阅能力。
+
+### 变更摘要
+
+#### 上层特性 — Straggler 慢节点检测 v0.2.0
+
+- **两道防线检测体系**：第一道（KPI 资源指标检测）基于 15 天历史基线 + 1h 检测窗，时间×空间双维 Z-score + 二维交叉验证 + 根因定界；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU/NPU Bubble
+- **独立 Go module**：`feature/straggler/`（自带 `go.mod`，依赖纯 Go `modernc.org/sqlite`，无 CGo），import 路径重构为 `.../CATHelper/feature/straggler/*`
+- **与 CATMonitor 底座整合**：第一道接入 CATMonitor——新增 opt-in 的 `stragglerout` KPI 文件输出（替代自带 `kpi_collect.sh`）；第二道（Profiler `.db`）保留独立
+- **检测命中回注 faultsub**：straggler 把慢卡作为 `straggler_detected` 事件 POST 给 CATMonitor faultsub（经 `POST /faultsub/events` ingest 端点），由 faultsub 推送给订阅者（EEP/运维）触发卡隔离/排查，闭环"采集→检测→响应"
+- 详见 [feature/straggler/straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)
+
+#### 底座 — CATMonitor 增强
+
+- **新增 `features/stragglerout` 模块**（opt-in `collector.Storage` 插件）：抽 11 项 NPU KPI（temp/power/aicore_freq/aicore_util/hbm_util/tx_bandwidth/rx_pfc_pkt/roce_tx_err_pkt/roce_out_of_order/roce_new_pkt_rty + cpu_avg），按时刻×按卡聚合追加写日级 `straggler_kpi_{date}.jsonl`（保留 15 天，60s flush），默认关闭、零回归
+- **faultsub 新增事件 ingest**：`POST /faultsub/events` 端点接收外部检测器（straggler）回注的 FaultEvent，经同一 Dispatch 管道推送给订阅者；新增 `straggler_detected` 故障类型
+- **指标补充**：`metrics.yaml` 登记 `roce_new_pkt_rty`（RoCE 重传报文数，Medium），补齐 straggler 第 11 项 KPI；hccn_tool 统计解析器本为通用 key:value，无需改代码
+
+#### 根目录文档
+
+- README/SPEC/User_Manual 同步新增 straggler 特性说明、用法与配置；路线图更新（straggler 由"规划中"转为"已交付"）
+
+### 测试
+
+- **CATMonitor（Go）**：`go vet`/`go build`/`go test` 全绿，27 包（+1 stragglerout），含 stragglerout 6 子测试、faultsub ingest 3 子测试；`straggler_output`/`faultsub` 未启用时行为零回归
+- **straggler（独立 Go module）**：`go vet`/`go build`/`go test` 全绿，resource 包 9 子测试（json_reader 6 + emit 3）；修复既存编译错误（report.go 字段/位置混用）
+
+### 已知限制
+
+1. **DCMI/真机未验证**：NPU KPI 真实采集、Profiler `.db` 解析、faultsub webhook 端到端推送均需在昇腾 A3 真机复测（单测由 mock 驱动）
+2. **roce_new_pkt_rty 字段名待真机确认**：mapper 用别名表（roce_new_pkt_rty / roce_retrans_pkt_num / roce_rx_retrans_pkt_num）兼容；若 hccn_tool 无该字段将缺省为 0
+3. **KPI 文件量**：3s 采样 × 8 卡 ≈ 5.7MB/天、15 天≈86MB，定时检测读取可接受
+4. **EEP 既有已知问题**：缩容后再次缩容存在偶现问题（详见 [feature/elastic-ep/Release_Notes.md](feature/elastic-ep/Release_Notes.md)）
+5. **未推送到远端**：本次发布暂在本地完成
+6. **后续**：SGLang 框架支持待后续版本交付
+
+---
+
 ## v0.1.0
 
 | 项目 | 说明 |

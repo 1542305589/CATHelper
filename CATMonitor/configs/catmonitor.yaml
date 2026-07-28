@@ -62,3 +62,12 @@ faultsub:
     ddr_uce: true
     roce_link_down: true
     driver_unhealthy: false
+
+# Straggler-dedicated KPI file output (features/stragglerout). Default off;
+# enable to let the slow-node detector consume CATMonitor's NPU KPI time-series
+# instead of running its own kpi_collect.sh. See features/stragglerout/stragglerout_SPEC.md.
+straggler_output:
+  enabled: false
+  data_dir: /var/lib/catmonitor/straggler   # KPI file directory
+  retention: 360h            # file retention (default 15 days, matches baseline window)
+  flush_interval: 60s        # in-memory buffer flush cadence

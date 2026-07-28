@@ -12,10 +12,12 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Computing-Availability-Tools/CATMonitor/features/exporter"
 	"github.com/Computing-Availability-Tools/CATMonitor/features/faultsub"
 	"github.com/Computing-Availability-Tools/CATMonitor/features/health"
+	"github.com/Computing-Availability-Tools/CATMonitor/features/stragglerout"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/collector"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/config"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/metrics"
@@ -141,6 +143,16 @@ func runDaemon() {
 	var sink collector.Storage = cacheStore
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if cfg.StragglerOutput.Enabled {
+		kpiw := stragglerout.NewKPIWriter(cfg.StragglerOutput.DataDir, cfg.StragglerOutput.Retention, logger)
+		sstore := stragglerout.NewStragglerStorage(cacheStore, stragglerout.NewKPIMapper(), kpiw, cfg.StragglerOutput.FlushInterval, logger)
+		go func() {
+			<-ctx.Done()
+			sstore.Flush(time.Now())
+		}()
+		sink = sstore
+		logger.Info("straggler_output enabled", "data_dir", cfg.StragglerOutput.DataDir)
+	}
 	if cfg.FaultSub.Enabled {
 		rules := faultsub.RuleConfig{}
 		for k, v := range cfg.FaultSub.Rules {

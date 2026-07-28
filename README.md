@@ -6,7 +6,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| 版本号 | v0.1.0 |
+| 版本号 | v0.2.0 |
 | 发布时间 | 2026-07-28 |
 | 许可证 | Apache-2.0 |
 
@@ -16,12 +16,16 @@
 CATHelper/
 ├── CATMonitor/            # 底座：全栈指标采集、健康度评估、Prometheus 导出守护进程
 │   ├── internal/          #   采集核心 + 7 部件采集器 + 14 来源层
-│   ├── features/          #   健康度 / Web 仪表盘 / 能效监控 / Prometheus 导出 / 故障订阅推送
+│   ├── features/          #   健康度 / Web 仪表盘 / 能效监控 / Prometheus 导出 / 故障订阅推送 / KPI 输出
 │   └── configs/           #   catmonitor.yaml + metrics.yaml
 └── feature/
-    └── elastic-ep/        # 上层特性：推理大EP卡级弹性容错（EEP）
-        ├── patches/       #   vLLM + vLLM-Ascend 容错框架补丁
-        └── examples/      #   容错服务启动脚本 + 外部故障管理中心（订阅 CATMonitor）
+    ├── elastic-ep/        # 上层特性：推理大EP卡级弹性容错（EEP）
+    │   ├── patches/       #   vLLM + vLLM-Ascend 容错框架补丁
+    │   └── examples/      #   容错服务启动脚本 + 外部故障管理中心（订阅 CATMonitor）
+    └── straggler/         # 上层特性：慢节点（慢卡）检测
+        ├── resource/      #   第一道 KPI 资源检测（读 CATMonitor KPI 文件）
+        ├── profiling/      #   第二道 Profiler 检测（读 Ascend .db）
+        └── config/ utils/ report/
 ```
 
 ### 底座 — [CATMonitor](CATMonitor/)
@@ -36,9 +40,16 @@ CATHelper/
 
 EEP 的故障信息输入已与 CATMonitor 底座有机整合：通过 `faultsub` 订阅机制，CATMonitor 采集并判定 NPU 故障（卡掉线 / 健康状态 / 错误码 / HBM UCE / RoCE 链路等），经 HTTP Webhook 推送给 EEP 的外部故障管理中心，由其映射 NPU→DP rank 后下发容错指令。整合设计见 [EEP_combination_DESIGN.md](feature/elastic-ep/EEP_combination_DESIGN.md)。
 
+### 上层特性 — [Straggler 慢节点检测](feature/straggler/)
+
+慢节点（慢卡）检测特性。两道防线：第一道（KPI 资源指标检测）基于 15 天历史基线 + 1h 检测窗，时间×空间双维 Z-score + 二维交叉验证 + 根因定界；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU/NPU Bubble。详见 [feature/straggler/README.md](feature/straggler/README.md)。
+
+straggler 第一道已与 CATMonitor 底座有机整合：CATMonitor 通过 opt-in 的 `stragglerout` 模块输出专用 KPI 时序文件（替代 straggler 自带 `kpi_collect.sh`），straggler CLI 读该文件检测；命中慢卡后经 `faultsub` 回注 `straggler_detected` 事件，由 faultsub 推送给订阅者（EEP/运维）触发卡隔离/排查。第二道（Profiler）保留独立。整合设计见 [straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)。
+
 ## 路线图
 
-- **推理慢节点满卡检测特性**：后续版本将新增该上层特性，基于 CATMonitor 采集的推理性能与卡级指标检测慢节点并满卡处理。
+- **SGLang 支持**：EEP 后续版本计划支持 SGLang 框架。
+- **真机验证**：NPU KPI 真实采集、Profiler `.db` 解析、端到端容错/检测链路在昇腾 A3 真机复测。
 
 ## 文档
 
@@ -49,6 +60,7 @@ EEP 的故障信息输入已与 CATMonitor 底座有机整合：通过 `faultsub
 | [Release_Notes.md](Release_Notes.md) | 版本发布记录 |
 | [CATMonitor/](CATMonitor/) | 底座子项目（README / SPEC / DESIGN / 使用手册 / 指标清单） |
 | [feature/elastic-ep/](feature/elastic-ep/) | EEP 特性子项目（SPEC / DESIGN / Release_Notes / 测试报告） |
+| [feature/straggler/](feature/straggler/) | Straggler 特性子项目（README / SPEC / DESIGN / 整合设计） |
 
 ## 快速上手
 
@@ -65,6 +77,11 @@ bash feature/elastic-ep/examples/fault_tolerance_scale/ft_vllm_serve_qwen.sh --d
 python feature/elastic-ep/examples/fault_tolerance_scale/scale_down_demo.py \
     --npu-ids 0,1,2,3 --catmonitor-host localhost --catmonitor-rest-port 9101 \
     --callback-port 9102 --advertise-url http://localhost:9102/fault_event --port 8006
+
+# 4.（可选）慢节点检测：CATMonitor 启用 straggler_output 后，定时跑 straggler CLI
+cd feature/straggler && go build -o slowNodeDetection .
+./slowNodeDetection --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
+    --faultsub-url=http://localhost:9101 --baseline-hours=360 --detection-hours=1
 ```
 
 > 完整使用说明见 [使用手册](User_Manual.md)，功能概览见 [SPEC.md](SPEC.md)。

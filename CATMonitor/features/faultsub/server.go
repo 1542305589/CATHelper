@@ -56,6 +56,7 @@ func (s *apiServer) register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /faultsub/types", s.handleTypes)
 	mux.HandleFunc("GET /faultsub/snapshot", s.handleSnapshot)
 	mux.HandleFunc("GET /faultsub/events", s.handleEvents)
+	mux.HandleFunc("POST /faultsub/events", s.handleIngestEvent)
 
 	mux.HandleFunc("POST /faultsub/subscriptions", s.handleCreateSub)
 	mux.HandleFunc("GET /faultsub/subscriptions", s.handleListSubs)
@@ -144,4 +145,35 @@ func (s *apiServer) handleDeleteSub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleIngestEvent accepts an externally-detected FaultEvent (e.g. from the
+// straggler slow-node detector) and dispatches it through the same pipeline as
+// internally-detected events: records it in the ring buffer and pushes it to
+// matching subscribers via webhook. This closes the loop
+// (collect → detect → respond): an external detector POSTs a hit, faultsub
+// fans it out to EEP/operators.
+//
+// The body is a single FaultEvent. Missing fields (event_id, timestamp) are
+// filled in by the server. A 202 means accepted for delivery (best-effort).
+func (s *apiServer) handleIngestEvent(w http.ResponseWriter, r *http.Request) {
+	var ev FaultEvent
+	if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+		errJSON(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if ev.EventID == "" {
+		ev.EventID = newEventID()
+	}
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now()
+	}
+	if ev.Component == "" {
+		ev.Component = "npu"
+	}
+	// Best-effort dispatch: record + push to matching subscribers. Does not
+	// update the local fault snapshot (external events are not CATMonitor's
+	// own detection state).
+	s.disp.Dispatch(ev)
+	writeJSON(w, http.StatusAccepted, map[string]string{"event_id": ev.EventID, "status": "dispatched"})
 }

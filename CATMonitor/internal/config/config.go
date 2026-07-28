@@ -11,12 +11,13 @@ import (
 
 // Config represents the full CATMonitor configuration.
 type Config struct {
-	Server     ServerConfig            `yaml:"server"`
-	Collectors map[string]CollectorCfg `yaml:"collectors"`
-	Storage    StorageConfig           `yaml:"storage"`
-	Health     HealthConfig            `yaml:"health"`
-	Collection CollectionConfig         `yaml:"collection"`
-	FaultSub   FaultSubConfig          `yaml:"faultsub"`
+	Server          ServerConfig            `yaml:"server"`
+	Collectors      map[string]CollectorCfg `yaml:"collectors"`
+	Storage         StorageConfig           `yaml:"storage"`
+	Health          HealthConfig            `yaml:"health"`
+	Collection      CollectionConfig        `yaml:"collection"`
+	FaultSub        FaultSubConfig          `yaml:"faultsub"`
+	StragglerOutput StragglerOutputConfig   `yaml:"straggler_output"`
 }
 
 // ServerConfig holds server-level configuration.
@@ -69,6 +70,17 @@ type FaultSubDefaults struct {
 	MinSeverity string `yaml:"min_severity"`
 }
 
+// StragglerOutputConfig controls the straggler-dedicated KPI file output
+// (features/stragglerout). When Enabled is false (the default) the daemon
+// skips the feature and no KPI file is produced.
+type StragglerOutputConfig struct {
+	Enabled       bool          `yaml:"enabled"`        // opt-in switch
+	DataDir       string        `yaml:"data_dir"`       // KPI file directory
+	Retention     time.Duration `yaml:"retention"`      // file retention (default 15d)
+	FlushInterval time.Duration `yaml:"flush_interval"` // in-memory buffer flush cadence
+	Metrics       []string      `yaml:"metrics"`         // which straggler fields to emit (empty=all)
+}
+
 // Default returns the default configuration.
 func Default() *Config {
 	return &Config{
@@ -104,6 +116,12 @@ func Default() *Config {
 				DebounceMs:  0,
 				MinSeverity: "warning",
 			},
+		},
+		StragglerOutput: StragglerOutputConfig{
+			Enabled:       false, // opt-in; no KPI file when off
+			DataDir:       platform.DataDir() + "/straggler",
+			Retention:     15 * 24 * time.Hour,
+			FlushInterval: 60 * time.Second,
 		},
 	}
 }
