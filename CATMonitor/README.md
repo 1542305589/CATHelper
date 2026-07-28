@@ -22,6 +22,7 @@ CATMonitor 是 CAT (Computing Availability Tools) 系列软件之一，用于采
 - **Prometheus 导出（exporter）**：daemon 内置 `/metrics` 端点（`:9100`），一次采集同时落盘 JSONL + 缓存导出，零额外进程
 - **指标采集目录**：`configs/metrics.yaml` 统一管控采哪些指标、优先级、默认是否采集，模块可覆盖
 - **采集粒度控制**：`collection.min_priority` 配置（low/medium/high）按优先级阈值预过滤采集，采集器经 `AnyWanted` DI 在执行前跳过无需采集的指标组，降低开销
+- **故障订阅推送（faultsub）**：opt-in 特性，对采集到的 NPU 指标做故障判定（卡掉线/健康状态/错误码/HBM UCE/RoCE 链路等），经 **HTTP Webhook** 向已订阅的外部故障管理者推送 `FaultEvent`，并提供订阅注册/快照/事件回补 REST API（`:9101`）。零新依赖（`net/http`），默认关闭
 - **来源层架构**：`internal/source/`（14 包）抽象数据获取与解析，采集器不直接读文件/执行命令，无硬件时优雅降级
 - **跨平台**：Linux / Windows 双平台，构建标签隔离平台代码
 - **易扩展**：新增部件采集器只需实现统一接口并注册，核心代码零修改
@@ -88,6 +89,7 @@ catmonitor list
 | [features/web/Web_SPEC.md](features/web/Web_SPEC.md) | Web 仪表盘规格 |
 | [features/dfee/dfee_SPEC.md](features/dfee/dfee_SPEC.md) | 能效监控模块规格 |
 | [features/exporter/exporter_SPEC.md](features/exporter/exporter_SPEC.md) | Prometheus 导出模块规格 |
+| [features/faultsub/faultsub_SPEC.md](features/faultsub/faultsub_SPEC.md) | 故障订阅推送模块规格 |
 
 ## 项目结构
 
@@ -104,7 +106,8 @@ CATMonitor/
 │   ├── health/              #   健康度评估
 │   ├── web/                 #   Web 仪表盘（catmonitor-web）
 │   ├── dfee/                #   能效监控模块
-│   └── exporter/            #   Prometheus 导出（CachingStorage + /metrics）
+│   ├── exporter/            #   Prometheus 导出（CachingStorage + /metrics）
+│   └── faultsub/            #   故障订阅推送（FaultStorage + HTTP Webhook + REST）
 ├── configs/                 # 默认配置（catmonitor.yaml + metrics.yaml）
 ├── docs/                    # 文档（指标清单 / 使用手册 / 测试报告）
 ├── tests/ scripts/          # 测试框架与数据 / 安装脚本

@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/Computing-Availability-Tools/CATMonitor/features/exporter"
+	"github.com/Computing-Availability-Tools/CATMonitor/features/faultsub"
 	"github.com/Computing-Availability-Tools/CATMonitor/features/health"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/collector"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/config"
@@ -134,14 +135,32 @@ func runDaemon() {
 		}
 	}
 
-	scheduler := collector.NewScheduler(collector.DefaultRegistry, cacheStore, logger)
+	// Optionally wrap the storage chain with the fault-subscription tap.
+	// When faultsub is disabled, sink stays as the exporter's CachingStorage
+	// and daemon behavior is unchanged.
+	var sink collector.Storage = cacheStore
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if cfg.FaultSub.Enabled {
+		rules := faultsub.RuleConfig{}
+		for k, v := range cfg.FaultSub.Rules {
+			rules[faultsub.FaultType(k)] = v
+		}
+		det := faultsub.NewDetector(rules)
+		wh := faultsub.NewWebhook(cfg.FaultSub.WebhookTimeout, logger)
+		disp := faultsub.NewDispatcher(wh, faultsub.NewSubscriptionManager(),
+			cfg.FaultSub.WebhookRetry, cfg.FaultSub.EventBuffer, logger)
+		fstore := faultsub.NewFaultStorage(cacheStore, det, disp, logger)
+		go faultsub.ServeAPI(ctx, cfg.FaultSub.RestAddr, disp, fstore, logger)
+		sink = fstore
+		logger.Info("faultsub enabled", "rest_addr", cfg.FaultSub.RestAddr)
+	}
+
+	scheduler := collector.NewScheduler(collector.DefaultRegistry, sink, logger)
 	scheduler.SetFilter(metrics.Filter)
 
 	// Prometheus exporter endpoint
 	go exporter.ServeMetrics(":9100", cacheStore, logger)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	scheduler.Start(ctx, collectorCfgs)
 

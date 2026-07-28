@@ -16,6 +16,7 @@ type Config struct {
 	Storage    StorageConfig           `yaml:"storage"`
 	Health     HealthConfig            `yaml:"health"`
 	Collection CollectionConfig         `yaml:"collection"`
+	FaultSub   FaultSubConfig          `yaml:"faultsub"`
 }
 
 // ServerConfig holds server-level configuration.
@@ -48,6 +49,26 @@ type CollectionConfig struct {
 	MinPriority string `yaml:"min_priority"` // low | medium | high
 }
 
+// FaultSubConfig controls the fault subscription & push mechanism (features/faultsub).
+// When Enabled is false (the default) the daemon skips the feature entirely
+// and behaves exactly as before.
+type FaultSubConfig struct {
+	Enabled        bool            `yaml:"enabled"`          // opt-in switch
+	RestAddr       string          `yaml:"rest_addr"`        // subscription REST API listen address
+	WebhookTimeout time.Duration   `yaml:"webhook_timeout"`  // per-request webhook timeout
+	WebhookRetry   int             `yaml:"webhook_retry"`    // failed-webhook retry count
+	EventBuffer    int             `yaml:"event_buffer"`     // recent-event ring buffer size
+	Defaults       FaultSubDefaults `yaml:"defaults"`
+	Rules          map[string]bool `yaml:"rules"`
+}
+
+// FaultSubDefaults holds subscription defaults applied when a subscriber
+// omits the corresponding field.
+type FaultSubDefaults struct {
+	DebounceMs  int    `yaml:"debounce_ms"`
+	MinSeverity string `yaml:"min_severity"`
+}
+
 // Default returns the default configuration.
 func Default() *Config {
 	return &Config{
@@ -72,6 +93,17 @@ func Default() *Config {
 			Enabled:      true,
 			Interval:     5 * time.Second,
 			WeightScheme: "auto",
+		},
+		FaultSub: FaultSubConfig{
+			Enabled:        false, // opt-in; daemon unchanged when off
+			RestAddr:       ":9101",
+			WebhookTimeout: 5 * time.Second,
+			WebhookRetry:   1,
+			EventBuffer:    1024,
+			Defaults: FaultSubDefaults{
+				DebounceMs:  0,
+				MinSeverity: "warning",
+			},
 		},
 	}
 }

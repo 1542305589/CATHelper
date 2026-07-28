@@ -41,3 +41,24 @@ health:
 collection:
   # Minimum priority to collect: low (all) | medium (skip Low) | high (only High)
   min_priority: low
+
+# Fault subscription & push mechanism (features/faultsub). Default off; enable
+# to let external fault managers (e.g. EEP) subscribe to NPU fault events via
+# HTTP webhook and a REST API. See features/faultsub/faultsub_SPEC.md.
+faultsub:
+  enabled: false
+  rest_addr: ":9101"            # subscription REST API listen address
+  webhook_timeout: 5s          # per-request webhook push timeout
+  webhook_retry: 1              # failed-webhook retry count
+  event_buffer: 1024           # recent-event ring buffer (GET /faultsub/events)
+  defaults:
+    debounce_ms: 0             # default per-subscription debounce window
+    min_severity: "warning"
+  rules:                      # fault detection rule toggles (unset = enabled)
+    card_drop: true
+    npu_health: true
+    npu_error_code: true
+    hbm_uce: true
+    ddr_uce: true
+    roce_link_down: true
+    driver_unhealthy: false

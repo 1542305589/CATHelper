@@ -436,7 +436,12 @@ components:
         static: false
       - name: error_code
         cn_name: "NPU错误码"
-        priority: Medium
+        priority: High
+        unit: "-"
+        static: false
+      - name: card_drop
+        cn_name: "NPU卡掉线状态"
+        priority: High
         unit: "-"
         static: false
       - name: process_info
