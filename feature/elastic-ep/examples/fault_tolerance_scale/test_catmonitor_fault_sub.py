@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the CATHelper project
 """Unit tests for the CATMonitor fault subscriber (Phase C).
 
 Run: python3 -m unittest test_catmonitor_fault_sub -v

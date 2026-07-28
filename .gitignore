@@ -1,8 +1,58 @@
-# Python bytecode / caches
+# CATHelper 根 .gitignore —— 覆盖底座(Go/CATMonitor)与上层特性(Python/EEP)全栈产物
+# CATMonitor/.gitignore 处理底座内部细则；本文件为项目级通用规则，二者叠加生效。
+
+# ---- Go 构建产物 ----
+# 注意：不要用裸 "catmonitor" 规则，会误伤 CATMonitor/cmd/catmonitor 源码目录
+# 二进制产物仅在 bin/ 下，用路径限定即可
+CATMonitor/bin/
+bin/
+*.exe
+*.exe~
+*.dll
+*.dylib
+*.so
+*.test
+*.out
+*.prof
+
+# ---- Python 构建产物（EEP 特性）----
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.eggs/
+wheels/
 
-# local-only
+# ---- Python 测试 / 类型检查缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ---- 运行时/测试产生的缓存目录 ----
+# web/IPMI 测试会在各包目录下按相对路径创建 features/web/data/ 缓存
+**/features/web/data/
+features/web/.runtime-*.tmp
+*.log
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地专用（不入库）----
 AGENTS.md
 local_docs/
+loc_configs/

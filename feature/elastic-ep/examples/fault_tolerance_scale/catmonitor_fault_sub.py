@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the CATHelper project
 """CATMonitor fault-event subscriber for the Elastic-EP fault manager.
 
 This module replaces the old DCMI-polling path in ``scale_down_demo.py``.
