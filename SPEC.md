@@ -143,7 +143,7 @@ EEP 的外部故障管理中心通过两条路径获取故障，并据此决策�
 | `roce_link_down`（持续） | pause → 等待/人工 |
 | `npu_error_code`（非卡掉线） | pause → 查状态 → scale_down 或 retry |
 
-整合设计详见 [feature/elastic-ep/EEP_combination_DESING.md](feature/elastic-ep/EEP_combination_DESING.md)。
+整合设计详见 [feature/elastic-ep/EEP_combination_DESIGN.md](feature/elastic-ep/EEP_combination_DESIGN.md)。
 
 ### 3.4 容错工作流
 

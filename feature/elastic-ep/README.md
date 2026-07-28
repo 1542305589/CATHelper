@@ -89,7 +89,7 @@ pip install -e .
 > # 编辑 catmonitor.yaml，设 faultsub.enabled: true
 > catmonitor daemon                               # 采集 + /metrics:9100 + faultsub REST:9101
 > ```
-> 详见 [CATMonitor/README.md](../../CATMonitor/README.md) 与 [整合设计](EEP_combination_DESING.md)。
+> 详见 [CATMonitor/README.md](../../CATMonitor/README.md) 与 [整合设计](EEP_combination_DESIGN.md)。
 
 ---
 

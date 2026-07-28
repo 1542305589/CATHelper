@@ -34,7 +34,7 @@ CATHelper/
 
 推理大 EP 卡级弹性容错特性（Elastic EP）。实现 DP+EP 部署模式下卡故障后推理实例不退出，而是隔离故障卡所在 DP 域、重排专家后剩余 DP 继续提供推理服务，并支持网络闪断故障后请求重推恢复。当前仅支持 vLLM，后续计划支持 SGLang。详见 [feature/elastic-ep/README.md](feature/elastic-ep/README.md)。
 
-EEP 的故障信息输入已与 CATMonitor 底座有机整合：通过 `faultsub` 订阅机制，CATMonitor 采集并判定 NPU 故障（卡掉线 / 健康状态 / 错误码 / HBM UCE / RoCE 链路等），经 HTTP Webhook 推送给 EEP 的外部故障管理中心，由其映射 NPU→DP rank 后下发容错指令。整合设计见 [EEP_combination_DESING.md](feature/elastic-ep/EEP_combination_DESING.md)。
+EEP 的故障信息输入已与 CATMonitor 底座有机整合：通过 `faultsub` 订阅机制，CATMonitor 采集并判定 NPU 故障（卡掉线 / 健康状态 / 错误码 / HBM UCE / RoCE 链路等），经 HTTP Webhook 推送给 EEP 的外部故障管理中心，由其映射 NPU→DP rank 后下发容错指令。整合设计见 [EEP_combination_DESIGN.md](feature/elastic-ep/EEP_combination_DESIGN.md)。
 
 ## 路线图
 

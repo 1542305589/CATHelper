@@ -53,7 +53,7 @@ CATHelper 的初始版本（v0.1.0）。确立"**底座 + 上层特性**"的分�
 #### 底座与特性整合
 
 - **EEP 故障信息输入与 CATMonitor 真实衔接**：原 EEP 自带的 DCMI 轮询 Demo 替换为订阅 CATMonitor 的 faultsub 机制；CATMonitor 采集并判定 NPU 故障后经 HTTP Webhook 推送 `FaultEvent` 给 EEP 故障管理中心，由其映射 NPU→DP rank 后下发 pause/scale_down/retry；引擎健康 ZMQ 路径（EEP 内部边界）保留不变
-- **整合设计文档**：[feature/elastic-ep/EEP_combination_DESING.md](feature/elastic-ep/EEP_combination_DESING.md)
+- **整合设计文档**：[feature/elastic-ep/EEP_combination_DESIGN.md](feature/elastic-ep/EEP_combination_DESIGN.md)
 - **跨机支持**：EEP 注册时声明可达回调 URL，CATMonitor 反向 POST 推送，支持分机部署
 
 #### 根目录文档体系
