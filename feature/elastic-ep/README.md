@@ -85,6 +85,8 @@ pip install -e .
 > **前置依赖（新增）：** 故障管理中心需依赖 **CATMonitor daemon**（启用 `faultsub` 特性）提供 NPU 故障事件。先构建并启动 CATMonitor：
 > ```bash
 > cd CATHelper/CATMonitor && make build          # 需 NPU 环境加 -tags dcmi
+> export PATH=$PATH:./bin
+> mkdir -p /etc/catmonitor/
 > cp configs/catmonitor.yaml /etc/catmonitor/catmonitor.yaml
 > # 编辑 catmonitor.yaml，设 faultsub.enabled: true
 > catmonitor daemon                               # 采集 + /metrics:9100 + faultsub REST:9101
