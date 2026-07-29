@@ -126,12 +126,6 @@ class CatMonitorFaultSubscriber:
             print(f"[faultsub] {instruction} request failed: {exc}")
             return False
 
-    def pause(self, exclude_dp_ranks: List[int]) -> bool:
-        return self._vllm_apply(
-            "pause",
-            {"timeout": self.cfg.recovery_timeout, "exclude_engine_index": exclude_dp_ranks},
-        )
-
     def scale_down(self, exclude_dp_ranks: List[int]) -> bool:
         return self._vllm_apply(
             "scale_down",
@@ -143,6 +137,38 @@ class CatMonitorFaultSubscriber:
         if dp_ranks:
             params["exclude_dp_ranks"] = dp_ranks
         return self._vllm_apply("retry", params)
+
+    def _wait_for_pause(self, exclude_dp_ranks: List[int], poll_interval: int = 2, max_wait: int = 120) -> bool:
+        """Poll vLLM status until all non-excluded ranks are paused."""
+        url = f"http://{self.cfg.vllm_host}:{self.cfg.vllm_port}/fault_tolerance/status"
+        print(f"[faultsub] waiting for pause... ranks={exclude_dp_ranks}")
+        waited = 0
+        while waited < max_wait:
+            try:
+                resp = requests.get(url, timeout=5)
+                if resp.status_code != 200:
+                    time.sleep(poll_interval)
+                    waited += poll_interval
+                    continue
+                status_data = resp.json()
+                dp_ranks = status_data.get("dp_ranks", [])
+                all_paused = True
+                for rank in dp_ranks:
+                    rank_id = rank.get("id", -1)
+                    rank_status = rank.get("status", "")
+                    if rank_id in exclude_dp_ranks:
+                        continue
+                    if rank_status not in ("paused", "dead"):
+                        all_paused = False
+                        break
+                if all_paused:
+                    return True
+            except requests.RequestException:
+                pass
+            time.sleep(poll_interval)
+            waited += poll_interval
+        print(f"[faultsub] WARNING: pause did not complete within {max_wait}s for ranks {exclude_dp_ranks}")
+        return False
 
     # ---- event handling ----
 
@@ -176,8 +202,10 @@ class CatMonitorFaultSubscriber:
             self._active_faults[npu_id] = ev_type
 
         if ev_type in SCALE_DOWN_TYPES:
-            self.pause([dp_rank])
-            self.scale_down([dp_rank])
+            if self._wait_for_pause([dp_rank]):
+                self.scale_down([dp_rank])
+            else:
+                print(f"[faultsub] scale_down skipped for NPU {npu_id} — pause incomplete")
         else:
             # npu_error_code / roce_link_down (not recovered): pause and let
             # the operator / engine health path decide retry vs scale_down.

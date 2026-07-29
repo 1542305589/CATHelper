@@ -93,10 +93,56 @@ def scale(host, port, timeout, exclude_dp_ranks):
         return False
 
 
+def wait_for_pause(host, port, exclude_dp_ranks, poll_interval=2, max_wait=120):
+    url = f"http://{host}:{port}/fault_tolerance/status"
+    waited = 0
+    print(f"Waiting for pause to complete on all ranks (excluding {exclude_dp_ranks})...")
+    while waited < max_wait:
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                time.sleep(poll_interval)
+                waited += poll_interval
+                continue
+            status_data = resp.json()
+            # /fault_tolerance/status returns {"total_engines": ..., "engines": [{"id": ..., "status": ...}]}
+            engines = status_data.get("engines", [])
+            if not engines:
+                print(f"WARNING: no engines in status response: {status_data}")
+                time.sleep(poll_interval)
+                waited += poll_interval
+                continue
+            all_paused = True
+            for rank in engines:
+                rank_id = rank.get("id", -1)
+                rank_status = rank.get("status", "")
+                if rank_id in exclude_dp_ranks:
+                    continue
+                if rank_status not in ("paused", "dead"):
+                    all_paused = False
+                    break
+            if all_paused:
+                print("All ranks paused.")
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(poll_interval)
+        waited += poll_interval
+    print(f"WARNING: pause did not complete within {max_wait}s")
+    return False
+
+
 def start_monitor_engine_status(host, port, timeout, external_fault_notify_port):
+    scaled_down_ranks: set[int] = set()
     while True:
         exclude_dp_ranks = listen_fault_event(host, external_fault_notify_port)
-        scale(host, port, timeout, exclude_dp_ranks)
+        new_ranks = [r for r in exclude_dp_ranks if r not in scaled_down_ranks]
+        if not new_ranks:
+            continue
+        print(f"Engine health event: dead ranks {new_ranks}")
+        if wait_for_pause(host, port, new_ranks):
+            if scale(host, port, timeout, new_ranks):
+                scaled_down_ranks.update(new_ranks)
 
 
 def main():
