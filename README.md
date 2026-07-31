@@ -6,8 +6,8 @@
 
 | 项目 | 说明 |
 |------|------|
-| 版本号 | v0.2.0 |
-| 发布时间 | 2026-07-28 |
+| 版本号 | v0.2.1 |
+| 发布时间 | 2026-07-31 |
 | 许可证 | Apache-2.0 |
 
 ## 组成
@@ -16,7 +16,7 @@
 CATHelper/
 ├── CATMonitor/            # 底座：全栈指标采集、健康度评估、Prometheus 导出守护进程
 │   ├── internal/          #   采集核心 + 7 部件采集器 + 14 来源层
-│   ├── features/          #   健康度 / Web 仪表盘 / 能效监控 / Prometheus 导出 / 故障订阅推送 / KPI 输出
+│   ├── features/          #   健康度 / snapshot 统一生产 / Web 仪表盘 / 能效监控 / Prometheus 导出 / 故障订阅推送 / KPI 输出
 │   └── configs/           #   catmonitor.yaml + metrics.yaml
 └── feature/
     ├── elastic-ep/        # 上层特性：推理大EP卡级弹性容错（EEP）
@@ -66,7 +66,7 @@ straggler 第一道已与 CATMonitor 底座有机整合：CATMonitor 通过 opt-
 
 ```bash
 # 1. 构建并启动底座（采集 + Prometheus :9100 + 故障订阅 REST :9101）
-cd CATMonitor && make build
+cd CATMonitor && make all            # 一次性构建 daemon + web + dfee 三个二进制
 # 编辑 configs/catmonitor.yaml，设 faultsub.enabled: true（按需）
 ./bin/catmonitor daemon
 

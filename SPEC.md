@@ -43,7 +43,7 @@ CATHelper 采用"**底座 + 上层特性**"的分层架构：
 
 | 项目 | 说明 |
 |------|------|
-| 当前版本 | v0.2.0 |
+| 当前版本 | v0.2.1 |
 | 底座版本 | CATMonitor v0.3.3 |
 | EEP 版本 | Elastic EP v0.1.0 |
 | Straggler 版本 | Straggler 慢节点检测 v0.2.0 |
@@ -79,8 +79,8 @@ CATMonitor 是 CATHelper 的底座，可独立运行。详细功能规格见 [CA
 |------|------|------|
 | JSONL 落盘 | — | `{data_dir}/{component}_{date}.jsonl`，按天轮转 |
 | Prometheus 导出 | `:9100` | `/metrics` 端点（`catmonitor_{component}_{name}` 前缀），含 `/-/healthy`、`/-/ready` |
-| Web 仪表盘 | `:9527` | 独立二进制 `catmonitor-web`，可视化单机健康度与各部件指标 |
-| 能效监控 | `:9527/dfee/` | 能效指标实时图表 SPA |
+| Web 仪表盘 | `:9527` | 独立二进制 `catmonitor-web`，**只读消费** daemon snapshot，可视化单机健康度与各部件指标 |
+| 能效监控 | `:9528` | 独立二进制 `catmonitor-dfee`，**只读消费** daemon snapshot，能效指标实时图表 SPA |
 
 ### 2.4 故障订阅推送（faultsub）— 承上启下
 

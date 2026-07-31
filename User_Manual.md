@@ -10,7 +10,7 @@
 
 ```bash
 # 1. 构建底座
-cd CATHelper/CATMonitor && make build
+cd CATHelper/CATMonitor && make all
 
 # 2. 启动底座守护进程（采集 + Prometheus :9100）
 ./bin/catmonitor daemon
@@ -79,14 +79,17 @@ cd feature/straggler && go build -o slowNodeDetection .
 ```bash
 cd CATHelper/CATMonitor
 
-# 默认构建（无 CGo，无 NPU/GPU 真机也能编译）
-make build                         # 产物 ./bin/catmonitor
+# 一键构建 daemon + web + dfee 三个二进制（无 CGo，无 NPU/GPU 真机也能编译）
+make all                            # 产物 ./bin/{catmonitor, catmonitor-web, catmonitor-dfee}
+# 或分别构建
+make build                          # 仅 daemon（CANN DCMI 头存在时自动加 -tags dcmi）
 
-# NPU 服务器启用 DCMI 采集
+# NPU 服务器强制启用 DCMI 采集（make build 已自动探测，手动需加 tag）
 go build -tags dcmi -o bin/catmonitor ./cmd/catmonitor
 
-# Web 仪表盘二进制（可选）
-go build -o features/web/bin/catmonitor-web ./features/web
+# Web 仪表盘 / 能效监控 二进制（可选，只读消费 daemon snapshot）
+go build -o bin/catmonitor-web ./features/web
+go build -o bin/catmonitor-dfee ./features/dfee
 ```
 
 > CATMonitor 子目录为独立 Go module，在 `CATMonitor/` 内即可独立构建。
@@ -337,7 +340,7 @@ KPI 未发现异常但怀疑性能问题时，启用 Profiler：
 
 ```bash
 # 终端 1：底座（启用 faultsub）
-cd CATHelper/CATMonitor && make build
+cd CATHelper/CATMonitor && make all
 # 编辑 configs/catmonitor.yaml 设 faultsub.enabled: true
 ./bin/catmonitor daemon
 
@@ -402,7 +405,8 @@ kill -9 <worker_pid>
 |------|--------|------|
 | `9100` | CATMonitor | Prometheus `/metrics` |
 | `9101` | CATMonitor（faultsub） | 故障订阅 REST API（含 `POST /faultsub/events` ingest） |
-| `9527` | CATMonitor-web | Web 仪表盘（占用时自动 +1） |
+| `9527` | CATMonitor-web | Web 仪表盘（占用时自动 +1，只读消费 snapshot） |
+| `9528` | CATMonitor-dfee | 能效监控（占用时自动 +1，只读消费 snapshot） |
 | `9102` | EEP 故障管理中心 | 接收 CATMonitor webhook |
 | `8006` | vLLM | 推理服务 + 容错 REST API |
 | `22867` | vLLM | 引擎健康 ZMQ PUB |
