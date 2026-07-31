@@ -108,12 +108,17 @@ func loadConfig() *config.Config {
 	// unions the metrics each feature needs so they survive metrics.Filter.
 	// Intervals are parsed separately in runDaemon (LoadModuleOverride is
 	// last-wins, not min).
+	featurePaths := make([]string, 0, len(cfg.Features))
 	for _, f := range cfg.Features {
 		p := filepath.Join("features", f, "metrics.yaml")
+		featurePaths = append(featurePaths, p)
 		if err := metrics.LoadModuleOverride(p); err != nil {
 			slog.Error("feature metrics override failed", "feature", f, "path", p, "error", err)
 		}
 	}
+	// Scoped collection: when features non-empty, only metrics listed by some
+	// enabled feature (AND priority >= min_priority) are collected. Empty -> unscoped.
+	metrics.SetFeatureScope(featurePaths)
 	return cfg
 }
 

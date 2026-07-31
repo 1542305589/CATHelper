@@ -1,115 +1,157 @@
-# dfee module override: the complete set of energy-efficiency metrics dfee
-# needs (69 metric names; the "74" in dfee_SPEC counts memory/cpu label
-# instances). Loaded via metrics.LoadModuleOverride on top of the
-# configs/metrics.yaml base catalog (features:[...,dfee] in catmonitor.yaml).
-#
-# - 22 metrics are Low in the base catalog and would be dropped by
-#   metrics.Filter; this override raises them to Medium so they survive into
-#   snapshot. They are marked below with "# raise Low->Medium".
-# - The rest are declared at their base priority (High/Medium) for
-#   self-description; declaring the same value is a no-op merge.
-# - read_latency/write_latency (disk) and the 5 chassis metrics are NOT in the
-#   base catalog (they currently survive via default-allow); this override
-#   explicitly catalogues them as Medium.
-# - Intervals (per-component) are NOT set here yet — pending the cadence design
-#   (C_comp). Add an `interval:` field per component when dfee's desired read
-#   cadence is decided.
 components:
   - component: npu
     interval: 1s
     metrics:
-      # Frequency (7)
-      - { name: aicpu_freq,         priority: Medium }
-      - { name: aicore_rated_freq,  priority: Medium }  # raise Low->Medium
-      - { name: aicore_freq,        priority: Medium }
-      - { name: ctrlcpu_freq,       priority: Medium }
-      - { name: vector_core_freq,   priority: Medium }
-      - { name: hbm_freq,           priority: Medium }
-      - { name: ddr_freq,           priority: Medium }
-      # Utilization (14)
-      - { name: utilization,        priority: High }
-      - { name: memory_usage,      priority: High }
-      - { name: npu_util,          priority: High }
-      - { name: aicpu_util,        priority: Medium }
-      - { name: ctrlcpu_util,      priority: Medium }
-      - { name: vector_core_util,  priority: Medium }
-      - { name: hbm_bandwidth_util, priority: Medium }
-      - { name: ddr_util,          priority: Medium }
-      - { name: ddr_bandwidth_util, priority: Medium }
-      - { name: vdec_util,         priority: Medium }  # raise Low->Medium
-      - { name: vpc_util,          priority: Medium }  # raise Low->Medium
-      - { name: venc_util,         priority: Medium }  # raise Low->Medium
-      - { name: jpege_util,        priority: Medium }  # raise Low->Medium
-      - { name: jpegd_util,        priority: Medium }  # raise Low->Medium
-      # Temperature (14)
-      - { name: temperature,       priority: High }
-      - { name: hbm_temp,          priority: Medium }
-      - { name: cluster_temp,     priority: Medium }
-      - { name: peri_temp,        priority: Medium }
-      - { name: aicore0_temp,     priority: Medium }
-      - { name: aicore1_temp,     priority: Medium }
-      - { name: ntc1_temp,        priority: Medium }  # raise Low->Medium
-      - { name: ntc2_temp,        priority: Medium }  # raise Low->Medium
-      - { name: ntc3_temp,        priority: Medium }  # raise Low->Medium
-      - { name: ntc4_temp,        priority: Medium }  # raise Low->Medium
-      - { name: soc_max_temp,     priority: Medium }
-      - { name: fp_max_temp,      priority: Medium }
-      - { name: ndie_temp,        priority: Medium }
-      - { name: hbm_max_temp,     priority: Medium }
-      # Voltage & Power (7)
-      - { name: power_draw,       priority: Medium }
-      - { name: voltage,          priority: Medium }
-      - { name: aicore_voltage,   priority: Medium }
-      - { name: hybrid_voltage,   priority: Medium }
-      - { name: cpu_voltage,      priority: Medium }
-      - { name: ddr_voltage,      priority: Medium }
-      - { name: acg_count,        priority: Medium }  # raise Low->Medium
-      # Fan (1)
-      - { name: fan_speed,        priority: Medium }
-      # LLC (3)
-      - { name: llc_write_hit_rate, priority: Medium }  # raise Low->Medium
-      - { name: llc_read_hit_rate,  priority: Medium }  # raise Low->Medium
-      - { name: llc_throughput,     priority: Medium }  # raise Low->Medium
+      - name: aicpu_freq
+        priority: Medium
+      - name: aicore_rated_freq
+        priority: Medium
+      - name: aicore_freq
+        priority: Medium
+      - name: ctrlcpu_freq
+        priority: Medium
+      - name: vector_core_freq
+        priority: Medium
+      - name: hbm_freq
+        priority: Medium
+      - name: ddr_freq
+        priority: Medium
+      - name: utilization
+        priority: High
+      - name: memory_usage
+        priority: High
+      - name: npu_util
+        priority: High
+      - name: aicpu_util
+        priority: Medium
+      - name: ctrlcpu_util
+        priority: Medium
+      - name: vector_core_util
+        priority: Medium
+      - name: hbm_bandwidth_util
+        priority: Medium
+      - name: ddr_util
+        priority: Medium
+      - name: ddr_bandwidth_util
+        priority: Medium
+      - name: vdec_util
+        priority: Medium
+      - name: vpc_util
+        priority: Medium
+      - name: venc_util
+        priority: Medium
+      - name: jpege_util
+        priority: Medium
+      - name: jpegd_util
+        priority: Medium
+      - name: temperature
+        priority: High
+      - name: hbm_temp
+        priority: Medium
+      - name: cluster_temp
+        priority: Medium
+      - name: peri_temp
+        priority: Medium
+      - name: aicore0_temp
+        priority: Medium
+      - name: aicore1_temp
+        priority: Medium
+      - name: ntc1_temp
+        priority: Medium
+      - name: ntc2_temp
+        priority: Medium
+      - name: ntc3_temp
+        priority: Medium
+      - name: ntc4_temp
+        priority: Medium
+      - name: soc_max_temp
+        priority: Medium
+      - name: fp_max_temp
+        priority: Medium
+      - name: ndie_temp
+        priority: Medium
+      - name: hbm_max_temp
+        priority: Medium
+      - name: power_draw
+        priority: Medium
+      - name: voltage
+        priority: Medium
+      - name: aicore_voltage
+        priority: Medium
+      - name: hybrid_voltage
+        priority: Medium
+      - name: cpu_voltage
+        priority: Medium
+      - name: ddr_voltage
+        priority: Medium
+      - name: acg_count
+        priority: Medium
+      - name: fan_speed
+        priority: Medium
+      - name: llc_write_hit_rate
+        priority: Medium
+      - name: llc_read_hit_rate
+        priority: Medium
+      - name: llc_throughput
+        priority: Medium
   - component: cpu
     interval: 1s
     metrics:
-      # Time breakdown (8, core=total) — raw jiffies, replaced by derived util
-      - { name: user_time,     priority: Medium }  # raise Low->Medium
-      - { name: nice_time,     priority: Medium }  # raise Low->Medium
-      - { name: system_time,   priority: Medium }  # raise Low->Medium
-      - { name: idle_time,     priority: Medium }  # raise Low->Medium
-      - { name: iowait_time,   priority: Medium }  # raise Low->Medium
-      - { name: irq_time,      priority: Medium }  # raise Low->Medium
-      - { name: softirq_time,  priority: Medium }  # raise Low->Medium
-      - { name: steal_time,    priority: Medium }  # raise Low->Medium
-      # Load (1, all intervals)
-      - { name: load_average,  priority: High }
-      # Power (1)
-      - { name: power,         priority: Medium }
+      - name: user_time
+        priority: Medium
+      - name: nice_time
+        priority: Medium
+      - name: system_time
+        priority: Medium
+      - name: idle_time
+        priority: Medium
+      - name: iowait_time
+        priority: Medium
+      - name: irq_time
+        priority: Medium
+      - name: softirq_time
+        priority: Medium
+      - name: steal_time
+        priority: Medium
+      - name: load_average
+        priority: High
+      - name: power
+        priority: Medium
   - component: memory
     interval: 2s
     metrics:
-      # usage_detail (5 fields: total/free/buffers/cached/sreclaimable) + swap_detail (2 fields)
-      - { name: usage_detail,  priority: Medium }
-      - { name: swap_detail,   priority: Medium }
+      - name: usage_detail
+        priority: Medium
+      - name: swap_detail
+        priority: Medium
   - component: disk
     interval: 2s
     metrics:
-      - { name: throughput,    priority: Medium }
-      - { name: read_latency,  priority: Medium }   # not in base catalog
-      - { name: write_latency, priority: Medium }  # not in base catalog
-      - { name: iops,          priority: Medium }
+      - name: throughput
+        priority: Medium
+      - name: read_latency
+        priority: Medium
+      - name: write_latency
+        priority: Medium
+      - name: iops
+        priority: Medium
   - component: network
     interval: 1s
     metrics:
-      - { name: rx_bytes_total, priority: Medium }
-      - { name: tx_bytes_total, priority: Medium }
+      - name: rx_bytes_total
+        priority: Medium
+      - name: tx_bytes_total
+        priority: Medium
   - component: chassis
     interval: 3s
     metrics:
-      # None of these are in the base catalog; explicitly catalogue them.
-      - { name: power,       priority: Medium }   # not in base catalog
-      - { name: inlet_temp,  priority: Medium }   # not in base catalog
-      - { name: outlet_temp, priority: Medium }   # not in base catalog
-      - { name: fan_speed,   priority: Medium }   # not in base catalog
-      - { name: fan_power,   priority: Medium }   # not in base catalog
+      - name: power
+        priority: Medium
+      - name: inlet_temp
+        priority: Medium
+      - name: outlet_temp
+        priority: Medium
+      - name: fan_speed
+        priority: Medium
+      - name: fan_power
+        priority: Medium

@@ -189,6 +189,70 @@ func TestComponentIntervals(t *testing.T) {
 	}
 }
 
+// TestScopedFeatureCollection verifies the whitelist semantics: when features
+// are non-empty, only metrics listed by an enabled feature (AND priority >=
+// min_priority) are collected; out-of-scope metrics are dropped regardless of
+// priority, and AnyWanted skips sub-methods producing no in-scope metric.
+func TestScopedFeatureCollection(t *testing.T) {
+	base := `components:
+  - component: cpu
+    metrics:
+      - {name: usage, priority: High}
+      - {name: temperature, priority: Medium}
+      - {name: user_time, priority: Low}
+      - {name: frequency, priority: Medium}
+`
+	dfee := `components:
+  - component: cpu
+    metrics:
+      - {name: user_time, priority: Medium}
+`
+	Init(writeFile(t, "base.yaml", base))
+	dfeePath := writeFile(t, "dfee.yaml", dfee)
+	LoadModuleOverride(dfeePath) // raise user_time Low->Medium
+	SetCollectionThreshold("medium")
+	SetFeatureScope([]string{dfeePath}) // scope = dfee's user_time only
+
+	check := func(comp, name string, want bool) {
+		t.Helper()
+		if got := Default().Selected(comp, name); got != want {
+			t.Errorf("Selected(%s,%s)=%v want %v", comp, name, got, want)
+		}
+	}
+	check("cpu", "user_time", true)        // in scope + Medium
+	check("cpu", "usage", false)           // High but NOT in scope -> dropped
+	check("cpu", "temperature", false)     // Medium but not in scope -> dropped
+	check("cpu", "frequency", false)       // not in scope -> dropped
+	check("cpu", "not_in_catalog", false)  // scoped: uncatalogued+out-of-scope -> dropped (not default-allow)
+
+	if !IsWanted("cpu", "user_time") {
+		t.Error("user_time should be wanted (in scope + Medium)")
+	}
+	if IsWanted("cpu", "usage") {
+		t.Error("usage should not be wanted (out of scope)")
+	}
+	if IsWanted("cpu", "frequency") {
+		t.Error("frequency should not be wanted (out of scope)")
+	}
+	// Sub-method with >=1 in-scope metric runs; pure out-of-scope skipped.
+	if !AnyWanted("cpu", []string{"usage", "user_time"}) {
+		t.Error("group containing user_time (in scope) should run")
+	}
+	if AnyWanted("cpu", []string{"frequency", "avg_freq"}) {
+		t.Error("group with no in-scope metric should be skipped")
+	}
+
+	// Deactivate scope (features empty) -> unscoped: High/Medium survive again.
+	SetFeatureScope(nil)
+	check("cpu", "usage", true)
+	check("cpu", "temperature", true)
+	check("cpu", "user_time", true) // Medium
+	check("cpu", "frequency", true)
+	if Default().Selected("cpu", "not_in_catalog") != true {
+		t.Error("unscoped uncatalogued should default-allow")
+	}
+}
+
 // TestNoCatalogDefaultAllow: with no catalog file found, everything passes.
 func TestNoCatalogDefaultAllow(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "absent.yaml")); err != nil {
