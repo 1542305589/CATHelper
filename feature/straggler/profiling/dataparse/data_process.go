@@ -60,6 +60,9 @@ func ProcessDatabase(dbFilePath string, outputDir string) error {
 		return err
 	}
 
+	// Query HOST_INFO for hostUid (identifies which physical node this card belongs to).
+	hostUid, _ := queryHostUid(db)
+
 	// Read parallel group info from META_DATA.
 	groupInfo, xpToGroupName, err := readGroupInfo(db, rankStr, outputDir)
 	if err != nil {
@@ -92,12 +95,16 @@ func ProcessDatabase(dbFilePath string, outputDir string) error {
 	}
 	metrics.StepIndex = mergedStep.ID
 	metrics.StepDuration = mergedStep.EndNs - mergedStep.StartNs
+	metrics.HostUid = hostUid
 
 	// Write CSV.
 	csvPath := filepath.Join(outputDir, "op_metric", "global_rank_"+rankStr+".csv")
 	if err := WriteResultsToCSV(csvPath, []PerformanceMetrics{metrics}); err != nil {
 		return fmt.Errorf("write CSV %s: %w", csvPath, err)
 	}
+
+	// Write host_info_{N}.json (rank → hostUid mapping for slow-CPU detection).
+	writeHostInfo(outputDir, rankStr, hostUid)
 
 	_ = groupInfo
 	return nil
@@ -146,6 +153,43 @@ func readGroupInfo(db *sql.DB, rankStr, outputDir string) (map[string]interface{
 		}
 	}
 	return data, xpToGroupName, nil
+}
+
+// queryHostUid reads the hostUid column from the HOST_INFO table. There is
+// theoretically only one record per device database. Returns empty string if
+// the table does not exist or query fails.
+func queryHostUid(db *sql.DB) (string, error) {
+	exists, _ := tableExists(db, "HOST_INFO")
+	if !exists {
+		return "", fmt.Errorf("HOST_INFO table not found")
+	}
+	var hostUid string
+	err := db.QueryRow("SELECT hostUid FROM HOST_INFO LIMIT 1").Scan(&hostUid)
+	if err != nil {
+		return "", err
+	}
+	return hostUid, nil
+}
+
+// writeHostInfo writes a per-rank JSON file containing the hostUid for slow-CPU
+// detection grouping. Uses sync.Once to avoid duplicate writes.
+func writeHostInfo(outputDir, rankStr, hostUid string) {
+	outDir := filepath.Join(outputDir, "op_metric")
+	os.MkdirAll(outDir, 0755)
+	jsonPath := filepath.Join(outDir, "host_info_"+rankStr+".json")
+
+	fileWriteOnceMu.Lock()
+	if fileWriteOnce[jsonPath] == nil {
+		fileWriteOnce[jsonPath] = &sync.Once{}
+	}
+	once := fileWriteOnce[jsonPath]
+	fileWriteOnceMu.Unlock()
+
+	once.Do(func() {
+		payload := map[string]string{"rank": rankStr, "hostUid": hostUid}
+		pretty, _ := json.MarshalIndent(payload, "", "  ")
+		os.WriteFile(jsonPath, pretty, 0644)
+	})
 }
 
 // ---------------------------------------------------------------------------

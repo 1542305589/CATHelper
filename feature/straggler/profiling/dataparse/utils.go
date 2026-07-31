@@ -35,6 +35,7 @@ type CommunicationOp struct {
 
 // PerformanceMetrics collects all metrics for one device snapshot.
 type PerformanceMetrics struct {
+	HostUid      string
 	StepIndex    int
 	StepDuration int
 	ZPDevice     int
