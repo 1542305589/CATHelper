@@ -4,6 +4,41 @@
 
 ---
 
+## v0.2.1
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.1 |
+| 发布时间 | 2026-07-31 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器 |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**，合入 snapshot 统一生产重构）+ 上层特性 Elastic EP v0.1.0 + Straggler 慢节点检测 v0.2.0 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.0 基础上，合入 `feature/catmonitor` 分支，对底座 CATMonitor 进行 snapshot 统一生产重构 + feature-scoped 采集增强。**底座 CATMonitor 版本号维持 v0.3.3 不变**，仅刷新底座文档内容以反映重构。
+
+### 主要变更
+
+- **Snapshot 统一生产**：新增 `features/snapshot` 包，daemon 作为唯一 snapshot 生产者，产出 per-component `snapshot_<comp>.json` + 全局 `snapshot.json`（health/collectors/intervals/system_specs）；web/dfee 转为**只读消费者**，不再各自采集，避免重复跑硬件。
+- **Feature-scoped 采集**：`features` 配置 + `internal/metrics` 的 `SetFeatureScope` 白名单机制；非空时只采各 feature `metrics.yaml` 并集内且 `priority ≥ min_priority` 的指标，`AnyWanted` 跳过全 out-of-scope 子方法；并派生 per-component cadence `C_comp = min(feature interval)`、`C_global = min(C_comp)`。
+- **dfee 独立二进制化**：`features/dfee` 转为 `package main`（`catmonitor-dfee`，:9528），补全 69 项 `metrics.yaml`，只读消费 snapshot。
+- **web 瘦身**：删除 `DataCollector`/`config.go`/`config.yaml`，改 `-addr`/`-snapshot-dir` flag，REST API 只读化（删 `/api/refresh`、`POST /api/config`），`/dfee/` 路由转独立二进制。
+- **Makefile**：`make all/web/dfee` + CANN DCMI 头自动探测（`-tags dcmi`）。
+
+### 测试
+
+- `go vet`/`go build`/`go test` 全绿；三二进制（daemon/web/dfee）独立构建通过。
+- 系统测试（无 NPU/GPU 环境）：version/list/collect/health + daemon:9100/metrics（Prometheus 格式）+ web:9527（/api/snapshot 等）+ dfee:9528（/dfee/ + /api/dfee）+ 无硬件采集器优雅降级，全部通过。详见 `CATMonitor/docs/test_report.md`。
+- 已知限制：5 个新增文件存在 gofmt 格式瑕疵（struct 字段对齐，非阻塞）；`-race` 需 cgo 未覆盖。
+
+### 文档
+
+刷新底座 5 个文档反映重构：`CATMonitor/README.md`、`SPEC.md`、`DESIGN.md`、`docs/User_Manual.md`、`docs/CATMonitor_indi_list.md`（底座版本号维持 v0.3.3，indi_list 更新日期 2026-07-31）。
+
+---
+
 ## v0.2.0
 
 | 项目 | 说明 |
