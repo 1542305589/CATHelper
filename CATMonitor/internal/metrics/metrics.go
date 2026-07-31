@@ -26,6 +26,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -202,6 +203,37 @@ func mergeSpec(base *MetricSpec, ov MetricSpec) {
 // Default returns the loaded Catalog (nil if Init has not run). nil is treated as
 // "no selection" (default-allow everything).
 func Default() *Catalog { return inst }
+
+// ComponentIntervals reads a metrics catalog yaml and returns the per-component
+// interval declared in it, WITHOUT merging into the running singleton. This is
+// used by the daemon to derive the collection cadence (C_comp) from each
+// feature's metrics.yaml: take the min across features per component. (The
+// priority/selectivity merge via LoadModuleOverride is a separate concern — it
+// is last-wins, not min, so intervals must be parsed independently.) An absent
+// file or absent/invalid interval for a component yields no entry (the caller
+// falls back to catmonitor.yaml collectors.interval).
+func ComponentIntervals(path string) (map[string]time.Duration, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil // absent feature metrics.yaml -> no intervals
+	}
+	var f CatalogFile
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("metrics: parse intervals %s: %w", path, err)
+	}
+	out := map[string]time.Duration{}
+	for _, cc := range f.Components {
+		if cc.Interval == "" {
+			continue
+		}
+		d, err := time.ParseDuration(cc.Interval)
+		if err != nil || d <= 0 {
+			continue
+		}
+		out[cc.Component] = d
+	}
+	return out, nil
+}
 
 // Selected reports whether a metric should be collected under the resolved
 // catalog. Default-allow when the catalog is unset or the metric is unknown to

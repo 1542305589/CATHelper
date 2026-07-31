@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/collector"
 )
@@ -143,6 +144,48 @@ func TestModuleOverrideOptOut(t *testing.T) {
 	}
 	if Default().Selected("cpu", "usage") {
 		t.Error("module override should demote usage to Low -> not selected")
+	}
+}
+
+// TestComponentIntervals parses a metrics.yaml for its per-component intervals
+// WITHOUT touching the running catalog singleton (used by the daemon to derive
+// C_comp as the min across features).
+func TestComponentIntervals(t *testing.T) {
+	body := `components:
+  - component: cpu
+    interval: 1s
+    metrics:
+      - name: usage
+        priority: High
+  - component: npu
+    interval: 500ms
+    metrics: []
+  - component: memory
+    metrics:                 # no interval -> skipped
+      - name: usage
+        priority: High
+  - component: disk
+    interval: not-a-duration # invalid -> skipped
+    metrics: []
+`
+	p := writeFile(t, "intervals.yaml", body)
+	got, err := ComponentIntervals(p)
+	if err != nil {
+		t.Fatalf("ComponentIntervals: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d components, want 2 (cpu,npu): %+v", len(got), got)
+	}
+	if got["cpu"] != 1*time.Second {
+		t.Errorf("cpu=%v want 1s", got["cpu"])
+	}
+	if got["npu"] != 500*time.Millisecond {
+		t.Errorf("npu=%v want 500ms", got["npu"])
+	}
+	for _, absent := range []string{"memory", "disk"} {
+		if _, ok := got[absent]; ok {
+			t.Errorf("%s should be absent (no/invalid interval)", absent)
+		}
 	}
 }
 
