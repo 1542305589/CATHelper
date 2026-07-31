@@ -16,7 +16,7 @@ import (
 //  2. Detect NPU Bubble (fixed threshold).
 //  3. Detect slow compute (homogeneous clustering on primary group).
 //  4. Detect slow communication (homogeneous clustering per parallel domain).
-//  5. Detect slow CPU (homogeneous clustering with 4-card trim preprocessing).
+//  5. Detect slow CPU (homogeneous clustering with hostUid-based trim preprocessing).
 func DelimitDetection(
 	stepData map[string]map[int]float64,
 	parallels map[string][][]int,
@@ -47,7 +47,8 @@ func DelimitDetection(
 
 	// 5. Slow CPU detection.
 	if hostData, ok := stepData[zpHostDataColumn]; ok {
-		getSlowHostRanksByHomogenize(validRanks, hostData, localResult)
+		hostUidMapping := GetHostUidMapping(config.FilePath, validRanks)
+		getSlowHostRanksByHomogenize(validRanks, hostData, localResult, hostUidMapping)
 	}
 
 	return localResult

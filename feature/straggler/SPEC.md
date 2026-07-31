@@ -80,7 +80,7 @@ slowNodeDetection path=/data/dir [degradation=0.3]
 |------|------|------|------|------|---------|
 | 慢计算 | `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | max / min | CalThreshold | 单卡 |
 | 慢通信 | `comm` | `{domain}_Duration`（各域独立） | max | CommThreshold | 卡组 |
-| 慢CPU | `cpu` | ZP_Host（4卡截尾均值预处理） | max | CalThreshold | 单卡 |
+| 慢CPU | `cpu` | ZP_Host（按 hostUid 截尾均值预处理） | max | CalThreshold | 单卡 |
 | NPU Bubble | `npu_bubble` | ZP_Bubble | < 5000ns | 固定 | 单卡 |
 
 ### 检测方法
@@ -89,7 +89,7 @@ slowNodeDetection path=/data/dir [degradation=0.3]
 
 **慢通信**：对每个非 PP/非 embd 并行域，每组取通信时间最小的卡为代表，按 PP stage 分桶后均质化聚类，异常代表映射回完整组。
 
-**慢CPU**：按 4 卡一台机器的假设，每组计算截尾均值（去 min/max 后平均其余值），覆盖原始值后均质化聚类，消除机器内差异暴露机器间差异。
+**慢CPU**：从每张卡的 `.db` 文件读取 `HOST_INFO.hostUid`，将相同 hostUid 的卡视为同一物理节点。每组节点内计算截尾均值（去 min/max 后平均其余值），覆盖原始值后均质化聚类，消除节点内差异暴露节点间差异。
 
 **NPU Bubble**：固定阈值 `< 5000 ns`（5µs），直接判定。
 
