@@ -259,3 +259,27 @@ func sortedKeys(set map[int]bool) []int {
 	sort.Ints(keys)
 	return keys
 }
+
+// GetHostUidMapping reads all host_info_*.json files from op_metric/ and
+// returns a mapping from rank ID to hostUid string. Ranks without a hostUid
+// (e.g. HOST_INFO table missing in the source .db) are not included in the map.
+func GetHostUidMapping(jobPath string, ranks []int) map[int]string {
+	metricDir := filepath.Join(jobPath, "op_metric")
+	mapping := make(map[int]string)
+
+	for _, rank := range ranks {
+		jsonPath := filepath.Join(metricDir, "host_info_"+strconv.Itoa(rank)+".json")
+		raw, err := os.ReadFile(jsonPath)
+		if err != nil {
+			continue
+		}
+		var data map[string]string
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if uid, ok := data["hostUid"]; ok && uid != "" {
+			mapping[rank] = uid
+		}
+	}
+	return mapping
+}

@@ -261,8 +261,9 @@ func HomogenizationForSlowCommunication(
 // ---------------------------------------------------------------------------
 
 // getSlowHostRanksByHomogenize detects CPU-straggler ranks using ZP_Host data
-// preprocessed with 4-card trimmed means.
-func getSlowHostRanksByHomogenize(npus []int, detectionData map[int]float64, localResult config.DegradationData) []int {
+// preprocessed with host-based trimmed means (cards on the same physical node
+// are grouped by hostUid, intra-node values are smoothed via trimmed mean).
+func getSlowHostRanksByHomogenize(npus []int, detectionData map[int]float64, localResult config.DegradationData, rankToHostUid map[int]string) []int {
 	var haveDataRanks []int
 	var ranksData []float64
 
@@ -277,8 +278,8 @@ func getSlowHostRanksByHomogenize(npus []int, detectionData map[int]float64, loc
 		return nil
 	}
 
-	// Preprocess: 4-card trimmed mean.
-	processCPUData(ranksData)
+	// Preprocess: group by hostUid, trimmed mean per host.
+	smoothByHostUid(ranksData, haveDataRanks, rankToHostUid)
 
 	abnormalRanks, degradations := HomogenizationComparisonFunc(haveDataRanks, ranksData, config.CalThreshold, "max")
 	for i, rank := range abnormalRanks {
@@ -287,22 +288,35 @@ func getSlowHostRanksByHomogenize(npus []int, detectionData map[int]float64, loc
 	return abnormalRanks
 }
 
-// processCPUData replaces each 4-card group's values with the trimmed mean
-// (discard min and max, average the rest). This smooths intra-machine variance.
-func processCPUData(ranksData []float64) {
-	const groupSize = 4
-	i := 0
-	for i < len(ranksData) {
-		end := i + groupSize
-		if end > len(ranksData) {
-			end = len(ranksData)
+// smoothByHostUid groups cards by their hostUid (same physical machine) and
+// replaces each card's ZP_Host value with the trimmed mean of its host group.
+// Cards without a hostUid mapping keep their original values unchanged.
+// The trimmed mean discards the min and max value within the group.
+func smoothByHostUid(ranksData []float64, ranks []int, rankToHostUid map[int]string) {
+	// Group indices by hostUid.
+	hostGroups := make(map[string][]int)
+	for i, rank := range ranks {
+		uid, ok := rankToHostUid[rank]
+		if !ok || uid == "" {
+			continue // no hostUid: leave value unchanged
 		}
-		group := ranksData[i:end]
+		hostGroups[uid] = append(hostGroups[uid], i)
+	}
+
+	for _, indices := range hostGroups {
+		if len(indices) <= 1 {
+			continue // single card on this host: no peer smoothing needed
+		}
+
+		vals := make([]float64, len(indices))
+		for i, idx := range indices {
+			vals[i] = ranksData[idx]
+		}
 
 		var mean float64
-		if len(group) > 2 {
-			sorted := make([]float64, len(group))
-			copy(sorted, group)
+		if len(vals) > 2 {
+			sorted := make([]float64, len(vals))
+			copy(sorted, vals)
 			sort.Float64s(sorted)
 			trimmed := sorted[1 : len(sorted)-1]
 			var sum float64
@@ -312,16 +326,15 @@ func processCPUData(ranksData []float64) {
 			mean = sum / float64(len(trimmed))
 		} else {
 			var sum float64
-			for _, v := range group {
+			for _, v := range vals {
 				sum += v
 			}
-			mean = sum / float64(len(group))
+			mean = sum / float64(len(vals))
 		}
 
-		for k := i; k < end; k++ {
-			ranksData[k] = mean
+		for _, idx := range indices {
+			ranksData[idx] = mean
 		}
-		i = end
 	}
 }
 

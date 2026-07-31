@@ -27,6 +27,8 @@ func GetStepTimesFromTASK(db *sql.DB) ([]StepTime, error)
 func TimeDiffForStep(db, xpToGroupName, stepTime) (PerformanceMetrics, error)
 func GetAvgKernelTaskDuration(db *sql.DB, stepTime StepTime) (int, error)
 func WriteResultsToCSV(outputFile string, pMS []PerformanceMetrics) error
+func queryHostUid(db *sql.DB) (string, error)                // 查询 HOST_INFO.hostUid
+func writeHostInfo(outputDir, rankStr, hostUid string)       // 写入 host_info_{N}.json
 func CalculateMean(values []int) (int, error)
 func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err error)
 ```
@@ -35,10 +37,12 @@ func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err erro
 1. `sql.Open("sqlite", path+"?mode=ro")` + WAL 模式
 2. 创建 3 个索引（IF NOT EXISTS，幂等）
 3. `extractGlobalRankFromFilename` → rank 字符串
-4. `readGroupInfo` → META_DATA → group_info JSON（sync.Once 写入）+ xpToGroupName 映射
-5. `GetAllStepTimes` → 合并为单 step（minStart → maxEnd）
-6. `TimeDiffForStep` → 计算所有指标
-7. `WriteResultsToCSV` → 单行 CSV
+4. `queryHostUid` → 查询 `SELECT hostUid FROM HOST_INFO LIMIT 1`（识别卡所属物理节点）
+5. `readGroupInfo` → META_DATA → group_info JSON（sync.Once 写入）+ xpToGroupName 映射
+6. `GetAllStepTimes` → 合并为单 step（minStart → maxEnd）
+7. `TimeDiffForStep` → 计算所有指标
+8. `WriteResultsToCSV` → 单行 CSV
+9. `writeHostInfo` → 写入 `op_metric/host_info_{N}.json`（rank → hostUid 映射）
 
 **Step 时间降级链**：
 1. `STEP_TIME` 表 → `SELECT id, startNs, endNs ORDER BY id DESC` → 反转升序
@@ -71,11 +75,13 @@ var fileWriteOnceMu sync.Mutex             // 保护 fileWriteOnce map
 - DB 并发：`make(chan struct{}, 4)` 信号量
 - CSV：全局 Mutex（每 goroutine 写不同文件，但保留锁保安全）
 - group_info JSON：`sync.Once` 每文件名（所有卡拓扑相同，只需写一次）
+- host_info JSON：`sync.Once` 每文件名（同机卡 hostUid 相同，只需写一次）
 
 ### nodelevel
 ```go
 func GetCurDetectionInfo(jobPath string) (parallels map[string][][]int, validRanks []int)
 func GetCurJobLastStepData(ranks []int) map[string]map[int]float64
+func GetHostUidMapping(jobPath string, ranks []int) map[int]string  // 读取 host_info_*.json
 func DelimitDetection(StepData map[string]map[int]float64, parallels map[string][][]int, validRanks []int) config.DegradationData
 func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, [][]int)
 ```
@@ -116,13 +122,17 @@ PP=1 时所有代表卡在同一桶，算法天然降级为普通聚类。
 #### 慢CPU（getSlowHostRanksByHomogenize）
 ```
 1. 收集所有 validRanks 的 ZP_Host 值
-2. processCPUData(values) — 原地修改：
-   每 4 个一组：
-     > 2 个 → 去掉 min/max，计算剩余均值
+2. smoothByHostUid(values, ranks, rankToHostUid) — 原地修改：
+   从 host_info_{N}.json 读取 hostUid 映射（数据解析阶段从 HOST_INFO 表查询）
+   相同 hostUid 的卡归为同一物理节点：
+     > 2 个 → 去掉节点内 min/max，计算剩余均值
      ≤ 2 个 → 普通均值
-   用均值覆盖组内所有值
+   用均值覆盖节点内所有卡的值
+   无 hostUid 的卡保持原始值不变
 3. 均质化聚类（方向 "max"）→ AddSingle("cpu", rank, degradation)
 ```
+
+注：旧版本硬编码每 4 个连续 rank 为一台机器，现已改为从 profiler 数据库 `HOST_INFO` 表读取实际 `hostUid` 进行分组。若 `HOST_INFO` 表不存在则对应卡跳过预处理。
 
 #### NPU Bubble（detectionZpBubbleData）
 ```go
@@ -215,6 +225,7 @@ type CommunicationOp struct {
 }
 
 type PerformanceMetrics struct {
+    HostUid      string         // 物理节点标识（从 HOST_INFO 表读取）
     StepIndex    int            // 合并后 = 0
     StepDuration int            // maxEndNs - minStartNs
     ZPDevice     int            // 非通信时间 = stepDuration - ZP_Duration（钳位到 0）
@@ -236,6 +247,9 @@ type HostOp struct  { StartNs, EndNs int }
 ## 关键 SQL
 
 ```sql
+-- 物理节点标识
+SELECT hostUid FROM HOST_INFO LIMIT 1
+
 -- 并行域配置
 SELECT value FROM META_DATA WHERE name = 'parallel_group_info'
 
