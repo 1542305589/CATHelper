@@ -17,6 +17,7 @@ import (
 	"github.com/Computing-Availability-Tools/CATMonitor/features/exporter"
 	"github.com/Computing-Availability-Tools/CATMonitor/features/faultsub"
 	"github.com/Computing-Availability-Tools/CATMonitor/features/health"
+	"github.com/Computing-Availability-Tools/CATMonitor/features/snapshot"
 	"github.com/Computing-Availability-Tools/CATMonitor/features/stragglerout"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/collector"
 	"github.com/Computing-Availability-Tools/CATMonitor/internal/config"
@@ -103,6 +104,21 @@ func loadConfig() *config.Config {
 		slog.Error("failed to load config, using defaults", "error", err)
 		return config.Default()
 	}
+	// Load each enabled feature's metrics.yaml override (priority/selectivity):
+	// unions the metrics each feature needs so they survive metrics.Filter.
+	// Intervals are parsed separately in runDaemon (LoadModuleOverride is
+	// last-wins, not min).
+	featurePaths := make([]string, 0, len(cfg.Features))
+	for _, f := range cfg.Features {
+		p := filepath.Join("features", f, "metrics.yaml")
+		featurePaths = append(featurePaths, p)
+		if err := metrics.LoadModuleOverride(p); err != nil {
+			slog.Error("feature metrics override failed", "feature", f, "path", p, "error", err)
+		}
+	}
+	// Scoped collection: when features non-empty, only metrics listed by some
+	// enabled feature (AND priority >= min_priority) are collected. Empty -> unscoped.
+	metrics.SetFeatureScope(featurePaths)
 	return cfg
 }
 
@@ -137,6 +153,35 @@ func runDaemon() {
 		}
 	}
 
+	// Derive per-component collection cadence (C_comp) from enabled features:
+	// for each component, take the min interval declared across the features'
+	// metrics.yaml; components no feature declares keep catmonitor.yaml's
+	// collectors.<name>.interval. This makes feature interval the collection
+	// cadence (collection == per-component snapshot refresh). Empty features
+	// list => catmonitor.yaml collectors.interval throughout.
+	if len(cfg.Features) > 0 {
+		declared := map[string]time.Duration{} // comp -> min across features
+		for _, f := range cfg.Features {
+			fi, _ := metrics.ComponentIntervals(filepath.Join("features", f, "metrics.yaml"))
+			for comp, dur := range fi {
+				if prev, ok := declared[comp]; !ok || dur < prev {
+					declared[comp] = dur
+				}
+			}
+		}
+		for name, cc := range collectorCfgs {
+			// Collector name == component (1:1); override interval where a
+			// feature declared one.
+			if dur, ok := declared[name]; ok {
+				cc.Interval = dur
+				collectorCfgs[name] = cc
+			}
+		}
+		if len(declared) > 0 {
+			logger.Info("derived per-component cadence from features", "features", cfg.Features, "declared_components", len(declared))
+		}
+	}
+
 	// Optionally wrap the storage chain with the fault-subscription tap.
 	// When faultsub is disabled, sink stays as the exporter's CachingStorage
 	// and daemon behavior is unchanged.
@@ -166,6 +211,69 @@ func runDaemon() {
 		go faultsub.ServeAPI(ctx, cfg.FaultSub.RestAddr, disp, fstore, logger)
 		sink = fstore
 		logger.Info("faultsub enabled", "rest_addr", cfg.FaultSub.RestAddr)
+	}
+
+	// Snapshot production (per-component files snapshot_<comp>.json + one
+	// global snapshot.json), consumed by read-only features (web/dfee). Opt-in:
+	// when disabled the daemon writes no snapshot files and behaves as before.
+	// When enabled the daemon is the sole snapshot producer; web must run as a
+	// read-only consumer (no self-collection).
+	if cfg.Snapshot.Enabled {
+		pcw := snapshot.NewPerCompWriter(sink, cfg.Snapshot.Dir, 60, logger)
+		sink = pcw // scheduler writes through the per-component snapshot writer
+
+		// Build collector metadata + per-component intervals for the global snapshot.
+		regAll := collector.DefaultRegistry.All()
+		collectors := make([]snapshot.CollectorInfo, 0, len(regAll))
+		intervals := make(map[string]int, len(regAll))
+		for _, c := range regAll {
+			interval := c.DefaultInterval()
+			if cc, ok := collectorCfgs[c.Name()]; ok {
+				interval = cc.Interval
+			}
+			collectors = append(collectors, snapshot.CollectorInfo{
+				Name:      c.Name(),
+				Component: c.Component(),
+				Priority:  c.Priority().String(),
+				Interval:  interval.String(),
+				Enabled:   c.DefaultEnabled(),
+			})
+			intervals[c.Component()] = int(interval / time.Millisecond)
+		}
+		// Global cadence C_global: min over per-component cadences.
+		minMS := 0
+		for _, ms := range intervals {
+			if minMS == 0 || ms < minMS {
+				minMS = ms
+			}
+		}
+		refresh := time.Duration(minMS) * time.Millisecond
+		gw := snapshot.NewGlobalWriter(cacheStore, cfg.Snapshot.Dir, refresh, logger)
+		gw.SetCollectors(collectors)
+		gw.SetIntervals(intervals)
+		go gw.Run(ctx)
+
+		// One-shot hardware identity at startup: system specs -> global writer,
+		// per-component specs (gpu_info/npu_info/...) -> per-comp writer.
+		go func() {
+			specs := snapshot.CollectHWSpecs()
+			var sys []collector.Metric
+			byComp := map[string][]collector.Metric{}
+			for _, m := range specs {
+				if m.Component == "system" {
+					sys = append(sys, m)
+				} else {
+					byComp[m.Component] = append(byComp[m.Component], m)
+				}
+			}
+			gw.SetSystemSpecs(sys)
+			for comp, ms := range byComp {
+				pcw.SetCompSpecs(comp, ms)
+			}
+			logger.Info("hardware specs distributed to snapshot writers", "count", len(specs))
+		}()
+
+		logger.Info("snapshot production enabled", "dir", cfg.Snapshot.Dir, "refresh", refresh)
 	}
 
 	scheduler := collector.NewScheduler(collector.DefaultRegistry, sink, logger)
