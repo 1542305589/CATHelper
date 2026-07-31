@@ -4,6 +4,38 @@
 
 ---
 
+## v0.2.2
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.2 |
+| 发布时间 | 2026-07-31 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器 |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**）+ 上层特性 Elastic EP v0.1.0 + Straggler 慢节点检测 v0.2.1 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.1 基础上，合入 `straggler-detection` 分支，修复 Straggler 第二道（Profiler）慢 CPU 检测的节点分组逻辑：由硬编码"每 4 张连续 rank 卡为一台机器"改为从 Profiler `.db` 的 `HOST_INFO` 表读取 `hostUid` 进行动态分组。**底座 CATMonitor 与 EEP 版本号不变**，仅 Straggler 由 v0.2.0 升至 v0.2.1。
+
+### 主要变更
+
+- **慢 CPU 检测动态分组**：`profiling/dataparse` 新增 `queryHostUid`（`SELECT hostUid FROM HOST_INFO LIMIT 1`）识别每张卡所属物理节点，新增 `writeHostInfo` 写入 `op_metric/host_info_{N}.json`（rank→hostUid 映射），`PerformanceMetrics` 增加 `HostUid` 字段；`profiling/detector` 新增 `GetHostUidMapping` 读取映射，`getSlowHostRanksByHomogenize` 用 `smoothByHostUid` 替换 `processCPUData`——相同 hostUid 的卡归为同节点，节点内去 min/max 截尾均值预处理后均质化聚类（方向 max），无 hostUid 的卡保持原值不变。
+- **消除硬编码假设**：旧版假定每 4 张连续 rank 卡属同一物理机，在非 4 卡/节点拓扑下误分组；新版按真实 hostUid 分组，适配任意节点卡数。
+- **文档同步**：`feature/straggler/DESIGN.md`、`SPEC.md` 更新数据解析流程、慢 CPU 算法说明与关键 SQL；根目录 `README.md`/`SPEC.md`/`User_Manual.md` 同步慢 CPU 分组描述。
+
+### 测试
+
+- `go build`/`go vet`/`go test` 全绿；二进制构建通过；gofmt 无问题（合并提交已验证）。
+
+### 已知限制
+
+1. `HOST_INFO` 表或 `hostUid` 列缺失的 `.db`，对应卡跳过节点预处理，保持原始 ZP_Host 值参与聚类（降级兼容）。
+2. 未推送到远端：本次发布暂在本地完成。
+
+---
+
 ## v0.2.1
 
 | 项目 | 说明 |

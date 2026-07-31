@@ -6,7 +6,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| 版本号 | v0.2.1 |
+| 版本号 | v0.2.2 |
 | 发布时间 | 2026-07-31 |
 | 许可证 | Apache-2.0 |
 
@@ -42,7 +42,7 @@ EEP 的故障信息输入已与 CATMonitor 底座有机整合：通过 `faultsub
 
 ### 上层特性 — [Straggler 慢节点检测](feature/straggler/)
 
-慢节点（慢卡）检测特性。两道防线：第一道（KPI 资源指标检测）基于 15 天历史基线 + 1h 检测窗，时间×空间双维 Z-score + 二维交叉验证 + 根因定界；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU/NPU Bubble。详见 [feature/straggler/README.md](feature/straggler/README.md)。
+慢节点（慢卡）检测特性。两道防线：第一道（KPI 资源指标检测）基于 15 天历史基线 + 1h 检测窗，时间×空间双维 Z-score + 二维交叉验证 + 根因定界；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble。详见 [feature/straggler/README.md](feature/straggler/README.md)。
 
 straggler 第一道已与 CATMonitor 底座有机整合：CATMonitor 通过 opt-in 的 `stragglerout` 模块输出专用 KPI 时序文件（替代 straggler 自带 `kpi_collect.sh`），straggler CLI 读该文件检测；命中慢卡后经 `faultsub` 回注 `straggler_detected` 事件，由 faultsub 推送给订阅者（EEP/运维）触发卡隔离/排查。第二道（Profiler）保留独立。整合设计见 [straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)。
 

@@ -323,10 +323,12 @@ KPI 未发现异常但怀疑性能问题时，启用 Profiler：
 
 ```bash
 ./slowNodeDetection path=/data/profiler_output degradation=0.3
-# 读 ascend_pytorch_profiler_*.db，检测慢计算/慢通信/慢CPU/NPU Bubble
+# 读 ascend_pytorch_profiler_*.db，检测慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble
 ```
 
 可与第一道联合：`--kpi-jsonl-dir=... path=/data/profiler_output`（先 KPI，未命中则 fallback Profiler）。
+
+> **慢CPU 检测机制**：从每张卡的 `.db` 文件 `HOST_INFO` 表读取 `hostUid`，将相同 hostUid 的卡归为同一物理节点，节点内截尾均值（去 min/max）预处理后均质化聚类，消除节点内差异暴露节点间差异；`HOST_INFO` 表缺失的卡跳过预处理。详见 [feature/straggler/DESIGN.md](feature/straggler/DESIGN.md)。
 
 ### 6.4 回注 faultsub 与闭环
 
@@ -434,4 +436,4 @@ kill -9 <worker_pid>
 
 ---
 
-*文档版本：v2.0 · 对应 CATHelper v0.2.0*
+*文档版本：v2.0 · 对应 CATHelper v0.2.2*

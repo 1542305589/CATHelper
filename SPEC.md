@@ -37,16 +37,16 @@ CATHelper 采用"**底座 + 上层特性**"的分层架构：
 ```
 
 - **底座（CATMonitor）**：成熟的全栈指标采集守护进程，提供故障信息的采集、判定与对外推送能力，供上层特性消费。
-- **上层特性**：基于底座的指标/故障信息，面向特定高可用场景实现容错恢复与性能劣化检测逻辑。当前已交付 **EEP**（推理卡级弹性容错，v0.1.0）与 **Straggler 慢节点检测**（v0.2.0）。
+- **上层特性**：基于底座的指标/故障信息，面向特定高可用场景实现容错恢复与性能劣化检测逻辑。当前已交付 **EEP**（推理卡级弹性容错，v0.1.0）与 **Straggler 慢节点检测**（v0.2.1）。
 
 ### 1.3 版本
 
 | 项目 | 说明 |
 |------|------|
-| 当前版本 | v0.2.1 |
+| 当前版本 | v0.2.2 |
 | 底座版本 | CATMonitor v0.3.3 |
 | EEP 版本 | Elastic EP v0.1.0 |
-| Straggler 版本 | Straggler 慢节点检测 v0.2.0 |
+| Straggler 版本 | Straggler 慢节点检测 v0.2.1 |
 | 平台支持 | Linux (x86_64)，NPU 容错/检测特性需华为昇腾 A3 服务器 |
 | 许可证 | Apache-2.0 |
 
@@ -173,7 +173,7 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 | 防线 | 输入 | 方法 | 输出 |
 |------|------|------|------|
 | 第一道（KPI 资源检测） | NPU KPI 时序（15 天基线 + 1h 检测窗） | 时间×空间双维 Z-score + 二维交叉验证 + 根因定界 | JSON + 文本报告 |
-| 第二道（Profiler 检测） | Ascend PyTorch Profiler `.db`（按需） | 均质化聚类：慢计算/慢通信/慢CPU/NPU Bubble | JSON + 文本报告 |
+| 第二道（Profiler 检测） | Ascend PyTorch Profiler `.db`（按需） | 均质化聚类：慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble | JSON + 文本报告 |
 
 ### 4.2 检测指标与底座覆盖
 
@@ -205,7 +205,7 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 |------|------|------|
 | CATMonitor 底座 | 已交付 (v0.3.3) | 全栈采集 + 健康度 + Prometheus + 故障订阅 + KPI 输出 |
 | Elastic EP | 已交付 (v0.1.0) | 推理卡级弹性容错，已与 CATMonitor 整合 |
-| Straggler 慢节点检测 | 已交付 (v0.2.0) | 两道防线检测，第一道接入 CATMonitor + 回注 faultsub |
+| Straggler 慢节点检测 | 已交付 (v0.2.1) | 两道防线检测，第一道接入 CATMonitor + 回注 faultsub |
 | SGLang 支持 | 规划中 | EEP 后续计划支持 SGLang 框架 |
 | 真机验证 | 进行中 | NPU 真实采集 / Profiler 解析 / 端到端链路在昇腾 A3 复测 |
 
@@ -223,4 +223,4 @@ CATHelper 设计为"方便被集成"：
 
 ---
 
-*文档版本：v2.0 · 对应 CATHelper v0.2.0*
+*文档版本：v2.0 · 对应 CATHelper v0.2.2*
