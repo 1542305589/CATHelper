@@ -4,21 +4,18 @@
 
 ### 1.1 设计目标
 
-构建一个纯 ASGI 中间件包 `vllm_anomaly_middleware`，通过 vLLM 的
-`--middleware` 单标志部署：
+构建一个纯 ASGI（Asynchronous Server Gateway Interface） 中间件包 `vllm_anomaly_middleware`，通过 vLLM 的
+`--middleware` 插件部署：
 
 ```
 vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
 ```
 
-中间件对客户端**透明**：拦截推理请求、强制采集 logprobs、在后台运行
-侧信道异常检测、将响应**精确还原**为客户端原始请求所期望的形态，并通过
-独立的 Prometheus 端点暴露检测结果。客户端完全感知不到中间件的存在。
+中间件对客户端**透明**：拦截推理请求、强制采集 logprobs和token_id、后台运行算法异常检测、不影响客户端请求响应状态返回、并通过独立 Prometheus 端点暴露检测结果。客户端完全感知不到中间件的存在。
 
 ### 1.2 设计原则
 
-- **透明优先**：注入与响应恢复无条件发生；检测是否执行由采样率决定，
-  但不影响客户端看到的响应。
+- **透明优先**：`enabled=True` 和采样共同作用，决定请求是否注入、响应恢复和检测。但不影响客户端看到的响应。
 - **流式不缓冲**：采用纯 ASGI（而非 Starlette `BaseHTTPMiddleware`），
   SSE 流增量转发，避免缓冲破坏流式语义。
 - **检测不阻塞客户端**：检测在响应全部发送完毕后以 fire-and-forget
@@ -31,8 +28,6 @@ vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
 ### 1.3 不做的事
 
 - 不改写检测算法本体、不新增异常类型。
-- 不捆绑 tokenizer 全量解码 `/v1/completions` 文本（契约是"不泄漏
-  `token_id:` 前缀"，以 nulling 满足；可后续插件式扩展）。
 - 不替换或干扰 vLLM 自带 `/metrics`。
 - 不支持非 vLLM 的 ASGI 服务器（代码可移植，但仅针对 vLLM 请求/响应形态测试）。
 
@@ -59,7 +54,7 @@ vllm_anomaly_middleware/
 ├── metrics.py             # 独立 CollectorRegistry + 指标记录/渲染
 ├── extractor.py           # 抽取/恢复（流式与非流式）+ SSEStreamProcessor
 ├── detector_runner.py     # 检测运行器（线程池+锁+懒构造+调度）
-└── response_anomaly/      # vendored 检测算法（含 configs/ 与 token2category/）
+└── response_anomaly/      # 检测算法（含 configs/ 与 token2category/）
     ├── detector.py
     ├── __init__.py
     ├── configs/{config.yaml, mtype_config.json}
@@ -84,8 +79,7 @@ vllm_anomaly_middleware/
 ### 3.1 请求拦截与参数注入
 
 **拦截范围**：仅 `POST /v1/chat/completions` 与 `POST /v1/completions`。
-其余请求（任意方法/路径）原样转发——同一 scope/receive/send，不读不改 body。
-目标路径上的非 POST 方法也透传。
+所有其他 HTTP 请求（任意方法或路径）和目标路径上的非 POST 方法均原样转发给下游应用（保持原先vllm处理方式一致）。
 
 **强制注入**（覆盖请求体以加上检测所需参数）：
 - chat：`logprobs=true`、`top_logprobs=<N>`、`return_tokens_as_token_ids=true`
@@ -94,7 +88,9 @@ vllm_anomaly_middleware/
 注入前**快照**客户端原始 logprobs 相关参数，供后续恢复。注入后**修正请求
 `Content-Length`** 以匹配修改后的 body 长度（否则下游解析长度不匹配导致截断/挂起）。
 
-**关键不变量**：`top_logprobs` 跨请求必须恒定（默认 20，可配置 1..20）。
+若客户端原始
+
+**关键不变量**：`top_logprobs` 跨请求必须恒定（默认 20，可配置 1-20）。
 原因见 §6.2（检测器 `topk` 首次锁定后不复位）。
 
 ### 3.2 响应抽取与恢复
@@ -110,15 +106,15 @@ tokens: list[int])`。
 
 **恢复**（供客户端，按原始参数）：
 - 客户端未请求 `logprobs` → `choice.logprobs=null`。
-- 客户端请求 `top_logprobs=N`（chat）/`logprobs=N`（completions）→ 截断到 N。
+- 客户端请求 `logprobs=True`、`top_logprobs=n`（chat）/`logprobs=n`（completions）→ 截断到 n。
 - 客户端未请求 `return_tokens_as_token_ids`：
-  - chat：`token`/`top_logprobs[].token` 从 `bytes`（utf-8 字节列表）解码为文本；无 bytes 则移除该字段。
+  - chat：`token`/`top_logprobs[].token` 从 `bytes`（utf-8 字节列表）解码为文本；无 bytes 则。
   - completions：无 tokenizer 可用，`tokens[]` 置为 `[null]*len`——**绝不**留 `token_id:` 前缀。
 - 客户端**已**请求 `return_tokens_as_token_ids` → 原样保留 `token_id:NNN`（这正是客户端所要）。
 
 ### 3.3 流式响应处理（SSE）
 
-**流式形态**：vLLM 流式每块只含**最新 token** 的 logprobs（delta 语义）。
+**流式形态**：vLLM 流式每块只含**最新 token** 的 logprobs 和 token_id。
 设计要求**先缓存全部流式推理结果，再进行检测**。
 
 - chat 流式：每块 `choices[].logprobs.content[]` 含本块新 token 的一个 entry
@@ -154,10 +150,9 @@ tokens: list[int])`。
 
 ### 3.5 检测采样
 
-- 每被拦截请求抽 `random.random()`；`will_detect = rand < sample_rate`（默认 1.0，范围 0..1）。
-- **注入与恢复始终发生**（透明无条件）；仅检测提交受 `will_detect` 门控。
-- 理由：客户端若请求了 `logprobs`，非采样请求与其不应可观察不同；采样只控检测成本。
-- 代价：非采样请求仍付 JSON 解析/改写成本——廉价可接受。
+- 每被拦截请求抽 `random.random()`；`will_detect = rand < sample_rate`（默认 1.0，范围 0-1）。
+- **注入、恢复和检测按概率发生**；按照采样概率来决定该请求是否注入、恢复和检测。
+
 
 ### 3.6 请求关联标识
 
@@ -188,9 +183,9 @@ tokens: list[int])`。
 
 环境变量（带默认）：
 - `VLLM_ANOMALY_ENABLED`（默认 1）
-- `VLLM_ANOMALY_TOP_LOGPROBS`（默认 20，范围 1..20）
+- `VLLM_ANOMALY_TOP_LOGPROBS`（默认 20，范围 1-20）
 - `VLLM_ANOMALY_METRICS_PATH`（默认 `/anomaly/metrics`）
-- `VLLM_ANOMALY_SAMPLE_RATE`（默认 1.0，范围 0..1）
+- `VLLM_ANOMALY_SAMPLE_RATE`（默认 1.0，范围 0-1）
 - `VLLM_ANOMALY_DETECTOR_WORKERS`（默认 1）
 - `VLLM_ANOMALY_DETECTOR_CONFIG_PATH` / `VLLM_ANOMALY_MTYPE_CONFIG_PATH` /
   `VLLM_ANOMALY_TK2CAT_PATH`（显式路径覆盖）
@@ -198,10 +193,10 @@ tokens: list[int])`。
 校验：`top_logprobs∈[1,20]`、`sample_rate∈[0.0,1.0]`。
 
 检测器路径解析顺序：
-1. 三个显式 env 全设 → 用之，不自动发现；
-2. vendored 拷贝（按 `__file__` 定位 `response_anomaly/configs|token2category`）；
-3. 外部可导入 `response_anomaly` / `msprobe.response_anomaly`；
-4. 都没有 → `RuntimeError`。
+1. 优先 response_anomaly 算法检测文件夹已经固定在本项目下，固定路径方式调用；
+2. 其次外部可导入的`response_anomaly`/`msprobe.response_anomaly`；
+3. 再次由用户指定 response_anomaly 路径，由中间件将 response_anomaly 代码拷贝到项目固定路径下；
+4. 都没有 → 将详细信息写入日志，降级为透传方式。
 
 ### 3.9 降级机制
 
