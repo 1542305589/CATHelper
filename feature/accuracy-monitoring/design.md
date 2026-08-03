@@ -1,9 +1,4 @@
----
-title: vLLM 异常检测中间件 功能设计
-role: technical-design
----
-
-# vLLM 异常检测中间件 功能设计
+# 推理精度异常检测中间件 设计文档(DESIGN)
 
 ## 1. 概述
 

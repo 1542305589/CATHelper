@@ -1,19 +1,14 @@
----
-title: vLLM 异常检测中间件 功能规格
-role: functional-spec
----
-
-# vLLM 异常检测中间件 功能规格
+# 推理精度异常检测中间件 技术规格说明书(SPEC)
 
 ## 1. 目的与范围
 
-本文档规定 `vllm_anomaly_middleware` 中间件的功能行为、输入输出契约与验收标准。
+本文档规定基于vllm的在线精度异常检测中间件`vllm_anomaly_middleware`的功能行为、输入输出契约与验收标准。
 中间件通过 vLLM 的 `--middleware` 单标志部署，对客户端透明地：拦截推理请求、
 强制采集 logprobs、后台运行侧信道异常检测、将响应精确还原为客户端原始期望形态、
 并通过独立 Prometheus 端点暴露检测结果。
 
 适用范围：vLLM 的 `POST /v1/chat/completions` 与 `POST /v1/completions` 端点，
-流式与非流式均覆盖。
+流式与非流式在线推理请求均覆盖。
 
 ## 2. 功能需求
 
