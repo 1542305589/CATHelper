@@ -3,12 +3,12 @@
 ## 1. 目的与范围
 
 本文档规定基于vllm的在线精度异常检测中间件`vllm_anomaly_middleware`的功能行为、输入输出契约与验收标准。
-中间件通过 vLLM 的 `--middleware` 单标志部署，对客户端透明地：拦截推理请求、
-强制采集 logprobs、后台运行侧信道异常检测、将响应精确还原为客户端原始期望形态、
+中间件通过 vLLM 的 `--middleware` 插件部署，对客户端透明地：拦截推理请求、
+强制采集 logprobs和token_id、后台运行算法异常检测、不影响客户端请求响应状态返回、
 并通过独立 Prometheus 端点暴露检测结果。
 
-适用范围：vLLM 的 `POST /v1/chat/completions` 与 `POST /v1/completions` 端点，
-流式与非流式在线推理请求均覆盖。
+适用范围：vLLM 的 `POST /v1/chat/completions` 与 `POST /v1/completions` 在线推理请求端点，
+流式与非流式推理请求均覆盖。
 
 ## 2. 功能需求
 
@@ -16,13 +16,13 @@
 
 中间件仅拦截 `POST /v1/chat/completions` 与 `POST /v1/completions`。
 所有其他 HTTP 请求（任意方法或路径）原样转发给下游应用——同一 scope、receive、send，
-不读取或修改 body。目标路径上的非 POST 方法也透传。
+不读取或修改 body。目标路径上的非 POST 方法也透传（保持原先vllm处理方式一致）。
 
 **验收**
 - `GET /v1/models` → 原样转发，body 不读不改。
 - `GET /v1/chat/completions` → 原样转发；仅 POST 上的两个目标路径被拦截。
 
-### 2.2 强制 logprobs 采集
+### 2.2 强制 logprobs、token_id采集
 
 对每个被拦截请求，覆盖请求体强制检测所需参数：chat 设 `logprobs=true`、
 `top_logprobs=<N>`、`return_tokens_as_token_ids=true`；completions 设 `logprobs=<N>`、
@@ -37,10 +37,10 @@
 ### 2.3 客户端透明响应恢复
 
 响应处理后恢复为客户端原始请求被满足时的形态：
-- 客户端未请求 `logprobs` → `choice.logprobs` 置 null。
-- 客户端请求 `top_logprobs=N` → 各 top-logprobs 列表截断至 N。
+- 客户端未请求 `logprobs` → `choice.logprobs` 置 null。(vllm默认关闭)
+- 客户端请求 `top_logprobs=N` → 各 top-logprobs 列表截断至 N。（vllm默认关闭）
 - 恢复响应中不得出现任何 `token_id:` 前缀字符串；token 文本从响应 `bytes`/text 字段
-  解码；无法解码处置 null 而非 `token_id:` 字符串。
+  解码；无法解码处置 null 而非 `token_id:` 字符串。（vllm默认关闭）
 - 适用于 chat 与 completions，流式与非流式。
 
 **验收**
@@ -123,8 +123,9 @@ logprobs 并恢复响应（透明无条件），但不提交检测。1.0 表示�
 
 ### 2.11 环境变量配置
 
-全部运行时配置从环境变量读取（带合理默认），因构造除 app 外无参数。至少可配：
-总开关；top-logprobs 数；指标路径；检测采样率；检测 worker 数；检测器 config/mtype/tk2cat
+全部运行时配置从环境变量读取（带合理默认），因构造除 app 外无参数。
+
+至少可配：总开关；top-logprobs 数；指标路径；检测采样率；检测 worker 数；检测器 config/mtype/tk2cat
 路径显式覆盖。
 
 **验收**
@@ -142,7 +143,7 @@ logprobs 并恢复响应（透明无条件），但不提交检测。1.0 表示�
 - vendored 默认路径下 `ILLDetector` 可构造（不抛 ImportError/NameError），
   `.run(...)` 返回 `[[is_ill, ill_type]]` 形状。
 
-### 2.13 优雅降级
+### 2.13 优雅降级——检测功能不可用
 
 检测后端或其配置无法加载/解析 → 记录一次日志，对所有后续请求纯透传（不注入、不检测）。
 指标端点仍可达报零值。降级绝不改变客户端响应。
@@ -165,7 +166,7 @@ vLLM 插件接口——仅需 vLLM 支持 `--middleware`。
 
 ### 3.1 构造与调用
 
-- `AnomalyMiddleware(app)`：`app` 为下游 ASGI 可调用。
+- `AnomalyMiddleware(app)`：`app` 为下游 ASGI(Asynchronous Server Gateway Interface) 可调用。
 - `async def __call__(self, scope, receive, send)`：纯 ASGI。
 
 ### 3.2 请求侧
