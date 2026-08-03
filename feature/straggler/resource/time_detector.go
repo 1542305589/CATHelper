@@ -147,8 +147,10 @@ func aggregateTimeScores(
 			}
 
 			bMean := 0.0
+			bStd := 0.0
 			if baseline != nil {
 				bMean = baseline.Mean
+				bStd = baseline.StdDev
 			}
 
 			detail := &MetricAnomalyDetail{
@@ -157,6 +159,7 @@ func aggregateTimeScores(
 				TimeAbnormal:  timeAbnormal,
 				CurrentMean:   currentMean,
 				BaselineMean:  bMean,
+				BaselineStd:   bStd,
 				PeerMean:      peerMean,
 			}
 

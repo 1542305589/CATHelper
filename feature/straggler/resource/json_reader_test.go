@@ -54,13 +54,13 @@ func TestReadKPIFilesAllFieldsAndCPU(t *testing.T) {
 	dir := t.TempDir()
 	date := time.Unix(1000, 0).Local().Format("2006-01-02")
 	writeKPIFile(t, dir, date,
-		`{"ts":1000,"vals":{"3":{"temp":47,"power":1628,"aicore_freq":1800,"aicore_util":45,"hbm_util":50,"tx_bandwidth":1250,"rx_pfc_pkt":1,"roce_tx_err_pkt":2,"roce_out_of_order":3,"roce_new_pkt_rty":4,"nic_rx_all_pkg":5}},"cpu_avg":{"cpu1":"4.26"}}`+"\n")
+		`{"ts":1000,"vals":{"3":{"temp":47,"power":1628,"aicore_freq":1800,"aicore_util":45,"hbm_bandwidth_util":50,"tx_bandwidth":1250,"rx_pfc_pkt":1,"roce_tx_err_pkt":2,"roce_out_of_order":3,"roce_new_pkt_rty":4,"nic_rx_all_pkg":5}},"cpu_avg":{"cpu1":"4.26"}}`+"\n")
 	ts, err := ReadKPIFiles(dir, time.Unix(1000, 0), time.Unix(1000, 0).Add(time.Second))
 	if err != nil {
 		t.Fatalf("ReadKPIFiles: %v", err)
 	}
 	r := ts.Rows[0]
-	if r.AICoreUtil[3] != 45 || r.HBMUtil[3] != 50 || r.TXBandwidth[3] != 1250 {
+	if r.AICoreUtil[3] != 45 || r.HBMBandwidthUtil[3] != 50 || r.TXBandwidth[3] != 1250 {
 		t.Errorf("mapped fields wrong: %+v", r)
 	}
 	if r.RXPfcPkt[3] != 1 || r.RocETxErrPkt[3] != 2 || r.RocEOutOfOrder[3] != 3 || r.RocENewPktRty[3] != 4 || r.NICRxAllPkg[3] != 5 {

@@ -20,7 +20,7 @@ type CSVRow struct {
 	Temp           map[int]float64 // cardID → celsius
 	AICoreFreq     map[int]float64 // cardID → MHz
 	AICoreUtil     map[int]float64 // cardID → %
-	HBMUtil        map[int]float64 // cardID → %
+	HBMBandwidthUtil map[int]float64 // cardID → %
 	TXBandwidth    map[int]float64 // cardID → ?
 	RXPfcPkt       map[int]float64 // cardID → packets (cumulative counter)
 	RocETxErrPkt   map[int]float64 // cardID → packets (cumulative counter)
@@ -49,7 +49,7 @@ const (
 	MetricPower          MetricName = "power"
 	MetricAICoreFreq     MetricName = "aicore_freq"
 	MetricAICoreUtil     MetricName = "aicore_util"
-	MetricHBMUtil        MetricName = "hbm_util"
+	MetricHBMBandwidthUtil MetricName = "hbm_bandwidth_util"
 	MetricTXBandwidth    MetricName = "tx_bandwidth"
 	MetricRXPfcPkt       MetricName = "rx_pfc_pkt"
 	MetricRocETxErrPkt   MetricName = "roce_tx_err_pkt"
@@ -63,7 +63,7 @@ var AllMetrics = []MetricName{
 	MetricPower,
 	MetricAICoreFreq,
 	MetricAICoreUtil,
-	MetricHBMUtil,
+	MetricHBMBandwidthUtil,
 	MetricTXBandwidth,
 	MetricRXPfcPkt,
 	MetricRocETxErrPkt,
@@ -77,7 +77,7 @@ var ComputeMetrics = map[MetricName]bool{
 	MetricPower:      true,
 	MetricAICoreFreq: true,
 	MetricAICoreUtil: true,
-	MetricHBMUtil:    true,
+	MetricHBMBandwidthUtil:    true,
 }
 
 // CommunicationMetrics lists metrics classified as communication-related.
@@ -144,7 +144,7 @@ var MetricMetaRegistry = map[MetricName]MetricMeta{
 	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodZScore},
 	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodDirect},
 	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore},
-	MetricHBMUtil:        {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore},
+	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore},
 	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, SpaceMethod: MethodZScore},
 	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
 	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
@@ -217,6 +217,7 @@ type MetricAnomalyDetail struct {
 	Quadrant      Quadrant   `json:"quadrant"`
 	CurrentMean   float64    `json:"current_mean"`
 	BaselineMean  float64    `json:"baseline_mean,omitempty"`
+	BaselineStd   float64    `json:"baseline_std,omitempty"`
 	PeerMean      float64    `json:"peer_mean,omitempty"`
 }
 

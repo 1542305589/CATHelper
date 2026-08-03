@@ -79,29 +79,29 @@ var computeRules = []computeRule{
 			return isAbnormal(a, MetricAICoreFreq, true) && !isAbnormal(a, MetricTemp, true)
 		},
 	},
-	// C4: POWER↓ + AICORE_UTIL↓ + HBM_UTIL↓ → straggler.
+	// C4: POWER↓ + AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL↓ → straggler.
 	{
 		category: RcStraggler, confidence: ConfHigh,
 		suggestion: "Straggler（卡空闲等待）。该卡可能在等通信/等数据，建议触发Profiling精查",
 		match: func(a map[MetricName]*MetricAnomalyDetail) bool {
 			return isAbnormal(a, MetricPower, true) && isAbnormal(a, MetricAICoreUtil, true) &&
-				isAbnormal(a, MetricHBMUtil, true)
+				isAbnormal(a, MetricHBMBandwidthUtil, true)
 		},
 	},
-	// C5: AICORE_UTIL↓ + HBM_UTIL normal → load imbalance.
+	// C5: AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL normal → load imbalance.
 	{
 		category: RcLoadImbalance, confidence: ConfMedium,
 		suggestion: "计算负载不均。检查数据分发策略/模型并行切分是否均衡",
 		match: func(a map[MetricName]*MetricAnomalyDetail) bool {
-			return isAbnormal(a, MetricAICoreUtil, true) && !isAbnormal(a, MetricHBMUtil, true)
+			return isAbnormal(a, MetricAICoreUtil, true) && !isAbnormal(a, MetricHBMBandwidthUtil, true)
 		},
 	},
-	// C6: HBM_UTIL↓ + AICORE_UTIL normal → memory bandwidth bottleneck.
+	// C6: HBM_BANDWIDTH_UTIL↓ + AICORE_UTIL normal → memory bandwidth bottleneck.
 	{
 		category: RcMemBottleneck, confidence: ConfLow,
 		suggestion: "内存带宽瓶颈。检查HBM访问模式/是否有大量cache miss",
 		match: func(a map[MetricName]*MetricAnomalyDetail) bool {
-			return isAbnormal(a, MetricHBMUtil, true) && !isAbnormal(a, MetricAICoreUtil, true)
+			return isAbnormal(a, MetricHBMBandwidthUtil, true) && !isAbnormal(a, MetricAICoreUtil, true)
 		},
 	},
 	// C7: TEMP↑ + POWER normal + FREQ normal → temp sensor drift.
