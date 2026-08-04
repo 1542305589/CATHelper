@@ -99,6 +99,7 @@ type columnIndex struct {
 	aicoreFreq    int
 	aicoreUtil    int
 	hbmBandwidthUtil       int
+	hbmUtil                int
 	txBandwidth   int
 	rxPfcPkt      int
 	roceTxErrPkt  int
@@ -116,6 +117,7 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 		aicoreFreq:    -1,
 		aicoreUtil:    -1,
 		hbmBandwidthUtil:       -1,
+		hbmUtil:                -1,
 		txBandwidth:   -1,
 		rxPfcPkt:      -1,
 		roceTxErrPkt:  -1,
@@ -132,6 +134,7 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 		"NPU_CARD_AICORE_FREQ":   &ci.aicoreFreq,
 		"NPU_CARD_AICORE_UTIL":   &ci.aicoreUtil,
 		"NPU_CARD_HBM_BANDWIDTH_UTIL":      &ci.hbmBandwidthUtil,
+		"NPU_CARD_HBM_UTIL":                &ci.hbmUtil,
 		"NPU_TX_BANDWIDTH":       &ci.txBandwidth,
 		"NPU_RX_PFC_PKT":         &ci.rxPfcPkt,
 		"NPU_ROCE_TX_ERR_PKT":    &ci.roceTxErrPkt,
@@ -186,6 +189,7 @@ func parseRow(rec []string, ci columnIndex) (CSVRow, error) {
 	row.AICoreFreq = parseMetricJSON(rec, ci.aicoreFreq, "NPU_CARD_AICORE_FREQ")
 	row.AICoreUtil = parseMetricJSON(rec, ci.aicoreUtil, "NPU_CARD_AICORE_UTIL")
 	row.HBMBandwidthUtil = parseMetricJSON(rec, ci.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL")
+	row.HBMUtil = parseMetricJSON(rec, ci.hbmUtil, "NPU_CARD_HBM_UTIL")
 	row.TXBandwidth = parseMetricJSON(rec, ci.txBandwidth, "NPU_TX_BANDWIDTH")
 	row.RXPfcPkt = parseMetricJSON(rec, ci.rxPfcPkt, "NPU_RX_PFC_PKT")
 	row.RocETxErrPkt = parseMetricJSON(rec, ci.roceTxErrPkt, "NPU_ROCE_TX_ERR_PKT")
@@ -292,6 +296,8 @@ func getMetricDict(row CSVRow, metric MetricName) map[int]float64 {
 		return row.AICoreUtil
 	case MetricHBMBandwidthUtil:
 		return row.HBMBandwidthUtil
+	case MetricHBMUtil:
+		return row.HBMUtil
 	case MetricTXBandwidth:
 		return row.TXBandwidth
 	case MetricRXPfcPkt:
@@ -320,6 +326,8 @@ func setMetricDict(row *CSVRow, metric MetricName, vals map[int]float64) {
 		row.AICoreUtil = vals
 	case MetricHBMBandwidthUtil:
 		row.HBMBandwidthUtil = vals
+	case MetricHBMUtil:
+		row.HBMUtil = vals
 	case MetricTXBandwidth:
 		row.TXBandwidth = vals
 	case MetricRXPfcPkt:

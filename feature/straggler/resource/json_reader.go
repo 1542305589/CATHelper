@@ -27,9 +27,9 @@ type KPISample struct {
 // CardIDs are the union of all cards seen.
 //
 // Field names in the JSONL are the straggler KPI field names (temp, power,
-// aicore_freq, aicore_util, hbm_bandwidth_util, tx_bandwidth, rx_pfc_pkt,
-// roce_tx_err_pkt, roce_out_of_order, roce_new_pkt_rty), mapped back onto the
-// CSVRow metric dicts.
+// aicore_freq, aicore_util, hbm_bandwidth_util, hbm_util, tx_bandwidth,
+// rx_pfc_pkt, roce_tx_err_pkt, roce_out_of_order, roce_new_pkt_rty), mapped
+// back onto the CSVRow metric dicts.
 func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 	dates := dateRange(since, until)
 	var rows []CSVRow
@@ -134,6 +134,8 @@ func assignMetricField(row *CSVRow, cid int, field string, val float64) {
 		setOnce(&row.AICoreUtil, cid, val)
 	case "hbm_bandwidth_util":
 		setOnce(&row.HBMBandwidthUtil, cid, val)
+	case "hbm_util":
+		setOnce(&row.HBMUtil, cid, val)
 	case "tx_bandwidth":
 		setOnce(&row.TXBandwidth, cid, val)
 	case "rx_pfc_pkt":

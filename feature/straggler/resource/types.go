@@ -23,7 +23,8 @@ type CSVRow struct {
 	Temp           map[int]float64 // cardID → celsius
 	AICoreFreq     map[int]float64 // cardID → MHz
 	AICoreUtil     map[int]float64 // cardID → %
-	HBMBandwidthUtil map[int]float64 // cardID → %
+	HBMBandwidthUtil map[int]float64 // cardID → % (bandwidth utilization)
+	HBMUtil          map[int]float64 // cardID → % (memory utilization)
 	TXBandwidth    map[int]float64 // cardID → ?
 	RXPfcPkt       map[int]float64 // cardID → packets (cumulative counter)
 	RocETxErrPkt   map[int]float64 // cardID → packets (cumulative counter)
@@ -53,6 +54,7 @@ const (
 	MetricAICoreFreq     MetricName = "aicore_freq"
 	MetricAICoreUtil     MetricName = "aicore_util"
 	MetricHBMBandwidthUtil MetricName = "hbm_bandwidth_util"
+	MetricHBMUtil         MetricName = "hbm_util"
 	MetricTXBandwidth    MetricName = "tx_bandwidth"
 	MetricRXPfcPkt       MetricName = "rx_pfc_pkt"
 	MetricRocETxErrPkt   MetricName = "roce_tx_err_pkt"
@@ -67,6 +69,7 @@ var AllMetrics = []MetricName{
 	MetricAICoreFreq,
 	MetricAICoreUtil,
 	MetricHBMBandwidthUtil,
+	MetricHBMUtil,
 	MetricTXBandwidth,
 	MetricRXPfcPkt,
 	MetricRocETxErrPkt,
@@ -81,6 +84,7 @@ var ComputeMetrics = map[MetricName]bool{
 	MetricAICoreFreq: true,
 	MetricAICoreUtil: true,
 	MetricHBMBandwidthUtil:    true,
+	MetricHBMUtil:             true,
 }
 
 // CommunicationMetrics lists metrics classified as communication-related.
@@ -150,6 +154,7 @@ var MetricMetaRegistry = map[MetricName]MetricMeta{
 	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodDirect, TimeMethod: MethodMAD},
 	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodMAD},
 	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodMAD},
+	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodZScore},
 	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodZScore},
 	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
 	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
