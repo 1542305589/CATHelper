@@ -23,7 +23,7 @@
 
 ### 2.2 强制 logprobs、token_id 采集
 
-- 对每个被拦截请求，缓存客户端原始 logprobs 等相关采集参数，供响应恢复；
+- 对每个被拦截请求，缓存客户端原始 logprobs、token_id 等相关采集参数，供响应恢复；
 
 - 无视客户端请求原值，对请求体强制注入检测所需参数：chat 设 `logprobs=true`、
 `top_logprobs=<N>`、`return_tokens_as_token_ids=true`；completions 设 `logprobs=<N>`、
@@ -31,34 +31,36 @@
 
 
 **验收**
-- chat 请求下，客户端未带 logprobs 的  → 转发 body 含 `logprobs=true`/`top_logprobs=<N>`/
+- chat 请求下，客户端未带 logprobs 的  → 转发 body 含 `logprobs=true`、`top_logprobs=<N>` 和
   `return_tokens_as_token_ids=true`，`Content-Length` 反映新长度。
 - chat 请求下，客户端配置 `logprobs=True` 和 `top_logprobs=5` 且配置 N=20 → 转发 `top_logprobs=20`，原 5 被内部保留用于恢复。
 - chat 请求下，客户端配置 `logprobs=True` 和 `top_logprobs=10` 且配置 N=5 → 转发 `top_logprobs=10`，原 10 被内部保留用于恢复。
-- completions 请求下，客户端未带 logprobs 的  → 转发 body 含 `logprobs=<N>`/
+- completions 请求下，客户端未带 logprobs 的  → 转发 body 含 `logprobs=<N>` 和
   `return_tokens_as_token_ids=true`，`Content-Length` 反映新长度。
 - completions 请求下，客户端配置 `logprobs=5`且配置 N=20 → 转发 `logprobs=20`，原 5 被内部保留用于恢复。
 - completions 请求下，客户端配置 `logprobs=10`且配置 N=5 → 转发 `logprobs=10`，原 10 被内部保留用于恢复。
 - chat 和 completions 请求下，客户端未带`return_tokens_as_token_ids=True`的 → 转发 body 含`return_tokens_as_token_ids=True`，原默认参数`return_tokens_as_token_ids=False` 被内部保留用于恢复。
+- chat 和 completions 请求下，客户端请求设置 `n=4` → `n=4`参数被内部保留用于恢复。
 
 ### 2.3 客户端透明响应恢复
 
 响应处理后恢复为客户端原始请求被满足时的形态：
 - 客户端未请求 `logprobs`/`top_logprobs`  → `choice.logprobs` 置 null(vllm默认关闭)。
-- 客户端请求 `logprobs=N`/`top_logprobs=N` → 各 top-logprobs 列表截断至 N(vllm默认关闭)。
-- 客户端未请求`return_tokens_as_token_ids=True` → 恢复响应中不得出现任何 `token_id:` 前缀字符串；token 文本从响应 `bytes`/text 字段解码；无法解码处置 null 而非 `token_id:` 字符串(vllm默认关闭)。
+- 客户端请求 `logprobs=M`/`top_logprobs=M` → 各 top-logprobs 列表截断至 M(vllm默认关闭)。
+- 客户端未请求 `return_tokens_as_token_ids=True` → 恢复响应中不得出现任何 `token_id:` 前缀字符串；token 文本从响应 `bytes`/text 字段解码；无法解码处置 null 而非 `token_id:` 字符串(vllm默认关闭)。
 - 适用于 chat 与 completions，流式与非流式。
 
 **验收**
 - chat 客户端未请求 采集 logprobs 和 token_id → 恢复后 `choice.logprobs=null`，全文无 `token_id:`。
 - chat 客户端设置`logprobs=true`、`top_logprobs=3` → 截断 `top_logprobs`，取前 3 项数据，
   每项 `token` 为解码文本（非 `token_id:`）。
-- chat 客户端设置`logprobs=true`、`top_logprobs=3`和`return_tokens_as_token_ids=True` →  截断 `top_logprobs`，取前 3 项数据，且每项都包含 `token_id:`。
+- chat 客户端设置`logprobs=true`、`top_logprobs=3`和`return_tokens_as_token_ids=True` →  截断 `top_logprobs`，取前 3 项数据，且每项原样保留 `token_id:`。
 - completions 客户端未请求 采集 logprobs 和 token_id → 恢复后 `choice.logprobs=null`，全文无 `token_id:`。
 - completions 客户端设置`logprobs=3` → 截断 `top_logprobs`，取前 3 项数据，
   每项 `token` 为解码文本（非 `token_id:`）。
 - completions 客户端设置`logprobs=3`、`return_tokens_as_token_ids=True` →  截断 `top_logprobs`，取前 3 项数据，且每项原样保留 `token_id:`。
 - chat 和 completions 客户端设置`logprobs=10`，而推理服务环境变量设置top-logprobs 数 N=4  → body 内 top-logprobs 的数量取二者最大值 10，推理请求输出的每个 token 有 10 项数据，送至检测截断前 4 项数据，返回给客户端 10 项数据。
+- chat 和 completions 请求下，客户端请求设置 `n=4` → 循环处理 4 份候选结果，客户端输出格式按上述方法验收 
 
 
 ### 2.4 流式安全转发
@@ -78,7 +80,7 @@
 - 针对单请求单输出，对输出 choice 抽取 top-k logprobs（token-id→logprob 映射）与
 token-id 序列，提交检测后端；
 
-- 针对单请求多候选输出的情况，循环抽取输出choice中的top-k logprobs（token-id→logprob 映射）与 token-id 序列，数据用列表存储，送入检测，检测结果分别上报，不能被覆盖。
+- 针对单请求多候选输出的情况，循环抽取输出 choice 中的top-k logprobs（token-id→logprob 映射）与 token-id 序列，数据用列表存储，送入检测，异常检测结果都应该上报，不能被覆盖。
 
 检测结果按 `ill_type` 分类：
 0=normal,1=rare_character,2=garbled,3=repetition,4=nan_value。
@@ -86,11 +88,11 @@ token-id 序列，提交检测后端；
 
 
 **验收**
-- 非流式请求 2 请求被选中 → 每个推理结果 choice 抽取 `(topk_logprobs, tokens)` 提交检测，
+- 非流式请求 2 个请求被选中 → 每个推理结果 choice 抽取 `(topk_logprobs, tokens)` 提交检测，
   返回每 choice 一个 `[is_ill, ill_type]`。
 - 空响应（无生成 token，如错误或空 completion）→ 不提交检测，情况记录至日志。
 - 流式响应结束后，用跨块缓存的 logprobs 和 token_id 数据提交检测，客户端不等检测。
-- 客户端请求中设置 `n=3`（vllm 默认 n=1）→ 单独处理该请求，将 3 份数据提交检测，若有多份数据检出异常，分别上报
+- 客户端请求中设置 `n=3`（vllm 默认 n=1）→ 单独处理该请求，将 3 份数据提交检测，若有多份数据检出异常，分别上报，不能覆盖
 
 
 ### 2.6 检测失败隔离
@@ -99,7 +101,7 @@ token-id 序列，提交检测后端；
 （响应在检测时已发完）。检测失败计为 detection-error 指标。
 
 **验收**
-- 检测器运行中抛异常 → 客户端响应不受影响（已发完），计 detection-error，
+- 检测器运行中抛异常 → 客户端响应不受影响（已发完），计 detection-error，详细情况记录日志，
   后续请求正常处理。
 
 ### 2.7 检测后端串行化
@@ -107,18 +109,18 @@ token-id 序列，提交检测后端；
 多请求下检测调用串行，单请求多候选输出下逻辑上并行调用检测（检测算法内部串行）。
 
 **验收**
-- 两被选中请求同时完成 → 其检测调用串行（一者等另一者），而非同实例并发。
+- 两个被选中请求同时完成 → 其检测调用串行（一者等另一者），而非同实例并发。
 - 单请求多候选输出 → 整合多候选输出数据，一起送入检测算法。
 
 ### 2.8 检测采样
 
-支持可配置采样率 ∈[0.0,1.0]。请求以等于采样率的概率被选中检测。未选中请求直接透传，不对用户请求做处理。1.0 表示全检测，0.0 表示不检测。
+支持可配置采样率 ∈[0.0,1.0]。请求以等于采样率的概率被选中，未选中请求直接透传，不对用户请求做处理。1.0 表示全检测，0.0 表示不检测。
 默认 1.0。
 
 **验收**
 - 采样率 0.0 → 不提交检测，请求直接透传。
 - 采样率 1.0 → 每请求都提交检测。
-- 采样率 0.3  → 10 个请求里大概有 3 个请求会修改 body，其余请求直接透传
+- 采样率 0.3  → 请求有 0.3 的概率会被修改请求内容，注入采集参数。有 0.7 的概率直接透传。
 
 ### 2.9 请求关联标识
 
@@ -138,17 +140,16 @@ token-id 序列，提交检测后端；
 **验收**
 - `GET /anomaly/metrics` → HTTP 200，`Content-Type: text/plain; version=0.0.4; charset=utf-8`，
   body 为 Prometheus 文本暴露。
-- 下游无 `/anomaly/metrics` 路由 → 中间件上报不会报错。
+- 下游无 `/anomaly/metrics` 路由 → 中间件上报不会报错，详细情况记录日志。
 
 ### 2.11 环境变量配置
 
-全部运行时配置从环境变量读取（带合理默认），因构造除 app 外无参数。至少可配：
-总开关；top-logprobs 数；指标路径；检测采样率；检测 worker 数；检测器 config/mtype/tk2cat
+全部运行时配置从环境变量读取，如果没有配置，使用默认值。因构造除 app 外无参数。可选配：
+总开关；检测采样率；top-logprobs 数；指标路径；检测 worker 数；检测器 config/mtype/tk2cat
 路径显式覆盖。
 
 **验收**
 - 总开关设置为 False → 不注入不检测（纯透传），但指标端点仍可达报零值计数。
-- 设置top-logprobs 数为 5  → 推理结果每个token至少包含 5 个 logporbs 和 token_id
 
 
 ### 2.12 检测器数据路径解析
@@ -190,7 +191,7 @@ vLLM 插件接口——仅需 vLLM 支持 `--middleware`。
 ### 3.2 请求侧
 
 - 读请求体：聚合所有 `http.request` 消息至 `more_body=False`（处理 `http.disconnect`）。
-- 重放 receive：合成单条 `http.request`(body, more_body=False)，二次读返回空 body。
+- 重放 receive：构造 receive 包装函数；首次调用返回合成单条 `http.request`(body, more_body=False)；后续调用委托原始 `receive()` 获取后续消息（如 `http.disconnect`）。禁止二次读返回空 body 消息，否则 vllm 会重复处理请求。
 - 请求 scope：浅拷贝并改写 `content-length` header。
 
 ### 3.3 响应侧
@@ -234,7 +235,7 @@ vLLM 插件接口——仅需 vLLM 支持 `--middleware`。
 - 流式增量转发 + 跨块事件重组 + `[DONE]`/keep-alive 透传 + logprobs 和 token_id 缓存+ 流式推理结束后调用检测。
 - 采样 0.0 不检测/1.0 全检测。
 - `x-anomaly-request-id` 头存在且唯一。
-- 内联 metrics 200 + 正确 content-type + Prometheus 文本；下游无路由也作答，不报错。
+- 内联 metrics 200 + 正确 content-type + Prometheus 文本；下游无路由也作答，不报错，详细记录至日志。
 - 降级：检测器不可构造 → 永久透传 + 指标报零 + 不改客户端响应 + 日志事件记录。
 - 检测器异常 → 计 error，客户端不受影响，异常情况详细记录至日志。
 - 单插件部署，构造 `(app)` 无 kwargs。
