@@ -49,21 +49,36 @@ func detectTimeAnomalies(
 				continue
 			}
 
-			// Compute current mean.
-			var sum float64
-			for _, v := range curVals {
-				sum += v
-			}
-			currentMean := sum / float64(len(curVals))
-
-			// Time Z-Score = |current - baseline_mean| / baseline_std.
 			var zScore float64
-			if baseline.StdDev > 0 {
-				zScore = math.Abs(currentMean-baseline.Mean) / baseline.StdDev
+			if MetricMetaRegistry[metric].TimeMethod == MethodMAD {
+				// Robust time Z-Score using median + MAD. Median and MAD have a
+				// 50% breakdown point, so historical fault episodes (minority of
+				// baseline) cannot drag the baseline center or inflate the scale.
+				currentMedian := Median(curVals)
+				scale := madToStdFactor * baseline.Mad
+				if scale > 0 {
+					zScore = math.Abs(currentMedian-baseline.Median) / scale
+				} else {
+					// Historical MAD is 0 (stable value). If current differs, it's anomalous.
+					if math.Abs(currentMedian-baseline.Median) > 0.01 {
+						zScore = 999 // sentinel
+					}
+				}
 			} else {
-				// Historical std is 0 (stable value). If current differs, it's anomalous.
-				if math.Abs(currentMean-baseline.Mean) > 0.01 {
-					zScore = 999 // sentinel
+				// Classic time Z-Score = |current - baseline_mean| / baseline_std.
+				var sum float64
+				for _, v := range curVals {
+					sum += v
+				}
+				currentMean := sum / float64(len(curVals))
+
+				if baseline.StdDev > 0 {
+					zScore = math.Abs(currentMean-baseline.Mean) / baseline.StdDev
+				} else {
+					// Historical std is 0 (stable value). If current differs, it's anomalous.
+					if math.Abs(currentMean-baseline.Mean) > 0.01 {
+						zScore = 999 // sentinel
+					}
 				}
 			}
 
@@ -120,6 +135,11 @@ func aggregateTimeScores(
 				}
 				currentMean = sum / float64(len(curVals))
 			}
+			// For robust metrics, report the robust center (median) as the
+			// "current" value so it matches the Z-Score that produced the alarm.
+			if MetricMetaRegistry[metric].TimeMethod == MethodMAD && len(curVals) > 0 {
+				currentMean = Median(curVals)
+			}
 
 			// Peer mean across detection window.
 			var peerVals []float64
@@ -149,8 +169,14 @@ func aggregateTimeScores(
 			bMean := 0.0
 			bStd := 0.0
 			if baseline != nil {
-				bMean = baseline.Mean
-				bStd = baseline.StdDev
+				if MetricMetaRegistry[metric].TimeMethod == MethodMAD {
+					// Report the robust baseline: median ± robust sigma.
+					bMean = baseline.Median
+					bStd = madToStdFactor * baseline.Mad
+				} else {
+					bMean = baseline.Mean
+					bStd = baseline.StdDev
+				}
 			}
 
 			detail := &MetricAnomalyDetail{

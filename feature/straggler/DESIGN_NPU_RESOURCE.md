@@ -296,6 +296,8 @@ IQR = Q3 - Q1
   历史基线值 B = [v_t1, v_t2, ..., v_tN]  （基线窗口内该卡所有值）
   baseline_mean = avg(B)
   baseline_std  = stdev(B)
+  baseline_median = median(B)
+  baseline_mad    = MAD(B) = median(|B - baseline_median|)
 
   检测窗口内的均值 current_mean = avg(检测窗口内的值)
   时间 Z-Score = |current_mean - baseline_mean| / baseline_std
@@ -303,6 +305,34 @@ IQR = Q3 - Q1
   if baseline_std == 0 → 跳过（历史无波动）
   if 时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
 ```
+
+**鲁棒 MAD 变体（temp / power / aicore_freq / aicore_util / hbm_bandwidth_util）**：
+这五个指标改用 median + MAD 构造鲁棒 Z-Score，防止基线被历史故障数据污染
+（mean 会被异常拖向异常值、std 被平方放大，导致 Z-Score 缩小而漏报）：
+
+```
+  检测窗口内的中位数 current_median = median(检测窗口内的值)
+  鲁棒时间 Z-Score = |current_median - baseline_median| / (1.4826 * baseline_mad)
+
+  if baseline_mad == 0 → 跳过（历史无波动）
+  if 鲁棒时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
+```
+
+- `1.4826 = 1/0.6745`：正态分布下 MAD ≈ 0.6745σ，使鲁棒 Z-Score 与经典
+  Z-Score 同尺度，阈值 2.0 的语义不变。
+- median 与 MAD 的崩溃点为 50%：只要基线窗口内正常数据占多数，少量故障
+  时段不会带偏鲁棒统计量（而 mean/StdDev 会被少数极端值拖走）。
+- aicore_util / hbm_bandwidth_util 在工作态占比 ≥50% 时（实际场景几乎 100%），
+  median 和 MAD 同样不会被空闲态（双峰分布的低值尾巴）污染——空闲点只占
+  ≤20% 且落在绝对偏差的上尾，碰不到偏差的中位数。因此这两个指标也采用 MAD。
+- 其余指标（含 4 个网络错误计数器、tx_bandwidth）仍使用经典 mean/std
+  Z-Score；每指标方法由 `MetricMetaRegistry.TimeMethod` 决定。
+
+**基线防污染的前提假设**：基线窗口中大部分数据（>50%）是正常的，只有小部分
+（<50%）是异常/故障数据。MAD 的崩溃点为 50%——只要正常数据占比 >50%，median
+和 MAD 就不会被少数异常值污染。如果异常数据过半，则基线本身已失去参考意义，
+此时任何统计方法都无法可靠区分"正常"和"异常"。建议缩短基线窗口或手动剔除
+已知故障时段。
 
 **趋势增强**：对历史基线窗口 + 检测窗口的整体数据做线性回归：
 - `value = slope * timestamp + intercept`
