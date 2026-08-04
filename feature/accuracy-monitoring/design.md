@@ -4,21 +4,18 @@
 
 ### 1.1 设计目标
 
-构建一个纯 ASGI 中间件包 `vllm_anomaly_middleware`，通过 vLLM 的
-`--middleware` 单标志部署：
+构建一个纯 ASGI（Asynchronous Server Gateway Interface） 中间件包 `vllm_anomaly_middleware`，通过 vLLM 的
+`--middleware` 插件部署：
 
 ```
 vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
 ```
 
-中间件对客户端**透明**：拦截推理请求、强制采集 logprobs、在后台运行
-侧信道异常检测、将响应**精确还原**为客户端原始请求所期望的形态，并通过
-独立的 Prometheus 端点暴露检测结果。客户端完全感知不到中间件的存在。
+中间件对客户端**透明**：拦截推理请求、强制采集 logprobs和token_id、后台运行算法异常检测、不影响客户端请求响应状态返回、并通过独立 Prometheus 端点暴露检测结果。客户端完全感知不到中间件的存在。
 
 ### 1.2 设计原则
 
-- **透明优先**：注入与响应恢复无条件发生；检测是否执行由采样率决定，
-  但不影响客户端看到的响应。
+- **透明优先**：`enabled=True` 和采样共同作用，决定请求是否注入、响应恢复和检测。但不影响客户端看到的响应。
 - **流式不缓冲**：采用纯 ASGI（而非 Starlette `BaseHTTPMiddleware`），
   SSE 流增量转发，避免缓冲破坏流式语义。
 - **检测不阻塞客户端**：检测在响应全部发送完毕后以 fire-and-forget
@@ -31,8 +28,6 @@ vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
 ### 1.3 不做的事
 
 - 不改写检测算法本体、不新增异常类型。
-- 不捆绑 tokenizer 全量解码 `/v1/completions` 文本（契约是"不泄漏
-  `token_id:` 前缀"，以 nulling 满足；可后续插件式扩展）。
 - 不替换或干扰 vLLM 自带 `/metrics`。
 - 不支持非 vLLM 的 ASGI 服务器（代码可移植，但仅针对 vLLM 请求/响应形态测试）。
 
@@ -59,7 +54,7 @@ vllm_anomaly_middleware/
 ├── metrics.py             # 独立 CollectorRegistry + 指标记录/渲染
 ├── extractor.py           # 抽取/恢复（流式与非流式）+ SSEStreamProcessor
 ├── detector_runner.py     # 检测运行器（线程池+锁+懒构造+调度）
-└── response_anomaly/      # vendored 检测算法（含 configs/ 与 token2category/）
+└── response_anomaly/      # 检测算法（含 configs/ 与 token2category/）
     ├── detector.py
     ├── __init__.py
     ├── configs/{config.yaml, mtype_config.json}
@@ -84,48 +79,82 @@ vllm_anomaly_middleware/
 ### 3.1 请求拦截与参数注入
 
 **拦截范围**：仅 `POST /v1/chat/completions` 与 `POST /v1/completions`。
-其余请求（任意方法/路径）原样转发——同一 scope/receive/send，不读不改 body。
-目标路径上的非 POST 方法也透传。
+所有其他 HTTP 请求（任意方法或路径）和目标路径上的非 POST 方法均原样转发给下游应用（保持原先vllm处理方式一致）。
+
+**请求侧 ASGI 契约**：
+1. **读请求体**：`_read_all_body(receive)` 循环 `receive()`，聚合全部 `http.request`
+   body 至 `more_body=False`；遇 `http.disconnect` 中止。
+2. **重放 receive**：`_make_replay_receive(original_receive, body, request_id)` 包装——
+   首次调用返回合成单条 `{"type":"http.request","body":body,"more_body":False}`；
+   **后续调用委托原始 `receive()`**（返回 `http.disconnect` 等真实后续消息）。
+   ⚠ 二次读**禁止**返回空 body 的 `http.request`：vLLM 会将其视为新请求而重复
+   处理/重复下发（实测缺陷）。透传与注入两条路径都要重放已消耗的 body。
+3. **请求 scope**：`_patch_scope_content_length(scope, len)` 浅拷贝 scope，
+   改写/补 `content-length` 为注入后新 body 长度。
 
 **强制注入**（覆盖请求体以加上检测所需参数）：
-- chat：`logprobs=true`、`top_logprobs=<N>`、`return_tokens_as_token_ids=true`
-- completions：`logprobs=<N>`（此处 logprobs 即数量）、`return_tokens_as_token_ids=true`
+- chat：`logprobs=true`、`top_logprobs=<注入值>`、`return_tokens_as_token_ids=true`
+- completions：`logprobs=<注入值>`（此处 logprobs 即数量）、`return_tokens_as_token_ids=true`
+- **注入值 = max(客户端原始值, N)**：客户端带 `top_logprobs`（chat）/
+  `logprobs`（completions）=M 且 M>N → 注入 M，保证每 token 有 M 项数据（检测截断见
+  §3.2）；否则注入 N。例：客户端 `top_logprobs=5`、N=20 → 注入 20；
+  客户端 `top_logprobs=10`、N=5 → 注入 10（见 spec §2.2）。
+- `return_tokens_as_token_ids` 始终注入 `true`；客户端未带 → 恢复其默认 `false`。
 
-注入前**快照**客户端原始 logprobs 相关参数，供后续恢复。注入后**修正请求
-`Content-Length`** 以匹配修改后的 body 长度（否则下游解析长度不匹配导致截断/挂起）。
+**快照**（`save_original_params`）：注入前缓存客户端原始 `logprobs`/
+`top_logprobs`/`logprobs`、`return_tokens_as_token_ids` 与 **`n`** 等采集参数，供
+§3.2 响应恢复。注入后修正请求 `Content-Length` 匹配新 body 长度（否则下游解析长度
+不匹配导致截断/挂起）。
 
-**关键不变量**：`top_logprobs` 跨请求必须恒定（默认 20，可配置 1..20）。
+**关键不变量**：`top_logprobs` 跨请求必须恒定（默认 20，可配置 1-20）。
 原因见 §6.2（检测器 `topk` 首次锁定后不复位）。
 
 ### 3.2 响应抽取与恢复
 
-**抽取**（供检测）：per choice 取 `(topk_logprobs: list[dict[int,float]],
-tokens: list[int])`。
-- chat：`choices[].logprobs.content[]`，每 entry 的 `token`（`"token_id:NNN"`）
-  解析为 int，`top_logprobs[]` 每 entry 的 `token` 同理解析为 key、`logprob` 为 value。
-- completions：`choices[].logprobs.tokens[]` 解析为 token-id 序列；
-  `top_logprobs[]`（dict：token-id 字符串→logprob）解析为 dict[int,float]。
+**抽取**（供检测）：每个 choice 取 `(topk_logprobs: list[dict[int,float]],
+tokens: list[int])`。**已实测确认**：注入 `return_tokens_as_token_ids=true` 后
+chat/completions 各 token 字段确为 `"token_id:NNN"`。
+- chat：logprobs 位于 `choices[].logprobs.content[]`。每 entry 的
+  `token` = `'token_id:NNN'`（解析为 int）；`top_logprobs[]` 为对象列表，每项
+  `TopLogprob(token='token_id:1122', bytes=[22,33,55], logprob=-0.3)`——含独立
+  `token` 字段（同解析为 key）与 `logprob` 值。
+- completions：logprobs 位于 `choices[].logprobs`：
+  `tokens[]`（`'token_id:NNN'` 字符串序列）解析为 token-id 序列；
+  `token_logprobs[]` 为与 `tokens` 平行的 logprob 数值列表；
+  `top_logprobs[]` 为与 `tokens` 平行的 dict 列表（token-id 字符串→logprob），
+  解析为 dict[int,float]。
 
 `parse_token_id` 兼容两种形态：`"token_id:NNN"` 与纯数字串（如 `"22"`），失败返回 -1。
 
 **恢复**（供客户端，按原始参数）：
 - 客户端未请求 `logprobs` → `choice.logprobs=null`。
-- 客户端请求 `top_logprobs=N`（chat）/`logprobs=N`（completions）→ 截断到 N。
+- 客户端请求 `logprobs=True`、`top_logprobs=n`（chat）/`logprobs=n`（completions）→ 截断到 n。
 - 客户端未请求 `return_tokens_as_token_ids`：
-  - chat：`token`/`top_logprobs[].token` 从 `bytes`（utf-8 字节列表）解码为文本；无 bytes 则移除该字段。
+  - chat：`token`/`top_logprobs[].token` 从 `bytes`（utf-8 字节列表）解码为文本；
+    无 bytes 或解码失败 → 置 null（**绝不**留 `token_id:`）。
   - completions：无 tokenizer 可用，`tokens[]` 置为 `[null]*len`——**绝不**留 `token_id:` 前缀。
 - 客户端**已**请求 `return_tokens_as_token_ids` → 原样保留 `token_id:NNN`（这正是客户端所要）。
 
+**检测截断与客户端截断分离**：注入值为 `max(客户端, N)` 时每 token 的 top-logprobs
+条目数可能 > N。抽取检测数据（`extract_*_response`）时每 token **截断至 N**（检测器
+`topk=N` 锁定，见 §6.2）；恢复给客户端时**截断至客户端请求值**。例：客户端 `logprobs=10`、
+N=4 → 注入 10、每 token 10 项；送检测截前 4 项，返回客户端 10 项（见 spec §2.3）。
+
+**多候选（`n>1`）**：客户端设置 `n` 被快照保留；抽取/恢复/检测按 choice 循环处理 n 份
+候选，客户端输出逐 choice 套用上述规则（见 spec §2.3）。
+
 ### 3.3 流式响应处理（SSE）
 
-**流式形态**：vLLM 流式每块只含**最新 token** 的 logprobs（delta 语义）。
+**流式形态**（**已实测确认**）：vLLM 流式每块只含**最新 token** 的 logprobs 和 token_id。
 设计要求**先缓存全部流式推理结果，再进行检测**。
 
-- chat 流式：每块 `choices[].logprobs.content[]` 含本块新 token 的一个 entry
-  （`token`/`logprob`/`bytes`/`top_logprobs[]`）。累积器对每块 content 的每个 entry 做 append。
-- completions 流式：每块 `choices[].logprobs.tokens[]` 与 `top_logprobs[]`，append。
-  - 防御：若某块呈现累积数组（位置与已累积重叠），采用 **latest-longest-wins**
-    （取最长/最新数组覆盖），兼容可能的累积式。默认按 delta-append。
+- chat 流式：logprobs 位于 `choices[].logprobs.content[]`（**非 delta**），每块含本块
+  新 token 的一个 entry（`token='token_id:NNN'`、`logprob`、`bytes`、`top_logprobs[]`
+  对象列表，形态见 §3.2）。累积器对每块 content 的每个 entry 做 append。
+- completions 流式：logprobs 位于 `choices[].logprobs`，每块 `tokens[]`/
+  `token_logprobs[]`/`top_logprobs[]`（形态见 §3.2），append。
+  - 防御：若某块 `tokens`/`top_logprobs` 呈现累积数组（位置与已累积重叠），采用
+    **latest-longest-wins**（取最长/最新数组覆盖），兼容可能的累积式。默认按 delta-append。
 
 **SSE 处理状态机**（`SSEStreamProcessor`）：
 - 跨块缓冲 `_buffer`，按 `\n\n` 切分完整事件；半事件留缓冲。
@@ -154,10 +183,13 @@ tokens: list[int])`。
 
 ### 3.5 检测采样
 
-- 每被拦截请求抽 `random.random()`；`will_detect = rand < sample_rate`（默认 1.0，范围 0..1）。
-- **注入与恢复始终发生**（透明无条件）；仅检测提交受 `will_detect` 门控。
-- 理由：客户端若请求了 `logprobs`，非采样请求与其不应可观察不同；采样只控检测成本。
-- 代价：非采样请求仍付 JSON 解析/改写成本——廉价可接受。
+- 采样决定**整组处理**：每目标请求抽 `rand = random.random()`；
+  `will_detect = rand < sample_rate`（默认 1.0，范围 0-1）。
+- 未选中（`will_detect=False`）→ **纯透传**：不读 body、不注入、不恢复、不检测，
+  原样转发给下游（spec §2.8）。
+- 选中 → 该请求完整走读 body→注入→恢复→检测链路。`sample_rate=0` 永不注入不检测；
+  `1.0` 全检测。
+
 
 ### 3.6 请求关联标识
 
@@ -188,9 +220,9 @@ tokens: list[int])`。
 
 环境变量（带默认）：
 - `VLLM_ANOMALY_ENABLED`（默认 1）
-- `VLLM_ANOMALY_TOP_LOGPROBS`（默认 20，范围 1..20）
+- `VLLM_ANOMALY_TOP_LOGPROBS`（默认 20，范围 1-20）
 - `VLLM_ANOMALY_METRICS_PATH`（默认 `/anomaly/metrics`）
-- `VLLM_ANOMALY_SAMPLE_RATE`（默认 1.0，范围 0..1）
+- `VLLM_ANOMALY_SAMPLE_RATE`（默认 1.0，范围 0-1）
 - `VLLM_ANOMALY_DETECTOR_WORKERS`（默认 1）
 - `VLLM_ANOMALY_DETECTOR_CONFIG_PATH` / `VLLM_ANOMALY_MTYPE_CONFIG_PATH` /
   `VLLM_ANOMALY_TK2CAT_PATH`（显式路径覆盖）
@@ -198,10 +230,10 @@ tokens: list[int])`。
 校验：`top_logprobs∈[1,20]`、`sample_rate∈[0.0,1.0]`。
 
 检测器路径解析顺序：
-1. 三个显式 env 全设 → 用之，不自动发现；
-2. vendored 拷贝（按 `__file__` 定位 `response_anomaly/configs|token2category`）；
-3. 外部可导入 `response_anomaly` / `msprobe.response_anomaly`；
-4. 都没有 → `RuntimeError`。
+1. 优先 response_anomaly 算法检测文件夹已经固定在本项目下，固定路径方式调用；
+2. 其次外部可导入的`response_anomaly`/`msprobe.response_anomaly`；
+3. 再次由用户指定 response_anomaly 路径，由中间件将 response_anomaly 代码拷贝到项目固定路径下；
+4. 都没有 → 将详细信息写入日志，降级为透传方式。
 
 ### 3.9 降级机制
 
@@ -221,13 +253,22 @@ attach 指标助手；建 `_pending_tasks` set 与 `_runner_lock`/`_runner_inite
 **`__call__(scope, receive, send)` 分派**：
 1. 非 http scope → 透传 `self.app`。
 2. `GET <metrics_path>` → 内联 `_serve_metrics`。
-3. 非 POST、非目标路径、或 `enabled=False` → 透传。
-4. 目标 POST：读 body、解析 JSON；非 dict/非 JSON → 透传。
-5. `will_detect = random.random() < sample_rate`。
-6. 若 `will_detect`：`_ensure_runner()`（双检锁）；失败→`enabled=False`→本请求透传。
-7. 若仍 enabled：`save_original_params` → `inject_params` → patch 请求 CL →
-   建 `RequestContext`(orig/model/request_id/will_detect) → 装 `ResponseInterceptor` →
-   `await self.app(scope, replay_receive, interceptor)`。
+3. 非 POST、非目标路径、或 `enabled=False` → 透传（不读 body）。
+4. 采样：`will_detect = random.random() < sample_rate`；未选中 → 纯透传（不读 body、
+   不注入、不恢复、不检测，见 §3.5）。
+5. 选中：`_read_all_body(receive)` 聚合 body → `json.loads`；非 dict/非 JSON →
+   `_make_replay_receive(receive, raw, request_id)` 原样重放透传。
+6. `_ensure_runner()`（双检锁）；失败→`enabled=False`→本请求重放透传。
+7. `save_original_params` → `inject_params`（注入值 max(客户端,N)）→
+   `_patch_scope_content_length(new_body_len)` → 建 `RequestContext`
+   (orig/model/request_id/will_detect) →
+   `replay_receive = _make_replay_receive(receive, new_body, request_id)` →
+   装 `ResponseInterceptor` → `await self.app(new_scope, replay_receive, interceptor)`。
+
+**`_make_replay_receive(original_receive, body, request_id)`**：首次调用返回合成
+`{"type":"http.request","body":body,"more_body":False}`；**后续调用委托
+`await original_receive()`**，绝不返回空 body 的 `http.request`（vLLM 会重复处理请求）。
+透传（非 JSON/非 dict）与注入两条路径都经此包装——body 已被读走必须重放。
 
 **`_ensure_runner` 顺序前置**：runner 构造（廉价）在注入之前；失败则本请求纯透传，
 避免半注入响应。重头检测器在 worker 线程内首次检测时构造（见 §6.1）。
@@ -237,7 +278,7 @@ attach 指标助手；建 `_pending_tasks` set 与 `_runner_lock`/`_runner_inite
 
 ### 4.2 ResponseInterceptor（响应拦截器）
 
-**构造**：`(send, *, is_chat, orig_params, model, runner, request_id, will_detect)`。
+**构造**：`(send, *, is_chat, orig_params, model, runner, request_id, will_detect, metrics, top_logprobs, pending_tasks)`。
 状态：`_is_streaming`、`_start_msg`、`_body_buf`、`_sse`、`_finished`、`_detection_scheduled`、`_detection_results`。
 
 **`__call__(message)` 分派**：
@@ -315,7 +356,15 @@ return detector.run(topk, tokens, model_configs)`。
 内部 `_run()`：`detection_duration.time()` 计时 → `runner.run_async(...)` →
 `record_detection(results, model)`；except → `record_error()`。
 
-### 4.5 检测器契约要点（vendored）
+### 4.5 检测器契约要点
+
+> **vendored 含义**：`response_anomaly/` 是第三方检测算法源码被**直接内置进本项目包**
+> （vendor 进项目），随中间件分发，区别于运行时外部导入或用户指定路径。spec §2.12
+> 规定三条获取路径：① 优先本项目内置固定路径（vendored）；② 其次外部可导入的
+> `response_anomaly`/`msprobe.response_anomaly`；③ 再次用户指定路径，由中间件将代码
+> 拷贝到项目固定路径下（拷贝后等同 vendored）。**§4.5 的契约对三条路径均成立**；
+> 3 处缺陷修复仅落在 vendored 拷贝上，外部/拷贝来源须自行满足同一契约，否则构造或
+> 运行失败 → 按 §3.9 降级透传。
 
 - 批量入口：`run(topk: list[list[dict[int,float]]], tokens: list[list[int]],
   model_configs: list) -> list[[bool,int]]`。`model_configs` 是与 choice 平行的列表，
@@ -417,20 +466,28 @@ worker: 累积全部 token 的 ILLDetector.run → record_detection
 | metrics 路径被 app 路由占用 | 默认 `/anomaly/metrics` 避开 vLLM `/metrics`；可配置 |
 | `Expect: 100-continue` | ASGI 不暴露，由 uvicorn/vLLM 处理，安全 |
 | chunked 请求 | ASGI 已合并为完整 body，`_read_all_body` 正确 |
+| 下游二次读 receive | 重放 receive 委托原始 `receive()` 取真实后续消息（`http.disconnect`）；不得合成空 body 的 `http.request`（实测 vLLM 会重复请求） |
 
 ## 8. 部署
 
-- 安装：`pip install -e D:\programs\new_codes`。
-- 启动：`vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware`。
+前置：vLLM 运行环境能 `import vllm_anomaly_middleware` 即可。包内已内置 vendored
+`response_anomaly/` 及 configs（`configs/`、`token2category/`），随包定位，无需额外数据路径。
+
+项目路径：path=xxx/vllm_anomaly_middleware
+
+两种接入方式（任选其一）：
+- **方式 A（推荐）**：`pip install -e $path`
+  —— 可编辑安装，自动安装依赖（`prometheus_client`、`pyyaml`），任意工作目录启动均可 import。
+- **方式 B（免安装）**：vLLM 环境已装有依赖时，仅需把项目根加入导入路径后启动：
+  ```powershell
+  $env:PYTHONPATH = $path
+  vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
+  ```
+  （依赖缺失则先 `pip install prometheus_client pyyaml`。）
+
+启动：`vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware`。
 - 无需 entry-point 注册、无需 `VLLM_PLUGINS` 白名单、无需特定 vLLM 插件接口，
   仅需 vLLM 支持 `--middleware`。
 - 短路径 `vllm_anomaly_middleware.AnomalyMiddleware` 与长路径
   `vllm_anomaly_middleware.middleware.AnomalyMiddleware` 均可解析（`__init__.py` 重导出）。
 - 回滚：移除 `--middleware` 标志（服务器恢复默认行为），或重指向上游包。中间件无持久副作用。
-
-## 9. 待实现期校准项
-
-- vLLM 流式 chat chunk 的 logprobs 位置：按 `choices[].logprobs.content[]` 读取；
-  若实际为 `choices[].delta.logprobs.content[]`，改读 `choice["delta"]["logprobs"]` 即可（单点改）。
-- vLLM completions 流式 `tokens[]`/`top_logprobs[]` 是否为 delta；`latest-longest-wins` 兜底。
-- 注入 `return_tokens_as_token_ids=true` 后，chat/completions 各 token 字段是否确为 `"token_id:NNN"`。
