@@ -47,6 +47,8 @@ func BuildBaselines(baselineRows []CSVRow, cardIDs []int) map[int]map[MetricName
 				Metric: metric,
 				Mean:   mean,
 				StdDev: std,
+				Median: Percentile(sorted, 0.50),
+				Mad:    Mad(values),
 				P50:    Percentile(sorted, 0.50),
 				P95:    Percentile(sorted, 0.95),
 				P99:    Percentile(sorted, 0.99),

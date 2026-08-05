@@ -51,7 +51,7 @@
 ### 2.1 CSV 结构
 
 ```
-timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL,NPU_CARD_HBM_UTIL,NPU_TX_BANDWIDTH,NPU_RX_PFC_PKT,NPU_ROCE_TX_ERR_PKT,NPU_ROCE_OUT_OF_ORDER,NPU_ROCE_NEW_PKT_RTY,NPU_NIC_RX_ALL_PKG,CPU_average
+timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL,NPU_CARD_HBM_BANDWIDTH_UTIL,NPU_CARD_HBM_UTIL,NPU_TX_BANDWIDTH,NPU_RX_PFC_PKT,NPU_ROCE_TX_ERR_PKT,NPU_ROCE_OUT_OF_ORDER,NPU_ROCE_NEW_PKT_RTY,NPU_NIC_RX_ALL_PKG,CPU_average
 1784547926,"{""0"":1628,...,""7"":1688}","{""0"":47,...,""7"":50}",...,"{""cpu1"":""4.26"",...}"
 ```
 
@@ -62,7 +62,8 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `NPU_CARD_TEMP` | 每卡温度 | ℃ | JSON dict[card→float] |
 | `NPU_CARD_AICORE_FREQ` | 每卡 AI Core 频率 | MHz | JSON dict[card→float] |
 | `NPU_CARD_AICORE_UTIL` | 每卡 AI Core 利用率 | % | JSON dict[card→float] |
-| `NPU_CARD_HBM_UTIL` | 每卡 HBM 利用率 | % | JSON dict[card→float] |
+| `NPU_CARD_HBM_BANDWIDTH_UTIL` | 每卡 HBM 带宽使用率 | % | JSON dict[card→float] |
+| `NPU_CARD_HBM_UTIL` | 每卡 HBM 内存使用率（仅采集跟踪，不参与根因规则） | % | JSON dict[card→float] |
 | `NPU_TX_BANDWIDTH` | 每卡发送带宽 | ? | JSON dict[card→float] |
 | `NPU_RX_PFC_PKT` | 每卡接收 PFC 暂停帧 | 包数 | JSON dict[card→float] |
 | `NPU_ROCE_TX_ERR_PKT` | 每卡 RoCE 发送错误包 | 包数 | JSON dict[card→float] |
@@ -268,7 +269,7 @@ if 增量 > 0: 聚合值 = 增量
   if z[i] > zThreshold (默认 2.5) → 标记该时间点空间异常
 ```
 
-适用：POWER, TEMP, AICORE_UTIL, HBM_UTIL, TX_BANDWIDTH
+适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH
 
 **方法 B：IQR**
 
@@ -296,6 +297,8 @@ IQR = Q3 - Q1
   历史基线值 B = [v_t1, v_t2, ..., v_tN]  （基线窗口内该卡所有值）
   baseline_mean = avg(B)
   baseline_std  = stdev(B)
+  baseline_median = median(B)
+  baseline_mad    = MAD(B) = median(|B - baseline_median|)
 
   检测窗口内的均值 current_mean = avg(检测窗口内的值)
   时间 Z-Score = |current_mean - baseline_mean| / baseline_std
@@ -303,6 +306,34 @@ IQR = Q3 - Q1
   if baseline_std == 0 → 跳过（历史无波动）
   if 时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
 ```
+
+**鲁棒 MAD 变体（temp / power / aicore_freq / aicore_util / hbm_bandwidth_util）**：
+这五个指标改用 median + MAD 构造鲁棒 Z-Score，防止基线被历史故障数据污染
+（mean 会被异常拖向异常值、std 被平方放大，导致 Z-Score 缩小而漏报）：
+
+```
+  检测窗口内的中位数 current_median = median(检测窗口内的值)
+  鲁棒时间 Z-Score = |current_median - baseline_median| / (1.4826 * baseline_mad)
+
+  if baseline_mad == 0 → 跳过（历史无波动）
+  if 鲁棒时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
+```
+
+- `1.4826 = 1/0.6745`：正态分布下 MAD ≈ 0.6745σ，使鲁棒 Z-Score 与经典
+  Z-Score 同尺度，阈值 2.0 的语义不变。
+- median 与 MAD 的崩溃点为 50%：只要基线窗口内正常数据占多数，少量故障
+  时段不会带偏鲁棒统计量（而 mean/StdDev 会被少数极端值拖走）。
+- aicore_util / hbm_bandwidth_util 在工作态占比 ≥50% 时（实际场景几乎 100%），
+  median 和 MAD 同样不会被空闲态（双峰分布的低值尾巴）污染——空闲点只占
+  ≤20% 且落在绝对偏差的上尾，碰不到偏差的中位数。因此这两个指标也采用 MAD。
+- 其余指标（含 4 个网络错误计数器、tx_bandwidth、hbm_util）仍使用经典
+  mean/std Z-Score；每指标方法由 `MetricMetaRegistry.TimeMethod` 决定。
+
+**基线防污染的前提假设**：基线窗口中大部分数据（>50%）是正常的，只有小部分
+（<50%）是异常/故障数据。MAD 的崩溃点为 50%——只要正常数据占比 >50%，median
+和 MAD 就不会被少数异常值污染。如果异常数据过半，则基线本身已失去参考意义，
+此时任何统计方法都无法可靠区分"正常"和"异常"。建议缩短基线窗口或手动剔除
+已知故障时段。
 
 **趋势增强**：对历史基线窗口 + 检测窗口的整体数据做线性回归：
 - `value = slope * timestamp + intercept`
@@ -322,7 +353,8 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 |------|------|------|---------|
 | **计算** | `AICORE_FREQ` | AI Core 频率 | ↓ 降频 |
 | | `AICORE_UTIL` | AI Core 利用率 | ↓ 计算没跑满 |
-| | `HBM_UTIL` | HBM 利用率 | ↓ 内存空闲 |
+| | `HBM_BANDWIDTH_UTIL` | HBM 带宽使用率 | ↓ 带宽闲置 |
+| | `HBM_UTIL` | HBM 内存使用率 | ↓ 内存空闲 |
 | | `TEMP` | 温度 | ↑ 过热 |
 | | `POWER` | 功耗 | ↓ 空载 / ↑ 过热 |
 | **通信** | `TX_BANDWIDTH` | 发送带宽 | ↓ 通信受限 |
@@ -338,7 +370,7 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 ```
 对每张卡：
   ┌─────────────┐
-  │ 1. 检测计算  │  ← FREQ, AICORE_UTIL, HBM_UTIL, TEMP, POWER
+  │ 1. 检测计算  │  ← FREQ, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TEMP, POWER
   └──────┬──────┘
          │
     ┌────┴────┐
@@ -389,9 +421,9 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 | C1 | TEMP↑ + FREQ↓ | **热降频** | 高 | 检查风扇转速/风道堵塞/机房环境温度 |
 | C2 | TEMP↑ + POWER↑ + FREQ— | **散热能力不足** | 高 | 检查散热器接触/硅脂老化/风扇故障 |
 | C3 | FREQ↓ + TEMP— | **强制降频（非热）** | 中 | 检查驱动/固件的频率策略配置 |
-| C4 | POWER↓ + AICORE_UTIL↓ + HBM_UTIL↓ | **Straggler（卡空闲等待）** | 高 | 该卡可能在等通信/等数据，触发 Profiling 精查 |
-| C5 | AICORE_UTIL↓ + HBM_UTIL— | **计算负载不均** | 中 | 检查数据分发策略/模型并行切分是否均衡 |
-| C6 | HBM_UTIL↓ + AICORE_UTIL— | **内存带宽瓶颈** | 低 | 检查 HBM 访问模式/是否有大量 cache miss |
+| C4 | POWER↓ + AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL↓ | **Straggler（卡空闲等待）** | 高 | 该卡可能在等通信/等数据，触发 Profiling 精查 |
+| C5 | AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL— | **计算负载不均** | 中 | 检查数据分发策略/模型并行切分是否均衡 |
+| C6 | HBM_BANDWIDTH_UTIL↓ + AICORE_UTIL— | **内存带宽瓶颈** | 低 | 检查 HBM 访问模式/是否有大量 cache miss |
 | C7 | TEMP↑ + POWER— + FREQ— | **温度传感器漂移** | 中 | 交叉验证功率数据（真发热必伴随功率↑） |
 | C8 | 多指标同时异常（≥4个，含计算类） | **板卡综合性硬件故障** | 高 | 建议隔离该卡，安排硬件诊断/更换 |
 | C9 | 单项 TEMP↑ 孤立 | **局部热点/传感器个体差异** | 低 | 持续观察，若升级为双维异常则按 C1 处理 |
@@ -590,6 +622,7 @@ type CSVRow struct {
     Temp           map[int]float64
     AICoreFreq     map[int]float64
     AICoreUtil     map[int]float64
+    HBMBandwidthUtil map[int]float64
     HBMUtil        map[int]float64
     TXBandwidth    map[int]float64
     RXPfcPkt       map[int]float64
@@ -616,6 +649,7 @@ const (
     MetricPower          MetricName = "power"
     MetricAICoreFreq     MetricName = "aicore_freq"
     MetricAICoreUtil     MetricName = "aicore_util"
+    MetricHBMBandwidthUtil MetricName = "hbm_bandwidth_util"
     MetricHBMUtil        MetricName = "hbm_util"
     MetricTXBandwidth    MetricName = "tx_bandwidth"
     MetricRXPfcPkt       MetricName = "rx_pfc_pkt"

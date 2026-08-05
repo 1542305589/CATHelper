@@ -215,7 +215,7 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 			for _, d := range s.AnomalyDetails {
 				if d.TimeAbnormal {
 					fmt.Fprintf(&b, "    %-20s time_z=%.1f current=%.1f baseline=%.1f±%.1f\n",
-						d.Metric, d.TimeScore, d.CurrentMean, d.BaselineMean, 0.0)
+						d.Metric, d.TimeScore, d.CurrentMean, d.BaselineMean, d.BaselineStd)
 				}
 			}
 			if len(s.TrendFindings) > 0 {

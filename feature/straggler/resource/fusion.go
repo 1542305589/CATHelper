@@ -183,6 +183,7 @@ func mergeDetails(
 			d.TimeAbnormal = td.TimeAbnormal
 			d.CurrentMean = td.CurrentMean
 			d.BaselineMean = td.BaselineMean
+			d.BaselineStd = td.BaselineStd
 			d.PeerMean = td.PeerMean
 		}
 

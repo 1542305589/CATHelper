@@ -98,7 +98,8 @@ type columnIndex struct {
 	temp          int
 	aicoreFreq    int
 	aicoreUtil    int
-	hbmUtil       int
+	hbmBandwidthUtil       int
+	hbmUtil                int
 	txBandwidth   int
 	rxPfcPkt      int
 	roceTxErrPkt  int
@@ -115,7 +116,8 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 		temp:          -1,
 		aicoreFreq:    -1,
 		aicoreUtil:    -1,
-		hbmUtil:       -1,
+		hbmBandwidthUtil:       -1,
+		hbmUtil:                -1,
 		txBandwidth:   -1,
 		rxPfcPkt:      -1,
 		roceTxErrPkt:  -1,
@@ -131,7 +133,8 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 		"NPU_CARD_TEMP":          &ci.temp,
 		"NPU_CARD_AICORE_FREQ":   &ci.aicoreFreq,
 		"NPU_CARD_AICORE_UTIL":   &ci.aicoreUtil,
-		"NPU_CARD_HBM_UTIL":      &ci.hbmUtil,
+		"NPU_CARD_HBM_BANDWIDTH_UTIL":      &ci.hbmBandwidthUtil,
+		"NPU_CARD_HBM_UTIL":                &ci.hbmUtil,
 		"NPU_TX_BANDWIDTH":       &ci.txBandwidth,
 		"NPU_RX_PFC_PKT":         &ci.rxPfcPkt,
 		"NPU_ROCE_TX_ERR_PKT":    &ci.roceTxErrPkt,
@@ -185,6 +188,7 @@ func parseRow(rec []string, ci columnIndex) (CSVRow, error) {
 	row.Temp = parseMetricJSON(rec, ci.temp, "NPU_CARD_TEMP")
 	row.AICoreFreq = parseMetricJSON(rec, ci.aicoreFreq, "NPU_CARD_AICORE_FREQ")
 	row.AICoreUtil = parseMetricJSON(rec, ci.aicoreUtil, "NPU_CARD_AICORE_UTIL")
+	row.HBMBandwidthUtil = parseMetricJSON(rec, ci.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL")
 	row.HBMUtil = parseMetricJSON(rec, ci.hbmUtil, "NPU_CARD_HBM_UTIL")
 	row.TXBandwidth = parseMetricJSON(rec, ci.txBandwidth, "NPU_TX_BANDWIDTH")
 	row.RXPfcPkt = parseMetricJSON(rec, ci.rxPfcPkt, "NPU_RX_PFC_PKT")
@@ -290,6 +294,8 @@ func getMetricDict(row CSVRow, metric MetricName) map[int]float64 {
 		return row.AICoreFreq
 	case MetricAICoreUtil:
 		return row.AICoreUtil
+	case MetricHBMBandwidthUtil:
+		return row.HBMBandwidthUtil
 	case MetricHBMUtil:
 		return row.HBMUtil
 	case MetricTXBandwidth:
@@ -318,6 +324,8 @@ func setMetricDict(row *CSVRow, metric MetricName, vals map[int]float64) {
 		row.AICoreFreq = vals
 	case MetricAICoreUtil:
 		row.AICoreUtil = vals
+	case MetricHBMBandwidthUtil:
+		row.HBMBandwidthUtil = vals
 	case MetricHBMUtil:
 		row.HBMUtil = vals
 	case MetricTXBandwidth:
