@@ -1,0 +1,499 @@
+"""抽取/恢复 + SSEStreamProcessor + 请求参数快照/注入（design §3.1/§3.2/§3.3, spec §2.2/§2.3/§2.4）。
+
+纯数据层：不涉及 ASGI。middleware.py 负责 ASGI 集成（读 body、重放 receive、patch scope）。
+本模块负责：请求体参数快照、强制注入、响应抽取（供检测）、响应恢复（供客户端）、SSE 跨块重组。
+"""
+from __future__ import annotations
+
+import copy
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+TOKEN_ID_PREFIX = "token_id:"
+
+
+@dataclass
+class OriginalParams:
+    """客户端原始采集参数快照（供恢复）。"""
+
+    is_chat: bool
+    logprobs: Any  # chat: bool|None；completions: int|None（数量）
+    top_logprobs: Optional[int]  # chat only
+    return_tokens_as_token_ids: bool
+    n: int
+    stream: bool
+
+
+# --------------------------------------------------------------------------- #
+# 请求参数：快照 / 注入（§3.1 / §2.2）
+# --------------------------------------------------------------------------- #
+def save_original_params(body: Any, is_chat: bool) -> OriginalParams:
+    """注入前缓存客户端原始采集参数（供 §3.2 响应恢复）。"""
+    if not isinstance(body, dict):
+        return OriginalParams(is_chat, None, None, False, 1, False)
+    if is_chat:
+        logprobs = body.get("logprobs")  # bool|None
+        top_logprobs = body.get("top_logprobs")  # int|None
+    else:
+        logprobs = body.get("logprobs")  # int|None（数量）
+        top_logprobs = None
+    rtati = body.get("return_tokens_as_token_ids", False)
+    try:
+        n = int(body.get("n", 1) or 1)
+    except (TypeError, ValueError):
+        n = 1
+    stream = bool(body.get("stream", False))
+    return OriginalParams(
+        is_chat=is_chat,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
+        return_tokens_as_token_ids=bool(rtati),
+        n=n,
+        stream=stream,
+    )
+
+
+def inject_params(body: Any, is_chat: bool, n_detect: int) -> bytes:
+    """强制注入检测所需参数，返回新 body 字节。
+
+    chat：logprobs=True、top_logprobs=max(客户端,N)、return_tokens_as_token_ids=True
+    completions：logprobs=max(客户端,N)、return_tokens_as_token_ids=True
+    """
+    nb = dict(body) if isinstance(body, dict) else {}
+    if is_chat:
+        client_top = body.get("top_logprobs") if isinstance(body, dict) else None
+        injected = max(client_top, n_detect) if client_top is not None else n_detect
+        nb["logprobs"] = True
+        nb["top_logprobs"] = injected
+    else:
+        client_logp = body.get("logprobs") if isinstance(body, dict) else None
+        injected = max(client_logp, n_detect) if client_logp is not None else n_detect
+        nb["logprobs"] = injected
+    nb["return_tokens_as_token_ids"] = True
+    return json.dumps(nb, ensure_ascii=False).encode("utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# 基础工具
+# --------------------------------------------------------------------------- #
+def parse_token_id(value: Any) -> int:
+    """兼容 "token_id:NNN" 与纯数字串；失败返回 -1。"""
+    if value is None:
+        return -1
+    if isinstance(value, bool):
+        return -1
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith(TOKEN_ID_PREFIX):
+            s = s[len(TOKEN_ID_PREFIX):].strip()
+        try:
+            return int(s)
+        except ValueError:
+            return -1
+    return -1
+
+
+def _decode_bytes(b: Any) -> Optional[str]:
+    """从 utf-8 字节列表解码文本；无 bytes/失败 → None（绝不留 token_id:）。"""
+    if b is None:
+        return None
+    if isinstance(b, str):
+        return b
+    if isinstance(b, (list, tuple)):
+        try:
+            arr = bytes(int(x) & 0xFF for x in b)
+            return arr.decode("utf-8")
+        except Exception:
+            return None
+    return None
+
+
+def _truncate_topk(d: Dict[int, float], n: Optional[int]) -> Dict[int, float]:
+    """按 logprob 降序取前 n 项（供检测，截断到 N）。"""
+    if not n or n <= 0 or not d:
+        return {}
+    items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:n]
+    return dict(items)
+
+
+# --------------------------------------------------------------------------- #
+# 抽取（供检测）：per choice -> (topk_list, tokens_list)
+# --------------------------------------------------------------------------- #
+def extract_chat_response(
+    data: Any, n_detect: int
+) -> List[Tuple[List[Dict[int, float]], List[int]]]:
+    """chat 非流式：choices[].logprobs.content[]。返回 per choice (topk_list, tokens_list)。"""
+    results: List[Tuple[List[Dict[int, float]], List[int]]] = []
+    if not isinstance(data, dict):
+        return results
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return results
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        lp = choice.get("logprobs")
+        topk_list: List[Dict[int, float]] = []
+        tokens_list: List[int] = []
+        if isinstance(lp, dict):
+            content = lp.get("content")
+            if isinstance(content, list):
+                for entry in content:
+                    if not isinstance(entry, dict):
+                        continue
+                    tokens_list.append(parse_token_id(entry.get("token")))
+                    tps = entry.get("top_logprobs")
+                    if not isinstance(tps, list):
+                        tps = []
+                    d: Dict[int, float] = {}
+                    for tp in tps:
+                        if not isinstance(tp, dict):
+                            continue
+                        tid = parse_token_id(tp.get("token"))
+                        if tid >= 0:
+                            try:
+                                d[tid] = float(tp.get("logprob"))
+                            except (TypeError, ValueError):
+                                pass
+                    topk_list.append(_truncate_topk(d, n_detect))
+        results.append((topk_list, tokens_list))
+    return results
+
+
+def extract_completions_response(
+    data: Any, n_detect: int
+) -> List[Tuple[List[Dict[int, float]], List[int]]]:
+    """completions 非流式：choices[].logprobs{tokens[],token_logprobs[],top_logprobs[]}。"""
+    results: List[Tuple[List[Dict[int, float]], List[int]]] = []
+    if not isinstance(data, dict):
+        return results
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return results
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        lp = choice.get("logprobs")
+        topk_list: List[Dict[int, float]] = []
+        tokens_list: List[int] = []
+        if isinstance(lp, dict):
+            toks = lp.get("tokens")
+            if isinstance(toks, list):
+                tokens_list = [parse_token_id(t) for t in toks]
+            top_logprobs = lp.get("top_logprobs")
+            if isinstance(top_logprobs, list):
+                for pos in top_logprobs:
+                    if not isinstance(pos, dict):
+                        topk_list.append({})
+                        continue
+                    d: Dict[int, float] = {}
+                    for k, v in pos.items():
+                        tid = parse_token_id(k)
+                        if tid >= 0:
+                            try:
+                                d[tid] = float(v)
+                            except (TypeError, ValueError):
+                                pass
+                    topk_list.append(_truncate_topk(d, n_detect))
+        results.append((topk_list, tokens_list))
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# 恢复（供客户端，按原始参数）
+# --------------------------------------------------------------------------- #
+def strip_chat_response(data: Any, orig: OriginalParams) -> None:
+    """chat 响应恢复（原位修改 data）。"""
+    if not isinstance(data, dict):
+        return
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        lp = choice.get("logprobs")
+        if lp is None:
+            continue
+        if not orig.logprobs:
+            # 客户端未请求 logprobs → null
+            choice["logprobs"] = None
+            continue
+        m = orig.top_logprobs  # 客户端 M（int|None）
+        content = lp.get("content")
+        if isinstance(content, list):
+            for entry in content:
+                if not isinstance(entry, dict):
+                    continue
+                tps = entry.get("top_logprobs")
+                if not isinstance(tps, list):
+                    tps = []
+                if m is not None:
+                    tps = tps[:m]
+                else:
+                    tps = []
+                if not orig.return_tokens_as_token_ids:
+                    entry["token"] = _decode_bytes(entry.get("bytes"))
+                    for tp in tps:
+                        if isinstance(tp, dict):
+                            tp["token"] = _decode_bytes(tp.get("bytes"))
+                entry["top_logprobs"] = tps
+
+
+def strip_completions_response(data: Any, orig: OriginalParams) -> None:
+    """completions 响应恢复（原位修改 data）。
+
+    无 tokenizer：客户端未请求 return_tokens_as_token_ids 时
+    tokens[]=[None]*len、top_logprobs[]=[None]*len（绝不留 token_id:）。
+    """
+    if not isinstance(data, dict):
+        return
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        lp = choice.get("logprobs")
+        if lp is None:
+            continue
+        if not orig.logprobs:
+            choice["logprobs"] = None
+            continue
+        m = orig.logprobs  # completions 的 logprobs 即数量 M
+        top_logprobs = lp.get("top_logprobs")
+        if isinstance(top_logprobs, list):
+            new_tlp: List[Any] = []
+            for pos in top_logprobs:
+                if not isinstance(pos, dict):
+                    new_tlp.append(None)
+                    continue
+                if m is not None:
+                    items = list(pos.items())[:m]
+                else:
+                    items = []
+                if orig.return_tokens_as_token_ids:
+                    new_tlp.append({k: v for k, v in items})
+                else:
+                    # 无 tokenizer，无法将 token_id 解码为文本 → null（绝不留 token_id:）
+                    new_tlp.append(None)
+            lp["top_logprobs"] = new_tlp
+        if not orig.return_tokens_as_token_ids:
+            toks = lp.get("tokens")
+            if isinstance(toks, list):
+                lp["tokens"] = [None] * len(toks)
+
+
+# --------------------------------------------------------------------------- #
+# SSE 流式处理器（§3.3 / §2.4）
+# --------------------------------------------------------------------------- #
+class SSEStreamProcessor:
+    """跨块事件重组 + 每块恢复 + per-choice 累积检测数据。
+
+    转发：增量无状态（每块即发）；检测数据：跨块有状态 append。
+    """
+
+    def __init__(self, is_chat: bool, orig: OriginalParams, n_detect: int) -> None:
+        self._is_chat = is_chat
+        self._orig = orig
+        self._n_detect = n_detect
+        self._buffer = bytearray()
+        self._model: Optional[str] = None
+        # chat 累积：choice_index -> list[entry]
+        self._chat_acc: Dict[int, List[Dict[str, Any]]] = {}
+        # completions 累积：choice_index -> {tokens, token_logprobs, top_logprobs}
+        self._comp_acc: Dict[int, Dict[str, List[Any]]] = {}
+
+    # ---- 转发接口 ---- #
+    def feed(self, chunk: bytes) -> bytes:
+        self._buffer.extend(chunk)
+        out = bytearray()
+        while True:
+            idx, term_len = self._find_event_boundary()
+            if idx < 0:
+                break
+            event = bytes(self._buffer[:idx])
+            del self._buffer[: idx + term_len]
+            out += self._process_event(event)
+        return bytes(out)
+
+    def flush(self) -> bytes:
+        if not self._buffer:
+            return b""
+        tail = bytes(self._buffer)
+        self._buffer.clear()
+        return self._process_event(tail)
+
+    def _find_event_boundary(self) -> Tuple[int, int]:
+        """返回最早的事件终止符 (idx, term_len)；无则 (-1, 0)。
+
+        兼容 LF（\\n\\n）与 CRLF（\\r\\n\\r\\n）两种 SSE 事件终止符（§3.3）。
+        """
+        lf = self._buffer.find(b"\n\n")
+        crlf = self._buffer.find(b"\r\n\r\n")
+        candidates: List[Tuple[int, int]] = []
+        if lf >= 0:
+            candidates.append((lf, 2))
+        if crlf >= 0:
+            candidates.append((crlf, 4))
+        if not candidates:
+            return -1, 0
+        return min(candidates)
+
+    # ---- 事件处理 ---- #
+    def _process_event(self, event: bytes) -> bytes:
+        if not event.strip():
+            return b""
+        lines = [l.rstrip(b"\r") for l in event.split(b"\n")]
+        data_lines = [l for l in lines if l.startswith(b"data:")]
+        other_lines = [l for l in lines if not l.startswith(b"data:")]
+        if not data_lines:
+            # keep-alive / 注释：原样透传
+            return event + b"\n\n"
+        # 聚合 data 负载（多 data 行用 \n 连接）
+        payload = b"\n".join(l[len(b"data:"):].lstrip(b" ") for l in data_lines)
+        if payload.strip() == b"[DONE]":
+            # 终端 [DONE] 原样透传
+            return event + b"\n\n"
+        try:
+            parsed = json.loads(payload.decode("utf-8"))
+        except Exception:
+            # 非 JSON 原样透传
+            return event + b"\n\n"
+        if not isinstance(parsed, dict):
+            return event + b"\n\n"
+        # 捕获 model
+        model = parsed.get("model")
+        if isinstance(model, str) and model:
+            self._model = model
+        # 累积检测数据
+        self._extract_streaming(parsed)
+        # 每块无状态恢复
+        self._strip_streaming(parsed)
+        # 重序列化
+        new_data = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+        out = bytearray(b"data: ")
+        out += new_data
+        out += b"\n"
+        if other_lines:
+            out += b"\n".join(other_lines)
+            out += b"\n"
+        out += b"\n\n"
+        return bytes(out)
+
+    def _extract_streaming(self, parsed: Dict[str, Any]) -> None:
+        choices = parsed.get("choices")
+        if not isinstance(choices, list):
+            return
+        for ci, choice in enumerate(choices):
+            if not isinstance(choice, dict):
+                continue
+            # 流式 n>1 时每个 chunk 通常只带一个 choice（带 index 字段），
+            # 必须按真实 choice.index 分组，不能按 chunk 内位置（否则 n 个候选合并成一组）
+            cidx = choice.get("index", ci)
+            lp = choice.get("logprobs")
+            if lp is None:
+                continue
+            if self._is_chat:
+                content = lp.get("content")
+                if isinstance(content, list):
+                    acc = self._chat_acc.setdefault(cidx, [])
+                    # latest-longest-wins 防御（累积式）
+                    if acc and content and _entry_token(content[0]) == _entry_token(acc[0]) and len(content) > len(acc):
+                        acc.clear()
+                    # 深拷贝：后续 strip 会原位改写 parsed 里的 entry/top_logprobs，
+                    # 必须与检测数据解耦，否则检测数据被客户端参数截断（回归）
+                    acc.extend(copy.deepcopy(e) for e in content if isinstance(e, dict))
+            else:
+                toks = lp.get("tokens")
+                tl = lp.get("token_logprobs")
+                tlp = lp.get("top_logprobs")
+                toks = list(toks) if isinstance(toks, list) else []
+                tl = list(tl) if isinstance(tl, list) else []
+                tlp = list(tlp) if isinstance(tlp, list) else []
+                acc = self._comp_acc.setdefault(
+                    cidx, {"tokens": [], "token_logprobs": [], "top_logprobs": []}
+                )
+                if not acc["tokens"]:
+                    acc["tokens"] = toks
+                    acc["token_logprobs"] = tl
+                    acc["top_logprobs"] = tlp
+                elif toks and toks[0] == acc["tokens"][0] and len(toks) > len(acc["tokens"]):
+                    # 累积式：latest-longest-wins
+                    acc["tokens"] = toks
+                    acc["token_logprobs"] = tl
+                    acc["top_logprobs"] = tlp
+                else:
+                    acc["tokens"].extend(toks)
+                    acc["token_logprobs"].extend(tl)
+                    acc["top_logprobs"].extend(tlp)
+
+    def _strip_streaming(self, parsed: Dict[str, Any]) -> None:
+        if self._is_chat:
+            strip_chat_response(parsed, self._orig)
+        else:
+            strip_completions_response(parsed, self._orig)
+
+    # ---- 检测数据 ---- #
+    def get_detection_data(
+        self,
+    ) -> Tuple[List[List[Dict[int, float]]], List[List[int]], List[str]]:
+        topk_all: List[List[Dict[int, float]]] = []
+        tokens_all: List[List[int]] = []
+        if self._is_chat:
+            for ci in sorted(self._chat_acc.keys()):
+                content = self._chat_acc[ci]
+                topk_list: List[Dict[int, float]] = []
+                tokens_list: List[int] = []
+                for entry in content:
+                    tps = entry.get("top_logprobs")
+                    if not isinstance(tps, list):
+                        tps = []
+                    d: Dict[int, float] = {}
+                    for tp in tps:
+                        if not isinstance(tp, dict):
+                            continue
+                        tid = parse_token_id(tp.get("token"))
+                        if tid >= 0:
+                            try:
+                                d[tid] = float(tp.get("logprob"))
+                            except (TypeError, ValueError):
+                                pass
+                    topk_list.append(_truncate_topk(d, self._n_detect))
+                    tokens_list.append(parse_token_id(entry.get("token")))
+                topk_all.append(topk_list)
+                tokens_all.append(tokens_list)
+        else:
+            for ci in sorted(self._comp_acc.keys()):
+                acc = self._comp_acc[ci]
+                toks = acc["tokens"]
+                tlp = acc["top_logprobs"]
+                topk_list = []
+                for pos in tlp:
+                    if not isinstance(pos, dict):
+                        topk_list.append({})
+                        continue
+                    d = {}
+                    for k, v in pos.items():
+                        tid = parse_token_id(k)
+                        if tid >= 0:
+                            try:
+                                d[tid] = float(v)
+                            except (TypeError, ValueError):
+                                pass
+                    topk_list.append(_truncate_topk(d, self._n_detect))
+                tokens_list = [parse_token_id(t) for t in toks]
+                topk_all.append(topk_list)
+                tokens_all.append(tokens_list)
+        n = max(len(topk_all), 1)
+        configs = [self._model or "unknown"] * n
+        return topk_all, tokens_all, configs
+
+
+def _entry_token(entry: Any) -> Any:
+    if isinstance(entry, dict):
+        return entry.get("token")
+    return None
