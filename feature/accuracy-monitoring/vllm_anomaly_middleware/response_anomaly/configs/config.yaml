@@ -1,0 +1,30 @@
+
+# 全局
+window_size: 128
+stride: 64
+
+# rare-character 生僻字
+rare_character:
+  explogp_sum_thresh: 0.4  # 单token topk的logprob exp总和，当小于阈值时，则可能为生僻字
+  category_thresh: 2  # 单token的topk的类别统计，与explogp_sum_thresh综合判定
+  top1_logp_thresh: -6 # 当没有词表信息时，使用top1 的logp进行判定
+
+# garbled 乱码
+garbled:
+  top1_logp_thresh: -5 # 当window_ratio比例符合，但加上类别检测后其比例不符合时，如果其logprob超过该阈值，也可考虑为乱码
+  window_ratio: 0.2 # 满足条件的字符占序列长度的比例
+  window_thresh: 0 # 当检出乱码的窗口数超过该阈值，则直接退出，报乱码异常。当为0时，即只要有一个窗口检出乱码即退出上报
+
+# repetition 重复
+repetition:
+  trajectory:   # 轨迹检测 N-gram
+    n: 3
+    distinct_n_thresh: 0.2  # n-gram阈值
+    logp_thresh: -0.2  # top1的logprob阈值
+
+  acf:
+    acf_threshold: 0.65  # 自相关阈值
+    logp_thresh: -0.2  # top1的logprob阈值
+
+  single_window_thresh: 14  # 当只有一个方法检出时，检出重复的窗口数需要达到该阈值才会退出
+  multi_window_thresh: 2 # 当acf和trajectory两个方法同时检出时，检出重复的窗口数需达到该阈值才会退出
