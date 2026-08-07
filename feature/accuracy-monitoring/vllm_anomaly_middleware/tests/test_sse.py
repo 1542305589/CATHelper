@@ -61,12 +61,11 @@ def test_multi_chunk_streaming_accumulation_and_strip():
     assert b'"logprobs": null' in out1
     assert b"token_id:" not in out1
     # 累积检测数据：2 个 token
-    topk_all, tokens_all, configs = sse.get_detection_data()
+    topk_all, tokens_all = sse.get_detection_data()
     assert len(tokens_all) == 1  # 一个 choice
     assert tokens_all[0] == [100, 200]
     assert len(topk_all[0]) == 2
     assert len(topk_all[0][0]) == 20  # 截断到 N=20
-    assert configs == ["glm-4-7"]
 
 
 def test_streaming_truncate_to_client_m():
@@ -96,7 +95,7 @@ def test_streaming_detection_data_keeps_full_topk_not_client_m():
     assert entry["token"] == NI
     assert len(entry["top_logprobs"]) == 2
     # 检测数据保持完整 N=20，token 保持 token_id
-    topk_all, tokens_all, configs = sse.get_detection_data()
+    topk_all, tokens_all = sse.get_detection_data()
     assert tokens_all[0] == [100, 200]
     assert len(topk_all[0]) == 2
     assert len(topk_all[0][0]) == 20
@@ -118,13 +117,11 @@ def test_completions_streaming_n3_keeps_choice_separate():
     for c in chunks:
         sse.feed(_sse_bytes(c))
     sse.feed(b"data: [DONE]\n\n")
-    topk_all, tokens_all, configs = sse.get_detection_data()
+    topk_all, tokens_all = sse.get_detection_data()
     assert len(tokens_all) == 3
     assert tokens_all[0] == [101, 102]
     assert tokens_all[1] == [201, 202]
     assert tokens_all[2] == [301, 302]
-    assert len(configs) == 3
-    assert all(c == "glm-4-7" for c in configs)
     assert len(topk_all[0]) == 2 and len(topk_all[1]) == 2 and len(topk_all[2]) == 2
 
 
@@ -141,13 +138,11 @@ def test_chat_streaming_n3_keeps_choice_separate():
     for c in chunks:
         sse.feed(_sse_bytes(c))
     sse.feed(b"data: [DONE]\n\n")
-    topk_all, tokens_all, configs = sse.get_detection_data()
+    topk_all, tokens_all = sse.get_detection_data()
     assert len(tokens_all) == 3
     assert tokens_all[0] == [100, 400]
     assert tokens_all[1] == [200]
     assert tokens_all[2] == [300]
-    assert len(configs) == 3
-    assert all(c == "glm-4-7" for c in configs)
 
 
 def test_crlf_compat():
@@ -169,7 +164,7 @@ def test_completions_streaming_accumulation():
     sse.feed(_sse_bytes(c1))
     sse.feed(_sse_bytes(c2))
     sse.feed(b"data: [DONE]\n\n")
-    topk_all, tokens_all, configs = sse.get_detection_data()
+    topk_all, tokens_all = sse.get_detection_data()
     assert tokens_all[0] == [100, 200]
     assert len(topk_all[0]) == 2
     assert len(topk_all[0][0]) == 20
@@ -187,7 +182,7 @@ def test_flush_tail_without_done():
     out = sse.flush()
     assert out != b""  # flush 补 \n\n
     assert out.endswith(b"\n\n")
-    topk_all, tokens_all, _ = sse.get_detection_data()
+    topk_all, tokens_all = sse.get_detection_data()
     assert tokens_all[0] == [100]
 
 

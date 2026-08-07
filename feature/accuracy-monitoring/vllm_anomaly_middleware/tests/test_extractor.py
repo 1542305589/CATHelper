@@ -235,3 +235,82 @@ def test_strip_completions_no_token_ids_null():
     assert lp["tokens"] == [None, None]
     assert lp["top_logprobs"] == [None, None]
     assert "token_id:" not in json.dumps(data, ensure_ascii=False)
+
+
+# --------------------------- strip with resolver --------------------------- #
+class _FakeTok:
+    def __init__(self, m):
+        self._m = m
+
+    def decode(self, ids, **kw):
+        return "".join(self._m.get(i, "") for i in ids)
+
+
+def _resolver(mapping):
+    from vllm_anomaly_middleware.token_resolver import TokenTextResolver
+
+    return TokenTextResolver(_FakeTok(mapping))
+
+
+def test_strip_chat_top_logprobs_resolver_first_with_broken_bytes():
+    # 真实 vLLM 形态：top bytes 破损（解码为 token_id: 字符串）
+    e = chat_top_entry(100, NI, -0.1, n_top=5, vllm_broken_top_bytes=True)
+    data = build_chat_response("glm-4-7", [e])
+    orig = OriginalParams(True, True, 3, False, 1, False)
+    r = _resolver({100: NI, 10000: "甲", 10001: "乙", 10002: "丙"})
+    strip_chat_response(data, orig, r)
+    entry = data["choices"][0]["logprobs"]["content"][0]
+    assert entry["token"] == NI  # 主 token resolver 优先
+    assert len(entry["top_logprobs"]) == 3
+    for tp in entry["top_logprobs"]:
+        assert tp["token"] in ("甲", "乙", "丙")  # resolver 文本，非 token_id:
+    assert "token_id:" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_strip_chat_top_logprobs_no_resolver_broken_bytes_null_no_leak():
+    # 无 resolver + 破损 bytes → null，绝不泄漏 token_id:
+    e = chat_top_entry(100, NI, -0.1, n_top=5, vllm_broken_top_bytes=True)
+    data = build_chat_response("glm-4-7", [e])
+    orig = OriginalParams(True, True, 3, False, 1, False)
+    strip_chat_response(data, orig)  # resolver 默认 None
+    entry = data["choices"][0]["logprobs"]["content"][0]
+    assert entry["token"] == NI  # 主 token bytes 仍正确
+    for tp in entry["top_logprobs"]:
+        assert tp["token"] is None  # 破损 bytes 被守卫置 null
+    assert "token_id:" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_strip_completions_resolver_text():
+    data = build_completions_response("glm-4-7", [100, 200], [-0.1, -0.2], n_top=5)
+    orig = OriginalParams(False, 3, None, False, 1, False)
+    r = _resolver({100: "你", 200: "好", 10000: "甲", 10001: "乙", 10002: "丙"})
+    strip_completions_response(data, orig, r)
+    lp = data["choices"][0]["logprobs"]
+    assert lp["tokens"] == ["你", "好"]
+    assert len(lp["top_logprobs"]) == 2
+    for pos in lp["top_logprobs"]:
+        assert len(pos) == 3  # 截断到 3
+        assert all(isinstance(k, str) and not k.startswith("token_id:") for k in pos)
+    assert "token_id:" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_strip_completions_no_resolver_still_null():
+    # 无 resolver → tokens/top_logprobs null（维持当前行为，绝不泄漏）
+    data = build_completions_response("glm-4-7", [100, 200], [-0.1, -0.2], n_top=5)
+    orig = OriginalParams(False, 3, None, False, 1, False)
+    strip_completions_response(data, orig)
+    lp = data["choices"][0]["logprobs"]
+    assert lp["tokens"] == [None, None]
+    assert lp["top_logprobs"] == [None, None]
+    assert "token_id:" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_strip_chat_main_token_resolver_first_then_bytes():
+    # resolver 有该 id → 用 resolver 文本（即使 bytes 也在）
+    e = chat_top_entry(100, NI, -0.1, n_top=3)
+    data = build_chat_response("glm-4-7", [e])
+    orig = OriginalParams(True, True, 2, False, 1, False)
+    r = _resolver({100: "X"})
+    strip_chat_response(data, orig, r)
+    entry = data["choices"][0]["logprobs"]["content"][0]
+    assert entry["token"] == "X"  # resolver 优先，覆盖 bytes 的 NI

@@ -11,5 +11,5 @@ _PARENT = os.path.dirname(_THIS)
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
-# 让 vendored response_anomaly 作为子包被正确解析（已在 vllm_anomaly_middleware 下）
+# 确保 vllm_anomaly_middleware 包可被解析（flat layout）
 import vllm_anomaly_middleware  # noqa: F401,E402  (确保导入路径生效)

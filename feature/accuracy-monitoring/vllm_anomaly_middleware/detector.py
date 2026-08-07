@@ -13,47 +13,34 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
+"""推理异常检测器（design §4.4 / spec §4.5）。
 
-
+重构后检测器仅依赖 config.yaml（算法阈值）+ 运行时注入的 tk2cat 映射
+（set_vocabulary）。不再依赖 mtype_config.json / token2category 预生成文件
+（模型识别 fallback 已移除）：get_tk2cat 返回预计算映射或 (None, None)，
+后者降级为无词表检测（rare/garbled 走 top1 logp 路径，repetition/acf/trajectory 不受影响）。
+topk 由参数 topk_n 传入，消除 self.topk 首次锁定问题。
+"""
 from __future__ import annotations
 
-import json
 import os
-import re
-
-import numpy as np
-import yaml
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
+import numpy as np
+import yaml
+
+
 def load_yaml(path):
-    with open(path,"r",encoding="utf-8") as f:
-        config_data=yaml.safe_load(f)
+    with open(path, "r", encoding="utf-8") as f:
+        config_data = yaml.safe_load(f)
     return config_data
 
-def load_json(path):
-    with open(path,"r",encoding="utf-8") as f:
-        data=json.load(f)
-    return data
-
-def check_path_exist(path):
-    if os.path.exists(path):
-        return True
-    return False
 
 def check_path_exists(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"path does not exist: {path}")
     return True
-
-def check_file_exist(path):
-    if os.path.isfile(path):
-        return True
-    return False
-
-def listdir_path(path):
-    check_file_exist(path)
-    return os.listdir(path)
 
 
 # 单个请求的检测结果
@@ -78,54 +65,25 @@ class RareGarbledResult:
     garbled_flag: bool = False
 
 
-def _resolve_model_name(model_config: Any, know_models: set[str]) -> Optional[str]:
-    """从 model_config 中解析出模型名, 与 know_models 做模糊匹配
-
-    know_models 来自 mtype_config.json 的所有 key
-    匹配规则: 忽略大小写、去掉所有分隔符后比较是否包含
-    """
-    if model_config is None:
-        return None
-    if isinstance(model_config, str):
-        raw_name = model_config.lower()
-    elif isinstance(model_config, dict):
-        raw_name = model_config.get("model_name", "").lower()
-    else:
-        return None
-
-    clean_raw = re.sub(r"[-_.\s]", "", raw_name)
-
-    for known in know_models:
-        clean_known = re.sub(r"[-_.\s]", "", known.lower())
-        if clean_known in clean_raw or clean_raw in clean_known:
-            return known  # 返回 mtype_config.json 里的原始 key 名
-    return None
-
-
 class ILLDetector:
     """推理异常检测器"""
 
     def __init__(
         self,
-        config_path: str = "./configs/config.yaml",
-        mtype_path: str = "./configs/mtype_config.json",
-        tk2cat_path: str = "./token2category/",
+        config_path: str = "./defaults/detector.yaml",
     ) -> None:
         # 加载配置文件
         config_data = load_yaml(config_path)
         # 验证配置参数的合法性
         self._validate_config(config_data)
 
-        self.mtype2token = load_json(mtype_path)
-
-        # token2category
-        check_path_exists(tk2cat_path)  # 检查路径是否存在, 如果不存在, 报错!
-        self._init_tk2cat(tk2cat_path)
+        # 运行时预计算映射（middleware 注入；None -> 无词表检测）
+        self._precomputed_tk2cat: Optional[Dict[str, str]] = None
+        self._precomputed_vocab_size: Optional[int] = None
 
         # 检测算法配置参数
         self.window_size: int = config_data["window_size"]
         self.stride: int = config_data["stride"]
-        self.topk: Optional[int] = None
 
         _rare = config_data["rare_character"]
         self.rare_explogp_sum_thresh: float = _rare["explogp_sum_thresh"]
@@ -205,7 +163,7 @@ class ILLDetector:
 
         garbled_window_thresh = garbled.get("window_thresh")
         if not isinstance(garbled_window_thresh, int) or garbled_window_thresh < 0:
-            raise ValueError(f"garbled.window_thresh 必须是非负整数, 当前值为: {garbled_window_thresh}")
+            raise ValueError(f"garbled.window_thresh 必须为非负整数, 当前值为: {garbled_window_thresh}")
 
         # ========== repetition 校验 ==========
         repet = config_data.get("repetition", {})
@@ -234,20 +192,16 @@ class ILLDetector:
 
         single_window_thresh = repet.get("single_window_thresh")
         if not isinstance(single_window_thresh, int) or single_window_thresh < 0:
-            raise ValueError(f"repetition.single_window_thresh 必须是非负整数, 当前值为: {single_window_thresh}")
+            raise ValueError(f"repetition.single_window_thresh 必须为非负整数, 当前值为: {single_window_thresh}")
 
         multi_window_thresh = repet.get("multi_window_thresh")
         if not isinstance(multi_window_thresh, int) or multi_window_thresh < 0:
-            raise ValueError(f"repetition.multi_window_thresh 必须是非负整数, 当前值为: {multi_window_thresh}")
+            raise ValueError(f"repetition.multi_window_thresh 必须为非负整数, 当前值为: {multi_window_thresh}")
 
-    def _init_tk2cat(self, tk2cat_path: str) -> None:
-        file_names = listdir_path(tk2cat_path)
-
-        # 模型类型与vocab_size的对应
-        self.mtype2vocab: Dict[str, int] = {
-            val.split("_")[0]: int(val.split("_")[1].split(".")[0]) for val in file_names
-        }
-        self.tk2cat_path: str = tk2cat_path
+    def set_vocabulary(self, tk2cat: Dict[str, str], vocab_size: int) -> None:
+        """注入运行时生成的 token2category 映射（幂等，重复调用覆盖）。"""
+        self._precomputed_tk2cat = tk2cat
+        self._precomputed_vocab_size = vocab_size
 
     # 滑窗
     def sliding_window(self, seq: List) -> Generator[Tuple[int, List], None, None]:
@@ -260,36 +214,9 @@ class ILLDetector:
         for i in range(0, len(seq), self.stride):
             yield i, seq[i : min(i + self.window_size, len(seq))]
 
-    # 根据model_name 和 token交叉验证model_type
-    def get_tk2cat(self, eos_token: int, model_config: Any = None) -> Tuple[Optional[Dict[str, int]], Optional[int]]:
-        # 判断从model_config取到的name是否在本地有预设的tokenizer信息，如果有，则对self.tk2cat和self.vocab_size赋值
-        if model_config is None or self.tk2cat_path is None:
-            return None, None
-
-        name = _resolve_model_name(model_config, self.mtype2token.keys())
-        if name is None:
-            return None, None
-
-        token_map = self.mtype2token.get(name)
-        if token_map is None:
-            return None, None
-
-        eos_candidates = token_map.get("eos", [])
-        if isinstance(eos_candidates, int):
-            eos_candidates = [eos_candidates]
-        if eos_token not in eos_candidates:
-            return None, None
-
-        vocab_size = self.mtype2vocab.get(name)
-        if vocab_size is None:
-            return None, None
-
-        path = os.path.join(self.tk2cat_path, f"{name}_{vocab_size}.json")
-        if not check_file_exist(path):
-            return None, None
-
-        tk2cat = load_json(path)
-        return tk2cat, vocab_size
+    def get_tk2cat(self) -> Tuple[Optional[Dict[str, str]], Optional[int]]:
+        """返回注入的预计算映射 + vocab_size；未注入 -> (None, None) 降级无词表检测。"""
+        return self._precomputed_tk2cat, self._precomputed_vocab_size
 
     # N-gram
     def get_ngrams(self, tokens: List[int]) -> List[Tuple[int, ...]]:
@@ -438,9 +365,9 @@ class ILLDetector:
             return True, count_res
         return False, count_res
 
-    def _sort_and_truncate_topk(self, topk_logprobs):
+    def _sort_and_truncate_topk(self, topk_logprobs, topk):
         return [
-            dict(sorted(topk_logprob.items(), key=lambda x: x[1], reverse=True)[: self.topk])
+            dict(sorted(topk_logprob.items(), key=lambda x: x[1], reverse=True)[:topk])
             for topk_logprob in topk_logprobs
         ]
 
@@ -449,7 +376,7 @@ class ILLDetector:
         self,
         topk_logprobs: List[Dict[int, float]],
         tokens: List[int],
-        model_config: Any = None,
+        topk_n: Optional[int] = None,
     ) -> DetectionResult:
         """
         单个请求的检测入口
@@ -461,12 +388,11 @@ class ILLDetector:
         if not (topk_logprobs and tokens):
             return DetectionResult()
 
-        tk2cat, vocab_size = self.get_tk2cat(tokens[-1], model_config)  # 获取token ids to cagetory
+        tk2cat, vocab_size = self.get_tk2cat()  # 获取token ids to cagetory
 
-        self.topk = min(len(logp) for logp in topk_logprobs) if self.topk is None else self.topk
-
+        topk = topk_n if topk_n is not None else min(len(logp) for logp in topk_logprobs)
         # 对 topk_logprobs 降序排列，并取 topk 数据
-        topk_logprobs = self._sort_and_truncate_topk(topk_logprobs)
+        topk_logprobs = self._sort_and_truncate_topk(topk_logprobs, topk)
         # 包含排序后 topk logprobs数据
         logprobs = np.array([list(item.values()) for item in topk_logprobs])
 
@@ -521,17 +447,12 @@ class ILLDetector:
         self,
         topk_logprobs: List[List[Dict[int, float]]],
         tokens: List[List[int]],
-        model_configs: Any = None,
+        topk_n: Optional[int] = None,
     ) -> List[List]:
         """
         return:
             二维列表, 多请求下输出结果, 如:[[False,0],[True,1]] 表示第1个请求推理正常, 第2个请求推理异常,存在生僻字
         """
-        # assert len(topk_logprobs) == len(tokens) , (
-        #     "topk_logprobs and tokens must have the same length!"
-        #     )
         nums = len(tokens)
-        if model_configs is None:
-            model_configs = [None] * nums
-        results = [self.detector(topk_logprobs[i], tokens[i], model_configs[i]) for i in range(nums)]
+        results = [self.detector(topk_logprobs[i], tokens[i], topk_n=topk_n) for i in range(nums)]
         return [[res.is_ill, res.ill_type] for res in results]

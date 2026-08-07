@@ -1,10 +1,13 @@
-"""检测运行器（design §4.4 / §6.1 / §6.2 / §6.3）。
+"""检测运行器（design §4.4 / §6.1 / §6.2 / §6.3 / §6.5）。
 
 两段式懒加载：
-- 廉价阶段（请求路径，_ensure_runner）：仅 ThreadPoolExecutor + Lock + 路径，无 numpy/文件 I/O。
-- 重阶段（worker 线程内，首次检测）：懒构造 ILLDetector（numpy + 多 MB JSON），不阻塞 event loop。
+- 廉价阶段（请求路径，_ensure_runner）：仅 ThreadPoolExecutor + Lock + config 路径，无 numpy/文件 I/O。
+- 重阶段（worker 线程内，首次检测）：懒构造 ILLDetector（numpy），不阻塞 event loop。
 检测串行化：单 worker 线程池 + threading.Lock；run_sync 在锁内调 detector.run。
 检测任务：fire-and-forget asyncio.create_task，异常全捕获计 error，不影响客户端。
+
+重构后：DetectorRunner 仅持 config_path（无 mtype/tk2cat 路径）；topk 由 topk_n 参数传入；
+tk2cat 映射由 set_vocabulary 注入（运行时生成），_get_detector 懒构造时同步注入。
 """
 from __future__ import annotations
 
@@ -23,18 +26,27 @@ class DetectorRunner:
     def __init__(
         self,
         config_path: str,
-        mtype_path: str,
-        tk2cat_path: str,
         max_workers: int = 1,
+        topk_n: Optional[int] = None,
     ) -> None:
         self._config_path = config_path
-        self._mtype_path = mtype_path
-        self._tk2cat_path = tk2cat_path
+        self._topk_n = topk_n
+        # 运行时 tk2cat 映射缓存（由 set_vocabulary 注入）
+        self._tk2cat = None
+        self._vocab_size: Optional[int] = None
         self._executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
         self._lock = threading.Lock()
         self._detector = None  # worker 线程内懒构造
         self._unusable = False
         self._unusable_reason: Optional[str] = None
+
+    def set_vocabulary(self, tk2cat, vocab_size) -> None:
+        """注入运行时生成的 tk2cat 映射（幂等，覆盖）。供 middleware 预热/慢路径调用。"""
+        self._tk2cat = tk2cat
+        self._vocab_size = vocab_size
+        # 已构造的检测器也同步注入（懒构造尚未发生时由 _get_detector 兜底注入）
+        if self._detector is not None:
+            self._detector.set_vocabulary(tk2cat, vocab_size)
 
     def _get_detector(self):
         """在 run_sync 内（锁内、worker 线程）调用。失败则标记 unusable，后续快速失败。"""
@@ -42,11 +54,11 @@ class DetectorRunner:
             raise RuntimeError(f"detector unusable: {self._unusable_reason}")
         if self._detector is None:
             try:
-                from .response_anomaly.detector import ILLDetector
+                from .detector import ILLDetector
 
-                self._detector = ILLDetector(
-                    self._config_path, self._mtype_path, self._tk2cat_path
-                )
+                self._detector = ILLDetector(self._config_path)
+                if self._tk2cat is not None:
+                    self._detector.set_vocabulary(self._tk2cat, self._vocab_size)
             except Exception as exc:  # 构造失败（numpy/配置损坏等）
                 self._unusable = True
                 self._unusable_reason = f"{type(exc).__name__}: {exc}"
@@ -58,21 +70,19 @@ class DetectorRunner:
         self,
         topk: List[List[dict]],
         tokens: List[List[int]],
-        model_configs: List,
     ):
         with self._lock:
             detector = self._get_detector()
-            return detector.run(topk, tokens, model_configs)
+            return detector.run(topk, tokens, topk_n=self._topk_n)
 
     async def run_async(
         self,
         topk: List[List[dict]],
         tokens: List[List[int]],
-        model_configs: List,
     ):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            self._executor, self.run_sync, topk, tokens, model_configs
+            self._executor, self.run_sync, topk, tokens
         )
 
     def shutdown(self) -> None:
@@ -87,7 +97,6 @@ def schedule_detection(
     runner: DetectorRunner,
     topk: List[List[dict]],
     tokens: List[List[int]],
-    model_configs: List,
     *,
     request_id: str,
     model: str,
@@ -99,7 +108,7 @@ def schedule_detection(
     async def _run() -> None:
         with metrics.detection_duration.time():
             try:
-                results = await runner.run_async(topk, tokens, model_configs)
+                results = await runner.run_async(topk, tokens)
                 metrics.record_detection(results, model)
             except Exception as exc:
                 logger.error(

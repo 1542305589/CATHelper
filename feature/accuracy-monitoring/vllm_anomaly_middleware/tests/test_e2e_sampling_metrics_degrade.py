@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from _helpers import build_chat_response, chat_top_entry
-from vllm_anomaly_middleware.config import PluginConfig, resolve_detector_paths
+from vllm_anomaly_middleware.config import PluginConfig, resolve_config_path
 from vllm_anomaly_middleware.detector_runner import DetectorRunner
 from vllm_anomaly_middleware.metrics import METRICS_CONTENT_TYPE
 from conftest import drain
@@ -84,7 +84,7 @@ async def test_degrade_when_paths_unresolvable(client_factory, monkeypatch):
     # 模拟路径解析失败 → 永久降级透传 + 指标端点仍 200 报零
     import vllm_anomaly_middleware.middleware as mwmod
 
-    monkeypatch.setattr(mwmod, "resolve_detector_paths", lambda c: None)
+    monkeypatch.setattr(mwmod, "resolve_config_path", lambda c: None)
     client, fake, mw = client_factory(_chat_fn())
     resp = await client.post(
         "/v1/chat/completions", json={"model": "m", "messages": []}
@@ -108,8 +108,8 @@ async def test_detection_error_isolation(client_factory):
     # 预置不可用 runner：检测快速失败计 error，客户端响应不受影响
     client, fake, mw = client_factory(_chat_fn())
     # 强制 runner 不可用
-    paths = resolve_detector_paths(PluginConfig())
-    runner = DetectorRunner(*paths, max_workers=1)
+    paths = resolve_config_path(PluginConfig())
+    runner = DetectorRunner(paths, max_workers=1)
     runner._unusable = True
     runner._unusable_reason = "forced for test"
     mw._runner = runner

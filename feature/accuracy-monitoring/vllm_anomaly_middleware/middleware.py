@@ -11,9 +11,9 @@ import random
 import threading
 import uuid
 from dataclasses import dataclass
-from typing import Awaitable, Callable, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Set, Tuple
 
-from .config import PluginConfig, resolve_detector_paths
+from .config import PluginConfig, resolve_config_path
 from .detector_runner import DetectorRunner, schedule_detection
 from .extractor import (
     OriginalParams,
@@ -115,12 +115,14 @@ class ResponseInterceptor:
         runner: Optional[DetectorRunner],
         metrics: Metrics,
         pending_tasks: Set,
+        resolver: Any = None,
     ) -> None:
         self._send = send
         self._ctx = ctx
         self._runner = runner
         self._metrics = metrics
         self._pending_tasks = pending_tasks
+        self._resolver = resolver
         self._is_streaming = False
         self._start_msg: Optional[dict] = None
         self._body_buf = bytearray()
@@ -153,7 +155,7 @@ class ResponseInterceptor:
         self._is_streaming = b"text/event-stream" in ct
         if self._is_streaming:
             self._sse = SSEStreamProcessor(
-                self._ctx.is_chat, self._ctx.orig, self._ctx.top_logprobs
+                self._ctx.is_chat, self._ctx.orig, self._ctx.top_logprobs, self._resolver
             )
             await self._send(msg)  # 流式立即发 start
         else:
@@ -210,12 +212,12 @@ class ResponseInterceptor:
             self._detection_results = extract_chat_response(
                 data, self._ctx.top_logprobs
             )
-            strip_chat_response(data, self._ctx.orig)
+            strip_chat_response(data, self._ctx.orig, self._resolver)
         else:
             self._detection_results = extract_completions_response(
                 data, self._ctx.top_logprobs
             )
-            strip_completions_response(data, self._ctx.orig)
+            strip_completions_response(data, self._ctx.orig, self._resolver)
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     async def _send_start(self, final: bytes) -> None:
@@ -245,7 +247,7 @@ class ResponseInterceptor:
             return
         self._detection_scheduled = True
         try:
-            topk, tokens, configs = self._get_detection_inputs()
+            topk, tokens = self._get_detection_inputs()
         except Exception as exc:
             logger.error("获取检测数据失败: %s", exc)
             return
@@ -256,7 +258,6 @@ class ResponseInterceptor:
                 self._runner,
                 topk,
                 tokens,
-                configs,
                 request_id=self._ctx.request_id,
                 model=self._ctx.model,
                 metrics=self._metrics,
@@ -268,14 +269,12 @@ class ResponseInterceptor:
 
     def _get_detection_inputs(
         self,
-    ) -> Tuple[List[List[dict]], List[List[int]], List[str]]:
+    ) -> Tuple[List[List[dict]], List[List[int]]]:
         if self._is_streaming:
             return self._sse.get_detection_data()
         topk_all = [r[0] for r in self._detection_results]
         tokens_all = [r[1] for r in self._detection_results]
-        n = max(len(topk_all), 1)
-        configs = [self._ctx.model] * n
-        return topk_all, tokens_all, configs
+        return topk_all, tokens_all
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +293,49 @@ class AnomalyMiddleware:
         self._runner_lock = threading.Lock()
         self._runner_inited = False
         self._pending_tasks: Set = set()
+        self._resolver = None
+        self._resolver_inited = False
+        self._resolver_lock = threading.Lock()
+        # 运行时 token2category 映射（预热/慢路径生成）
+        self._tk2cat = None
+        self._vocab_size: Optional[int] = None
+        self._preheat_thread = None
+        if self.config.tokenizer_model:
+            self._start_preheat()
+
+    def _start_preheat(self) -> None:
+        """后台 daemon 线程预热 tokenizer + tk2cat 映射（spec §4.5）。
+
+        复用 token_resolver._from_pretrained（已补 trust_remote_code，可 monkeypatch）。
+        tokenizer 加载成功即设 resolver（strip 路径可用）；tk2cat 生成失败不影响 resolver。
+        """
+        import threading
+
+        def _preheat() -> None:
+            try:
+                from .token_resolver import _from_pretrained, TokenTextResolver
+                from .token_categorizer import generate_tk2cat
+
+                tok = _from_pretrained(
+                    self.config.tokenizer_model, local_files_only=True
+                )
+                self._resolver = TokenTextResolver(tok)
+                self._resolver_inited = True
+                logger.info("预热: tokenizer 已加载")
+                try:
+                    self._tk2cat, self._vocab_size = generate_tk2cat(tok)
+                    logger.info(
+                        "预热完成: tk2cat 已加载 (vocab_size=%d)", self._vocab_size
+                    )
+                except Exception as exc:
+                    logger.warning("预热: tk2cat 生成失败, 检测将降级为无词表: %s", exc)
+            except Exception as exc:
+                logger.warning("预热失败, 将在首请求时重试: %s", exc)
+
+        self._preheat_thread = threading.Thread(
+            target=_preheat, daemon=True, name="anomaly-preheat"
+        )
+        self._preheat_thread.start()
 
     async def __call__(self, scope: dict, receive, send) -> None:
         if scope.get("type") != "http":
@@ -346,6 +388,7 @@ class AnomalyMiddleware:
             will_detect=True,
             top_logprobs=self.config.top_logprobs,
         )
+        resolver = await self._ensure_resolver(model, scope.get("server"))
         replay = _make_replay_receive(receive, new_body)
         interceptor = ResponseInterceptor(
             send,
@@ -353,6 +396,7 @@ class AnomalyMiddleware:
             runner=self._runner,
             metrics=self.metrics,
             pending_tasks=self._pending_tasks,
+            resolver=resolver,
         )
         await self.app(new_scope, replay, interceptor)
 
@@ -364,16 +408,19 @@ class AnomalyMiddleware:
             if self._runner_inited:
                 return self._runner is not None
             try:
-                paths = resolve_detector_paths(self.config)
-                if paths is None:
+                cfg = resolve_config_path(self.config)
+                if cfg is None:
                     logger.error("检测器路径解析失败, 永久降级透传")
                     self.config.enabled = False
                     self._runner_inited = True
                     return False
-                cfg, mtype, tk2 = paths
                 self._runner = DetectorRunner(
-                    cfg, mtype, tk2, self.config.detector_workers
+                    cfg,
+                    self.config.detector_workers,
+                    topk_n=self.config.top_logprobs,
                 )
+                if self._tk2cat is not None:
+                    self._runner.set_vocabulary(self._tk2cat, self._vocab_size)
                 self._runner_inited = True
                 return True
             except Exception as exc:
@@ -381,6 +428,49 @@ class AnomalyMiddleware:
                 self.config.enabled = False
                 self._runner_inited = True
                 return False
+
+    async def _ensure_resolver(self, model_hint: str, server: Any) -> Any:
+        """双检锁惰性构造 TokenTextResolver；软降级（失败返回 None，不抛）。
+
+        快路径（resolver 已就绪，可能由预热线程设置）：补调 runner.set_vocabulary
+        覆盖竞态窗口（预热在 _ensure_runner 之后完成）。
+        慢路径：加载 tokenizer + generate_tk2cat 生成映射 + 注入 runner。
+        失败为软降级：仍注入、仍 strip，只是 token 文本回退 null/bytes；不影响客户端、不影响检测。
+        """
+        if self._resolver_inited:
+            # 快路径：补调 set_vocabulary 以覆盖竞态窗口
+            if self._tk2cat is not None and self._runner is not None:
+                self._runner.set_vocabulary(self._tk2cat, self._vocab_size)
+            return self._resolver
+        with self._resolver_lock:
+            if self._resolver_inited:
+                return self._resolver
+            from .token_resolver import acquire_tokenizer, TokenTextResolver
+            from .token_categorizer import generate_tk2cat
+
+            tok = None
+            try:
+                tok = await acquire_tokenizer(
+                    model_hint, server, explicit=self.config.tokenizer_model
+                )
+            except Exception as exc:
+                logger.error("resolver 构造失败, 软降级(null): %s", exc)
+                tok = None
+            if tok is not None:
+                self._resolver = TokenTextResolver(tok)
+                try:
+                    self._tk2cat, self._vocab_size = generate_tk2cat(tok)
+                except Exception as exc:
+                    logger.warning("tk2cat 生成失败, 检测降级为无词表: %s", exc)
+            self._resolver_inited = True
+            if self._resolver is None:
+                logger.warning(
+                    "token 文本 resolver 获取失败(model_hint=%r), token 文本回退 null/bytes",
+                    model_hint,
+                )
+            elif self._tk2cat is not None and self._runner is not None:
+                self._runner.set_vocabulary(self._tk2cat, self._vocab_size)
+            return self._resolver
 
     async def _serve_metrics(self, send: Callable[[dict], Awaitable[None]]) -> None:
         body = self.metrics.render_metrics()
