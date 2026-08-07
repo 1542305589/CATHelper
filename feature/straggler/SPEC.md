@@ -177,17 +177,19 @@ CPU 取桶内最后一个值。
 
 | SpaceMethod | 适用指标 | 机制 | 异常判定 |
 |-------------|---------|------|---------|
-| `cluster` | temp/power/util/hbm_bandwidth_util/hbm_util/tx_bw | 递归间隙分裂 → 最大簇为基线（多数即正常）→ 单侧 z | 卡在异常簇的 **mean_z > k**（k=3）|
+| `cluster` | temp/power/util/hbm_bandwidth_util/hbm_util/tx_bw | 递归间隙分裂 → 最大簇均值为基线（多数即正常）→ **逐点**单侧 z | 卡被标记的 **mean_z > k**（k=3）|
 | `direct` | aicore_freq | 低于 peer 时钟上限 `FreqDownclockGap` | sentinel 999 |
 | `absolute` | 4× error counters | > 0 | sentinel 999 |
 
 **cluster（多数簇）机制**（逐时间点）：
 1. 递归二分：在最大间隙处切分，两侧都继续，直到子块内无显著间隙（`maxGap ≥ 跨度/2`）——切出完整的簇划分
-2. 基线簇 = 成员最多的簇（"谁多谁有理"）；成员数并列时取方向极值簇（DirHigh→最低簇，DirLow→最高簇）
-3. 对每个非基线簇，**单侧判定**（只查异常方向）：`z = |mean(c) − mean(基线)| / scale[指标]`
+2. 基线簇 = 成员最多的簇（"谁多谁有理"）；成员数并列时取方向极值簇（DirHigh→最低簇，DirLow→最高簇）；**基线均值 = 多数簇的均值**
+3. **基线簇成员豁免**（它们是正常参照本身）；对每个**非基线簇成员**单侧判定（只查异常方向）：`z = |该卡值 − 基线均值| / scale[指标]`
    - `scale[指标]` 从历史基线自我标定：各卡 `1.4826 × baseline.Mad` 的中位数
-   - `z > k`（`SpaceClusterK`，默认 3.0）→ 簇 c 全部成员标记
-4. 记录每卡每时间点的 z（被标记簇的 z，其余 0）
+   - `z > k`（`SpaceClusterK`，默认 3.0）→ 该卡标记
+4. 记录每卡每时间点的 z（被标记卡的 z，其余 0）
+
+> 逐点判定相对簇均值判定的优势：异常簇内每张卡按自己的偏离幅度单独评分（严重度精确到卡）。基线成员豁免保住"散布舰队不误报"：无主导间隙的舰队是单簇 → 全员在基线内 → 无人被评分，正常散布的边缘卡不会被误标。
 
 `aggregateSpaceScores()` 汇总：cluster 方法对每卡求 `mean_z`（= 占比 × 平均偏离幅度，持续与幅度互补），`mean_z > k` 判空间异常；absolute/direct 方法取异常占比。
 

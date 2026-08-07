@@ -116,10 +116,17 @@ func detectSpaceAnomalies(
 			case MethodCluster:
 				// Majority-mode clustering (space): "whoever has the majority
 				// is the peer norm". Recursively split at the largest gap into
-				// a full partition, pick the largest cluster as the baseline
-				// (ties broken toward the direction extreme), then flag any
-				// other cluster on the anomaly side whose mean deviates beyond
-				// k × the metric's historical noise.
+				// a full partition to locate the majority (baseline) cluster,
+				// then judge each NON-baseline card by its own deviation from
+				// the baseline mean (per-point, one-sided by direction), in
+				// units of the metric's historical noise.
+				//
+				// Baseline (majority) members are exempt — they ARE the normal
+				// reference. This preserves the "spread fleet = normal" guard:
+				// a fleet with no dominant gap is one cluster → everyone is in
+				// the baseline → nobody is scored, so the edges of a normal
+				// spread are never flagged even when each card is individually
+				// stable (which would otherwise collapse the noise scale).
 				zAtT := make(map[int]float64, len(cardIDs)) // cardID → z (0 if not flagged)
 				if len(presentVals) >= 2 {
 					sortedIdx := make([]int, len(present))
@@ -133,21 +140,23 @@ func detectSpaceAnomalies(
 					baseIdx := pickBaselineCluster(clusters, presentVals, meta.Direction)
 					baseMean := clusterMean(clusters[baseIdx], presentVals)
 
-					for ci, cl := range clusters {
-						if ci == baseIdx {
-							continue
+					baseMembers := make(map[int]bool, len(clusters[baseIdx]))
+					for _, k := range clusters[baseIdx] {
+						baseMembers[k] = true
+					}
+
+					for pi, pv := range presentVals {
+						if baseMembers[pi] {
+							continue // majority = the reference, not judged
 						}
-						cMean := clusterMean(cl, presentVals)
 						// One-sided: only the anomaly direction is checked.
-						if (meta.Direction == DirHigh && cMean <= baseMean) ||
-							(meta.Direction == DirLow && cMean >= baseMean) {
+						if (meta.Direction == DirHigh && pv <= baseMean) ||
+							(meta.Direction == DirLow && pv >= baseMean) {
 							continue
 						}
-						z := math.Abs(cMean-baseMean) / scale[metric]
+						z := math.Abs(pv-baseMean) / scale[metric]
 						if z > cfg.SpaceClusterK {
-							for _, k := range cl {
-								zAtT[cardIDs[present[k]]] = z
-							}
+							zAtT[cardIDs[present[pi]]] = z
 						}
 					}
 				}
