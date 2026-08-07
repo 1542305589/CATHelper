@@ -48,30 +48,38 @@ vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
 
 ```
 vllm_anomaly_middleware/
-├── __init__.py            # 重导出 AnomalyMiddleware（短路径）
-├── middleware.py          # 统一中间件类 + RequestContext + 请求助手 + ResponseInterceptor
-├── config.py              # 环境变量配置 + 检测器路径解析
+├── __init__.py            # 重导出 AnomalyMiddleware / ResponseInterceptor / RequestContext（短路径）
+├── middleware.py          # 统一中间件类 + RequestContext + ResponseInterceptor + 预热
+├── config.py              # PluginConfig（env 读取+校验）+ 检测器路径解析
 ├── metrics.py             # 独立 CollectorRegistry + 指标记录/渲染
 ├── extractor.py           # 抽取/恢复（流式与非流式）+ SSEStreamProcessor
-├── detector_runner.py     # 检测运行器（线程池+锁+懒构造+调度）
-└── response_anomaly/      # 检测算法（含 configs/ 与 token2category/）
-    ├── detector.py
-    ├── __init__.py
-    ├── configs/{config.yaml, mtype_config.json}
-    └── token2category/*.json
+├── token_resolver.py      # TokenTextResolver + tokenizer 获取（token_id→文本还原）
+├── token_categorizer.py   # token 分类纯函数 + 运行时 generate_tk2cat（§3.11）
+├── detector.py            # ILLDetector 检测器本体（set_vocabulary + topk_n 参数）
+├── detector_runner.py     # DetectorRunner（线程池+锁+懒构造+调度+词表注入）
+├── defaults/
+│   └── detector.yaml      # vendored 检测器算法默认参数（与 config.py 运行时配置分离）
+└── tests/
 ```
+
+> **`defaults/detector.yaml` vs `config.py`**：前者是检测器算法默认参数（阈值、窗口、步长等），
+> 随包分发的 vendored 资源；后者是中间件运行时插件配置（env 读取的开关、采样率、
+> 指标路径等）。二者职责分离，互不耦合。
 
 ### 2.3 职责划分
 
 | 组件 | 职责 |
 |---|---|
-| `AnomalyMiddleware` | 持有配置/runner/指标/待办任务集；`__call__` 分派：内联指标、降级透传、拦截注入、装拦截器、委托下游 |
+| `AnomalyMiddleware` | 持有配置/runner/指标/待办任务集；`__call__` 分派：内联指标、降级透传、拦截注入、装拦截器、委托下游；预热线程 |
 | `RequestContext` | 单请求上下文：原始参数、model、关联 id、是否检测 |
 | `ResponseInterceptor` | 包装 `send`：判流式/非流式、注入关联头、缓冲或增量处理、恢复响应、调度检测 |
 | `SSEStreamProcessor` | 跨块事件重组、每块恢复、per-choice 累积检测数据 |
-| `Extractor` | 纯函数：解析 token-id、抽取 per-choice (topk,tokens)、恢复响应（截断/null/文本还原） |
-| `DetectorRunner` | 单 worker 线程池 + 锁；worker 内懒构造检测器；同步/异步执行 |
-| `Config` | 环境变量读取与校验；检测器路径解析（env→vendored→外部） |
+| `Extractor` | 纯函数：解析 token-id、抽取 per-choice (topk,tokens)、恢复响应（截断/null/文本还原，经 `_token_text` 统一走 resolver 优先） |
+| `DetectorRunner` | 单 worker 线程池 + 锁；worker 内懒构造检测器；`set_vocabulary` 注入词表；同步/异步执行；`topk_n` 参数 |
+| `TokenTextResolver` | token_id(int)→单 token surface 文本（`decode([id])`）；进程级单例，懒构造，软降级；tokenizer 获取多级兜底 |
+| `TokenCategorizer` | token 分类纯函数（`categorize_token`）+ 运行时 `generate_tk2cat(tokenizer)` 生成 `{token_id: category}` 映射（§3.11） |
+| `ILLDetector` | 检测器本体：`set_vocabulary` 接受运行时映射；`topk_n` 参数消除首次锁定；`get_tk2cat` 返回映射或 (None,None) 降级 |
+| `PluginConfig` | 环境变量读取与校验；检测器路径解析（env→vendored） |
 | `Metrics` | 独立 registry；计数/直方图/gauge；渲染文本暴露 |
 
 ## 3. 核心功能设计
@@ -107,7 +115,8 @@ vllm_anomaly_middleware/
 不匹配导致截断/挂起）。
 
 **关键不变量**：`top_logprobs` 跨请求必须恒定（默认 20，可配置 1-20）。
-原因见 §6.2（检测器 `topk` 首次锁定后不复位）。
+原因：保证每 token 的 top-logprobs 条目数一致，检测语义稳定（§6.2）。
+`topk_n` 由参数传入检测器，不再依赖实例态锁定（§4.5）。
 
 ### 3.2 响应抽取与恢复
 
@@ -126,14 +135,22 @@ chat/completions 各 token 字段确为 `"token_id:NNN"`。
 
 `parse_token_id` 兼容两种形态：`"token_id:NNN"` 与纯数字串（如 `"22"`），失败返回 -1。
 
-**恢复**（供客户端，按原始参数）：
+**恢复**（供客户端，按原始参数，统一走 `_token_text` 规则，见 §3.10）：
 - 客户端未请求 `logprobs` → `choice.logprobs=null`。
 - 客户端请求 `logprobs=True`、`top_logprobs=n`（chat）/`logprobs=n`（completions）→ 截断到 n。
-- 客户端未请求 `return_tokens_as_token_ids`：
-  - chat：`token`/`top_logprobs[].token` 从 `bytes`（utf-8 字节列表）解码为文本；
-    无 bytes 或解码失败 → 置 null（**绝不**留 `token_id:`）。
-  - completions：无 tokenizer 可用，`tokens[]` 置为 `[null]*len`——**绝不**留 `token_id:` 前缀。
+- 客户端未请求 `return_tokens_as_token_ids` → token_id→文本还原（§3.10）：
+  - 统一规则 `_token_text(token_id, bytes, resolver)`：**resolver 优先** `decode([id])`；
+    resolver 缺失/未解析 → 退回 `bytes`（仅当解码出真实文本且不含 `token_id:` 前缀）；都无 → null。
+  - chat `content[].token` / `top_logprobs[].token`：resolver 覆盖所有字段；resolver 不可用时
+    主 token 退回 bytes、top_logprobs 置 null（破损 bytes 守卫，**绝不泄漏 `token_id:`**）。
+  - completions `tokens[]` / `top_logprobs[]`：无 bytes，resolver 可用时还原真实文本、不可用时置 null；
+    `top_logprobs[]` 重建为 `{文本:logprob}`，丢弃无法解析项。
 - 客户端**已**请求 `return_tokens_as_token_ids` → 原样保留 `token_id:NNN`（这正是客户端所要）。
+
+> **背景**：vLLM 在 `return_tokens_as_token_ids=true` 下，chat `top_logprobs` 的 `bytes` 填的是
+> token_id 字符串本身的字节（非 token 真实字节）→ `_decode_bytes` 会泄漏 `token_id:`；
+> completions 响应形态本就无 `bytes` → 仅靠 bytes 路径无法还原文本。故引入 tokenizer `decode([id])`
+> 为统一文本来源，bytes 仅作 resolver 不可用时的兜底（带泄漏守卫）。
 
 **检测截断与客户端截断分离**：注入值为 `max(客户端, N)` 时每 token 的 top-logprobs
 条目数可能 > N。抽取检测数据（`extract_*_response`）时每 token **截断至 N**（检测器
@@ -224,16 +241,22 @@ N=4 → 注入 10、每 token 10 项；送检测截前 4 项，返回客户端 1
 - `VLLM_ANOMALY_METRICS_PATH`（默认 `/anomaly/metrics`）
 - `VLLM_ANOMALY_SAMPLE_RATE`（默认 1.0，范围 0-1）
 - `VLLM_ANOMALY_DETECTOR_WORKERS`（默认 1）
-- `VLLM_ANOMALY_DETECTOR_CONFIG_PATH` / `VLLM_ANOMALY_MTYPE_CONFIG_PATH` /
-  `VLLM_ANOMALY_TK2CAT_PATH`（显式路径覆盖）
+- `VLLM_ANOMALY_DETECTOR_CONFIG_PATH`（显式 detector.yaml 路径覆盖）
+- `VLLM_ANOMALY_TOKENIZER_MODEL`（默认未设）：显式 tokenizer 加载源（最高优先），设为
+  `vllm serve --model` 的实际值（本地目录路径或 HF repo id）。覆盖 served 名为裸 basename /
+  本地目录部署。未设则走自动解析（model_hint → loopback `/v1/models` → HF 缓存扫描）。
+  设定时额外触发后台预热线程提前加载 tokenizer + 生成 tk2cat 映射（§3.11）。
 
 校验：`top_logprobs∈[1,20]`、`sample_rate∈[0.0,1.0]`。
 
-检测器路径解析顺序：
-1. 优先 response_anomaly 算法检测文件夹已经固定在本项目下，固定路径方式调用；
-2. 其次外部可导入的`response_anomaly`/`msprobe.response_anomaly`；
-3. 再次由用户指定 response_anomaly 路径，由中间件将 response_anomaly 代码拷贝到项目固定路径下；
-4. 都没有 → 将详细信息写入日志，降级为透传方式。
+检测器配置路径解析顺序：
+1. 显式 env `VLLM_ANOMALY_DETECTOR_CONFIG_PATH`（文件须存在）→ 用该路径；
+2. vendored 固定路径 `defaults/detector.yaml`（默认/主）→ 存在则用；
+3. 都无 → `None`（触发降级，§3.9）。
+
+> `detector.yaml` 仅含检测器算法阈值参数（窗口、步长、rare/garbled/repetition 阈值等）；
+> 不含模型识别信息——token2category 映射在运行时由 `generate_tk2cat(tokenizer)` 生成
+> 并经 `set_vocabulary` 注入（§3.11），不再依赖预生成文件。
 
 ### 3.9 降级机制
 
@@ -242,13 +265,119 @@ N=4 → 注入 10、每 token 10 项；送检测截前 4 项，返回客户端 1
 - 触发点：仅在首个 `will_detect=True` 请求上尝试构造 runner（见 §6.1）。
   `sample_rate=0` 则永不触发，runner 永不构造，指标报零。
 
+### 3.10 token 文本还原（TokenTextResolver）
+
+**背景与问题**：中间件强制注入 `return_tokens_as_token_ids=true`，使响应 token 字段呈
+`"token_id:NNN"`（供检测抽取 token_id）。客户端**未**请求 `return_tokens_as_token_ids` 时，
+中间件须把 `token_id:` 还原为 token 文本回客户端（spec §2.3、不变量 #7「绝不泄漏 `token_id:`」）。
+`_decode_bytes` 从 `bytes` 字段解码仅能覆盖 chat 主 token（实测正确）；对 chat `top_logprobs[].token`
+会泄漏 `token_id:`（vLLM 把 token_id 字符串本身的字节塞入 `bytes`），对 completions 各字段无 `bytes`
+可解。根因：`bytes` 路径无法覆盖这两种情形，须引入真正的 tokenizer 做 `decode([id])`。
+
+**职责与接口**：`TokenTextResolver.resolve(token_id: int) -> Optional[str]`——给定 token_id 返回
+该 token 的 surface 文本（OpenAI 语义即 `decode([id])`），不可用返回 `None`（调用方置 null）。
+仅被 ASGI 事件循环（strip 路径）调用；检测 worker 线程不调用（检测用 token_id 整数）。
+进程内单例、一次加载、全请求复用。
+
+**tokenizer 获取顺序**（lazy，首注入请求触发，`acquire_tokenizer(model_hint, server, explicit)`）：
+
+1. **显式 env `VLLM_ANOMALY_TOKENIZER_MODEL`**（最高优先）：设为 `vllm serve --model` 实际值
+   （本地目录路径或 HF repo id）→ `from_pretrained(explicit, local_files_only=True)`。覆盖本地目录部署
+   （served 名为裸 basename、不在 HF 缓存、from_pretrained 与缓存扫描均无法解析）。未设则跳过。
+2. **`from_pretrained(model_hint, local_files_only=True)`**：`model_hint` = 请求体 `model` 字段（免 HTTP）；
+   命中 HF repo id / 本地路径。`local_files_only=True` → **零外网**。
+3. **loopback `GET /v1/models`**（async httpx，一次性）取 vLLM 实际 serve 的 id →
+   `from_pretrained(served, local_files_only=True)`；跨 `--served-model-name` 别名鲁棒。
+4. **HF 缓存扫描**：served/model 名为裸 basename（如 `Qwen3-0.6B`）而 HF 缓存键为完整 repo id
+   （如 `Qwen/Qwen3-0.6B`）时，`huggingface_hub.scan_cache_dir()` 找 `repo_id` 以 `/<hint>` 结尾或
+   等于 `<hint>` 的条目（短优先），补全后重试 `from_pretrained`。`huggingface_hub` 不可用 → 返回 []。
+5. 均失败 → resolver 进入「不可用」终态：记一次 `logger.warning`，后续 `resolve` 恒返回 `None`，
+   不再重试（避免每请求开销）。
+
+> **vLLM 进程内 tokenizer 直取（已验证不可行）**：经 `.app` 链遍历 + 路由端点闭包/默认值反射 +
+> vLLM 模块探测（vLLM 0.18.0），均未发现稳定可达的引擎/tokenizer 引用（引擎藏于 FastAPI 依赖注入，
+> 非 app 属性、非 `app.state`）。故不依赖此路径，改以显式 env 为本地目录部署主路径，缓存扫描覆盖
+> HF 缓存内模型。
+
+**文本缓存**：`resolve` 内部维护 `dict[int, str]` 缓存，首次 `decode([id])` 后存入，后续命中微秒级。
+缓存仅被事件循环单线程访问，无需锁；容量上界为实际出现过的 token id 数（远小于词表）。
+
+**生命周期与触发点**：resolver 进程级、懒构造、双检锁；触发于**首个被注入请求**（runner 构造成功后、
+`await self.app` 前，`_ensure_resolver(model_hint, server)`）。与 `_ensure_runner` 关系：runner 失败 →
+整体降级透传（不注入、不 strip）→ 无需 resolver。故 `_ensure_resolver` 仅在注入路径、runner 就绪后调用。
+resolver 失败为**软降级**：仍注入、仍 strip，只是 resolver 相关字段置 null；与 runner 硬降级不同。
+`AnomalyMiddleware.shutdown()` 无特殊清理（tokenizer 随进程退出）。
+
+**strip 路径统一规则**（`extractor.py` `_token_text(token_id_value, bytes_value, resolver)`）：
+
+```python
+def _token_text(token_id_value, bytes_value, resolver) -> Optional[str]:
+    # 1) 优先 resolver：覆盖 chat 主 token / top_logprobs / completions 全部字段
+    if resolver is not None:
+        tid = parse_token_id(token_id_value)
+        if tid >= 0:
+            txt = resolver.resolve(tid)
+            if txt is not None:
+                return txt
+    # 2) resolver 缺失 / 未解析 → 退回 bytes（仅当解码出真实文本，不含 token_id: 前缀）
+    if bytes_value is not None:
+        s = _decode_bytes(bytes_value)
+        if s is not None and not s.startswith(TOKEN_ID_PREFIX):
+            return s
+    # 3) 都无 → null（绝不留 token_id:）
+    return None
+```
+
+要点：步骤 1 优先 resolver，文本来源统一、一致；步骤 2 的 `not s.startswith(TOKEN_ID_PREFIX)`
+守卫**独立修复泄漏**——resolver 不可用时，chat top_logprobs 的破损 bytes 也被识别并置 null，
+不再泄漏 `token_id:`；同时保留 chat 主 token 在 resolver 不可用时退回 bytes（实测正确）；
+completions 无 bytes，resolver 不可用时恒落于 null。
+
+**行为变更**（相对引入前）：① chat `top_logprobs[].token`：原泄漏 `"token_id:NNN"` → 无 resolver
+时 null、有 resolver 时真实文本（**bug 修复**）；② completions `tokens[]`/`top_logprobs[]`：原恒 null
+→ 有 resolver 时真实文本、无 resolver 时 null（维持）；③ chat 主 token：文本来源由 bytes 改为
+**resolver 优先**（resolver 不可用时退回 bytes），可观察文本值不变。
+
+### 3.11 token 分类与词表注入
+
+检测器的生僻字（rare_character）与乱码（garbled）检测依赖 token 到类别的映射
+（`tk2cat`：`{str(token_id): category}`），用于判断输出中是否出现非常规字符类别
+（生僻 CJK / 乱码符号 / 控制字节等）。映射在运行时从已加载 tokenizer 直接生成，
+不依赖预生成文件。
+
+**token 分类**（`token_categorizer.py` `categorize_token`）：对单个 token 的解码文本
+逐字符做 Unicode 脚本分类（`_classify_char`，`lru_cache` 加速），统计各类别占比，
+取主导类别映射为类别标签（如 CJK→`chinese_cjk`、拉丁→`english_latin`、数字→`numbers`、
+符号密集→`gibberish_symbols`、控制字节→`control_bytes` 等）。纯函数、无副作用，
+供检测器与中间件共享。
+
+**运行时映射生成**（`generate_tk2cat(tokenizer) -> (id_to_category, vocab_size)`）：
+1. `tokenizer.get_vocab()` 取词表 → `invert_vocab` 反转为按 index 排序的 token 字符串列表；
+2. decode 降级链（`_get_decode_fn`）优先 `backend_tokenizer.decoder.decode([token])`
+   （最精确），退到 `tokenizer.decode([idx])`（高层 API）；均无则 raise（调用方降级）；
+3. 逐 token `_safe_decode`（异常吞掉、跳过该 token）→ `categorize_token` →
+   `{str(token_id): category}`。
+
+**注入与降级**：映射经 `DetectorRunner.set_vocabulary(tk2cat, vocab_size)` 注入，
+worker 线程懒构造检测器时同步注入（`_get_detector` 兜底）。检测器 `get_tk2cat()`
+返回预计算映射或 `(None, None)`；后者降级为**无词表检测**：rare/garbled 走 top1 logp
+路径（按概率阈值判异常），repetition/acf/trajectory 不受影响。
+
+**预热**（`VLLM_ANOMALY_TOKENIZER_MODEL` 设定时触发）：中间件构造时启动 daemon 线程
+`_start_preheat`，提前 `_from_pretrained` 加载 tokenizer → 设 resolver（strip 路径可用）
+→ `generate_tk2cat` 生成映射。预热在首请求 runner 构造之前完成则注入 runner；否则
+`_ensure_resolver` 慢路径补生成 + 注入。tk2cat 生成失败不影响 resolver（仍注入、仍 strip，
+检测降级为无词表）；resolver 失败为软降级（§3.10）。
+
 ## 4. 关键组件设计
 
 ### 4.1 AnomalyMiddleware（统一中间件类）
 
 **构造** `__init__(self, app)`：建 `PluginConfig`；持有未初始化 runner 占位；
-attach 指标助手；建 `_pending_tasks` set 与 `_runner_lock`/`_runner_inited`。
-**不做重活**（无 numpy、无文件读）。
+attach 指标助手；建 `_pending_tasks` set 与 `_runner_lock`/`_runner_inited`、
+`_resolver`/`_resolver_inited`/`_resolver_lock`（§3.10）、`_tk2cat`/`_vocab_size`/`_preheat_thread`
+（§3.11）。**不做重活**（无 numpy、无文件读）；若 `VLLM_ANOMALY_TOKENIZER_MODEL` 设定则
+启动预热线程 `_start_preheat()`（§3.11，daemon 线程提前加载 tokenizer + 生成 tk2cat）。
 
 **`__call__(scope, receive, send)` 分派**：
 1. 非 http scope → 透传 `self.app`。
@@ -262,8 +391,9 @@ attach 指标助手；建 `_pending_tasks` set 与 `_runner_lock`/`_runner_inite
 7. `save_original_params` → `inject_params`（注入值 max(客户端,N)）→
    `_patch_scope_content_length(new_body_len)` → 建 `RequestContext`
    (orig/model/request_id/will_detect) →
+   `resolver = await _ensure_resolver(model, scope.get("server"))`（§3.10，软降级返回 None）→
    `replay_receive = _make_replay_receive(receive, new_body, request_id)` →
-   装 `ResponseInterceptor` → `await self.app(new_scope, replay_receive, interceptor)`。
+   装 `ResponseInterceptor`（透传 `resolver`）→ `await self.app(new_scope, replay_receive, interceptor)`。
 
 **`_make_replay_receive(original_receive, body, request_id)`**：首次调用返回合成
 `{"type":"http.request","body":body,"more_body":False}`；**后续调用委托
@@ -271,19 +401,30 @@ attach 指标助手；建 `_pending_tasks` set 与 `_runner_lock`/`_runner_inite
 透传（非 JSON/非 dict）与注入两条路径都经此包装——body 已被读走必须重放。
 
 **`_ensure_runner` 顺序前置**：runner 构造（廉价）在注入之前；失败则本请求纯透传，
-避免半注入响应。重头检测器在 worker 线程内首次检测时构造（见 §6.1）。
+避免半注入响应。runner 构造时若有预热生成的 `_tk2cat` 则同步 `set_vocabulary` 注入。
+重头检测器在 worker 线程内首次检测时构造（见 §6.1）。
+
+**`_ensure_resolver(model_hint, server)` 顺序前置**（§3.10 / §3.11）：resolver 构造在注入路径、
+runner 成功后；**软降级**（失败返回 None 不抛）：仍注入、仍 strip，仅 token 文本回退 null/bytes。
+快路径（resolver 已就绪，可能由预热线程设置）：补调 `runner.set_vocabulary` 覆盖竞态窗口
+（预热在 `_ensure_runner` 之后完成）。慢路径：`acquire_tokenizer` 加载 tokenizer → 设 resolver →
+`generate_tk2cat` 生成映射 → 注入 runner（tk2cat 失败不影响 resolver，仅检测降级无词表）。
+双检锁同 `_ensure_runner`；`finally` 置 `_resolver_inited` 避免每请求重试昂贵 tokenizer 加载。
+内部调 `acquire_tokenizer(model_hint, server, explicit=self.config.tokenizer_model)`，顺序见 §3.10。
 
 **`_serve_metrics(send)`**：`render_metrics()` → 200 + 正确 content-type +
 正确 content-length，作为完整 ASGI 响应发出。
 
 ### 4.2 ResponseInterceptor（响应拦截器）
 
-**构造**：`(send, *, is_chat, orig_params, model, runner, request_id, will_detect, metrics, top_logprobs, pending_tasks)`。
+**构造**：`(send, *, ctx, runner, metrics, pending_tasks, resolver=None)`。`resolver`
+为进程级共享引用（`TokenTextResolver` 或 None，§3.10），透传至流式 `SSEStreamProcessor` 与
+非流式 `_process_complete` 的 `strip_*_response`。
 状态：`_is_streaming`、`_start_msg`、`_body_buf`、`_sse`、`_finished`、`_detection_scheduled`、`_detection_results`。
 
 **`__call__(message)` 分派**：
 - `http.response.start` → `_on_start`：判 `content-type` 含 `text/event-stream`；
-  注入 `x-anomaly-request-id`；流式建 `SSEStreamProcessor` 并立即 send(start)；
+  注入 `x-anomaly-request-id`；流式建 `SSEStreamProcessor(is_chat, orig, top_logprobs, resolver)` 并立即 send(start)；
   非流式缓冲 `_start_msg`。
 - `http.response.body` → `_on_body`。
 - 其它 → 透传。
@@ -313,8 +454,8 @@ _maybe_schedule_detection()
 ```
 
 **`_process_complete`**：`json.loads(_body_buf)`；失败→返回原始 bytes（透传，不注入检测）；
-成功→`extract_*_response` 得 per-choice 存 `_detection_results`，再 `strip_*_response`，
-`json.dumps(...).encode()` 返回。
+成功→`extract_*_response` 得 per-choice 存 `_detection_results`，再 `strip_*_response(data, orig, self._resolver)`
+（§3.10 resolver 优先还原文本），`json.dumps(...).encode()` 返回。
 
 **`_send_start(final)`**：从 `_start_msg` patch headers：改写/补 `content-length`，
 注入 `x-anomaly-request-id`，send。
@@ -323,69 +464,98 @@ _maybe_schedule_detection()
 ```
 if not will_detect or _detection_scheduled or _runner is None: return
 _detection_scheduled = True
-try: topk, tokens, configs = _get_detection_inputs()
+try: topk, tokens = _get_detection_inputs()
 except: log; return
 if not tokens or not any(tokens): return
-schedule_detection(_runner, topk, tokens, configs, request_id=_request_id, model=_model)
+schedule_detection(_runner, topk, tokens, request_id=_request_id, model=_model, metrics, pending_tasks)
 ```
 `_get_detection_inputs`：非流式取 `_detection_results`；流式取 `_sse.get_detection_data()`。
+两者返回 2-元组 `(topk, tokens)`（无 model_configs——model 仅用于指标标签）。
 
 ### 4.3 SSEStreamProcessor
 
 见 §3.3 状态机。要点：
 - `feed(chunk)->bytes`：缓冲 + `\n\n` 切分 + `_process_event`。
 - `flush()->bytes`：排空尾部。
-- `get_detection_data()->(topk_all, tokens_all, configs_all)`。
+- `get_detection_data()->(topk_all, tokens_all)`（2-元组）。
+- 构造增 `resolver` 形参；`_strip_streaming` 调 `strip_*_response(parsed, orig, self._resolver)`
+  透传 resolver（§3.10）；`_extract_streaming`（检测累积）**不变**——继续用 token_id 整数。
 - 累积（有状态）与每块恢复（无状态）并存。
 
 ### 4.4 DetectorRunner
 
-**构造** `(config_path, mtype_path, tk2cat_path, max_workers=1)`：`ThreadPoolExecutor`
-+ `threading.Lock`。
+**构造** `(config_path, max_workers=1, topk_n=None)`：`ThreadPoolExecutor`
++ `threading.Lock`。`topk_n` 为检测器 topk 截断参数（来自 `PluginConfig.top_logprobs`）。
+持运行时词表缓存 `_tk2cat`/`_vocab_size`（由 `set_vocabulary` 注入）。
+
+**`set_vocabulary(tk2cat, vocab_size)`**：注入运行时生成的 token2category 映射（幂等，
+覆盖）。已构造的检测器同步注入；未构造时由 `_get_detector` 兜底注入。供 middleware
+预热线程 / 慢路径调用（§3.11）。
 
 **`_get_detector()`**（worker 线程内懒构造）：首次调用时
-`from .response_anomaly.detector import ILLDetector` 并构造（numpy 导入与多 MB JSON
-加载不阻塞 event loop）。
+`from .detector import ILLDetector` 并构造（仅 config.yaml，不阻塞 event loop）；
+若有注入的 `_tk2cat` 则同步 `set_vocabulary`。构造失败标记 `_unusable`，后续快速失败计 error。
 
-**`run_sync(topk, tokens, model_configs)`**：`with self._lock: detector=_get_detector();
-return detector.run(topk, tokens, model_configs)`。
+**`run_sync(topk, tokens)`**：`with self._lock: detector=_get_detector();
+return detector.run(topk, tokens, topk_n=self._topk_n)`。
 
-**`run_async(...)`**：`loop.run_in_executor(self._executor, self.run_sync, ...)`。
+**`run_async(topk, tokens)`**：`loop.run_in_executor(self._executor, self.run_sync, ...)`。
 
-**`schedule_detection(runner, topk, tokens, model_configs, *, request_id, model) -> Task`**：
+**`schedule_detection(runner, topk, tokens, *, request_id, model, metrics, pending_tasks) -> Task`**：
 内部 `_run()`：`detection_duration.time()` 计时 → `runner.run_async(...)` →
-`record_detection(results, model)`；except → `record_error()`。
+`record_detection(results, model)`；except → `record_error()`。`model` 仅用于指标标签，
+不参与检测（检测不再需要 model_configs）。
 
 ### 4.5 检测器契约要点
 
-> **vendored 含义**：`response_anomaly/` 是第三方检测算法源码被**直接内置进本项目包**
-> （vendor 进项目），随中间件分发，区别于运行时外部导入或用户指定路径。spec §2.12
-> 规定三条获取路径：① 优先本项目内置固定路径（vendored）；② 其次外部可导入的
-> `response_anomaly`/`msprobe.response_anomaly`；③ 再次用户指定路径，由中间件将代码
-> 拷贝到项目固定路径下（拷贝后等同 vendored）。**§4.5 的契约对三条路径均成立**；
-> 3 处缺陷修复仅落在 vendored 拷贝上，外部/拷贝来源须自行满足同一契约，否则构造或
-> 运行失败 → 按 §3.9 降级透传。
+> **vendored 含义**：`detector.py` 是检测算法源码被**直接内置进本项目包**
+> （vendor 进项目），随中间件分发。`defaults/detector.yaml` 是其算法默认参数。
+> 配置路径解析见 §3.8（显式 env → vendored 固定路径 → None 降级）。
 
+- 构造 `ILLDetector(config_path)`：仅加载 `detector.yaml`（算法阈值），
+  无模型识别文件、无预生成映射文件依赖。
+- **`set_vocabulary(tk2cat, vocab_size)`**：接受运行时生成的 `{str(token_id): category}`
+  映射（§3.11）。幂等，重复调用覆盖。`get_tk2cat()` 返回注入的映射或 `(None, None)`
+  （未注入 → 无词表降级）。
+- **`topk_n` 参数**：`run(topk, tokens, topk_n=N)` 由参数传入 topk 截断值，
+  消除实例态 `topk` 首次锁定问题（`top_logprobs` 仍须跨请求恒定以保语义一致，
+  但不再因实例态复位缺陷强制）。
 - 批量入口：`run(topk: list[list[dict[int,float]]], tokens: list[list[int]],
-  model_configs: list) -> list[[bool,int]]`。`model_configs` 是与 choice 平行的列表，
-  第 i 项传给单请求检测的 `model_config`。
-- **`model_configs` 即 model_name**：传 `[request.model]*n_choices` 字符串列表。
-  检测器内部对 `mtype_config.json` 的 key（如 `qwen3-30b-a3b`/`deepseekv3`/`glm-4-7`）
-  做去分隔符模糊匹配。Runner 无需自加载 mtype_config。
-- **反面陷阱**：`mtype_config.json` 条目形如 `{"bos":..,"eos":[..]}`，**无 `model_name`**。
-  若把该 dict 当 `model_config` 传入 → 匹配失败 → **静默退化为无词表检测**（生僻字词表路径
-  被跳过）。故 `model_configs` 元素**必须**是模型名字符串。
-- vendored `detector.py` 必修 3 处缺陷：缺 `import json`、缺 `import yaml`、
-  `check_path_exists` 未定义（仅定义了 `check_path_exist`，构造时 `NameError`）。
-- 实例态副作用：`topk` 首次 `run` 锁定后不复位（故 `top_logprobs` 必须跨请求恒定）；
-  `_garbled_count` 每请求复位。单 worker + 锁同时保护两者。
+  topk_n: int) -> list[[bool,int]]`。
+- 实例态副作用：`_garbled_count` 每请求复位。单 worker + 锁保护实例态。
+- 无词表降级：`tk2cat` 为 `None` 时，rare/garbled 走 top1 logp 路径
+  （按概率阈值判异常），repetition/acf/trajectory 不受影响。
 
 ### 4.6 Config / Metrics
 
-- `config.py`：`PluginConfig`（env 读取+校验）；`resolve_detector_paths()` 纯函数，
-  顺序见 §3.8。
+- `config.py`：`PluginConfig`（env 读取+校验）；`resolve_config_path(config, base_dir)` 纯函数，
+  顺序见 §3.8（显式 env → vendored `defaults/detector.yaml` → None）。
 - `metrics.py`：独立 registry；`record_detection(results, model)`、`record_error()`、
   `render_metrics()->bytes`、`METRICS_CONTENT_TYPE`。
+
+### 4.7 TokenTextResolver
+
+**职责**：token_id(int)→单 token surface 文本（`decode([id])`）；进程级单例，懒构造，软降级。
+仅被 strip 路径（事件循环）调用，检测侧用 token_id 整数、不调用 resolver（§3.10）。
+
+**构造** `TokenTextResolver(tokenizer)`：持 tokenizer 引用与空 `dict[int,str]` 缓存。
+
+**`resolve(token_id) -> Optional[str]`**：`int(token_id)` → 命中缓存直接返回；否则
+`tokenizer.decode([tid])`，非空存入缓存并返回、空则缓存 `None` 并返回 `None`。`decode` 对个别 id
+抛错由 try/except 吞为 `None`（该处置 null），不影响其余。
+
+**`acquire_tokenizer(model_hint, server, explicit) -> Optional[Any]`**（async，`token_resolver.py`）：
+tokenizer 获取多级兜底，顺序见 §3.10。`_from_pretrained` 为间接层（便于测试 monkeypatch）。
+`_fetch_served_model_id(server)` 走 loopback `GET /v1/models`（async httpx，timeout 5s，失败 None）。
+`_scan_hf_cache_candidates(hint)` 走 `huggingface_hub.scan_cache_dir()`，不可用返回 []。
+
+**并发**：`resolve` 仅事件循环单线程调用，`dict` 缓存无锁；`acquire_tokenizer` 仅在
+`_ensure_resolver` 双检锁内首请求调用一次（§6.4）。loopback HTTP 用 async httpx 非阻塞，
+事件循环可同时处理 `/v1/models`；中间件对 GET 放行，重入安全。
+
+**降级**：resolver 不可用为**软降级**——strip 退回：chat 主 token 走 bytes、其余 null、
+completions 全 null，**绝不泄漏 `token_id:`**（§3.10 / §7）；不影响检测、不影响客户端响应完整性，仅个别
+token 文本缺失为 null。
 
 ## 5. 数据流
 
@@ -393,16 +563,16 @@ return detector.run(topk, tokens, model_configs)`。
 ```
 client POST /v1/chat/completions (无 logprobs)
   → 读 body, parse JSON; will_detect (say True)
-  → _ensure_runner (双检锁, 廉价); ok
+  → _ensure_runner (双检锁, 廉价; 预热有 tk2cat 则注入); ok
   → save_original_params; inject(logprobs/top_logprobs/return_tokens_as_token_ids)
-  → patch 请求 CL; 装 ResponseInterceptor
-  → app(...) 返回 choices[].logprobs.content[] (含 bytes, token="token_id:NNN")
-  → _on_start(缓冲); _on_body(缓冲到 more_body=False)
-       _process_complete: extract→存检测数据; strip→logprobs=null, 文本从 bytes 还原
-       _send_start(注入关联头 + patch 响应 CL); send(terminal body)
-  → 调度检测(topk, tokens, [model]*n, request_id)
+  → patch 请求 CL; _ensure_resolver(软降级, 可 None; 慢路径补生成 tk2cat 注入); 装 ResponseInterceptor(透传 resolver)
+   → app(...) 返回 choices[].logprobs.content[] (含 bytes, token="token_id:NNN")
+   → _on_start(缓冲); _on_body(缓冲到 more_body=False)
+        _process_complete: extract→存检测数据(topk,tokens); strip(resolver)→logprobs=null, token_id→文本(resolver 优先, bytes 兜底)
+        _send_start(注入关联头 + patch 响应 CL); send(terminal body)
+   → 调度检测(topk, tokens, request_id, model)
 client 收到: logprobs=null, 无 token_id:, 带 x-anomaly-request-id
-worker: run_sync→ILLDetector.run→[[is_ill,ill_type]]→record_detection
+worker: run_sync→ILLDetector.run(topk, tokens, topk_n)→[[is_ill,ill_type]]→record_detection
 ```
 
 ### 5.2 chat 流式
@@ -416,38 +586,55 @@ client POST ... (stream=true)
   → ... 多块 ...
   → _on_body(more_body=False): _sse.flush; send(terminal); _finished=True; 调度检测
 client 收到: 增量恢复块 + data: [DONE] (原样透传) + 关联头
-worker: 累积全部 token 的 ILLDetector.run → record_detection
+worker: 累积全部 token 的 ILLDetector.run(topk, tokens, topk_n) → record_detection
 ```
 
 ### 5.3 completions
 注入 `logprobs=<N>` + `return_tokens_as_token_ids=true`；恢复时若客户端未请求
-`return_tokens_as_token_ids` → `tokens[]=[null]*len`（无 bytes 可解码，绝不留 `token_id:`）；
-`top_logprobs` dict 截断到请求 N。
+`return_tokens_as_token_ids` → `tokens[]` 经 `_token_text(t, None, resolver)` 还原（resolver 可用为
+真实文本，不可用为 null，**绝不留 `token_id:`**）；`top_logprobs` dict 截断到请求 N、重建为 `{文本:logprob}`
+（resolver 不可用时落 null）。
 
 ## 6. 并发与生命周期
 
 ### 6.1 两段式懒加载
 
 - **廉价阶段**（请求路径，首个 `will_detect` 请求）：`_ensure_runner()` 构造
-  `DetectorRunner`——仅线程池 + 锁，无 numpy/文件 I/O。失败（路径解析不出）则置
+  `DetectorRunner`——仅线程池 + 锁 + config 路径，无 numpy/文件 I/O。若有预热生成的
+  `_tk2cat` 则同步 `set_vocabulary` 注入。失败（路径解析不出）则置
   `enabled=False` 永久降级。
 - **重阶段**（worker 线程内，首次检测）：`_get_detector()` 懒构造 `ILLDetector`
-  （numpy + 多 MB JSON），位于请求路径之外，不影响首请求延迟。
+  （numpy + config.yaml），位于请求路径之外，不影响首请求延迟。构造时若有注入的
+  `_tk2cat` 则同步注入检测器。
+- **预热线程**（可选，构造时）：若 `VLLM_ANOMALY_TOKENIZER_MODEL` 设定，`_start_preheat()`
+  启动 daemon 线程提前加载 tokenizer + `generate_tk2cat`，在首请求 runner 构造之前完成则注入。
+  预热失败不影响首请求（`_ensure_resolver` 慢路径补生成）。
 - 双检锁：`if _runner_inited: return; with lock: if _runner_inited: return; ...; finally: _runner_inited=True`。
   `finally` 保证无论成败只跑一次，避免每请求重试昂贵导入。GIL 下 bool 写入在锁内安全。
 
 ### 6.2 检测串行化
 
-- 检测器 CPU-bound（numpy/FFT），且每次 `run` 突变实例态（`topk`/`_garbled_count`），
+- 检测器 CPU-bound（numpy/FFT），且每次 `run` 突变实例态（`_garbled_count`），
   不得阻塞 event loop、不得与自身并发。
 - 单 worker 线程池自然串行；`threading.Lock` 为未来 `max_workers>1` 的 belt-and-suspenders。
-- `run_sync` 在锁内调 `detector.run`。
+- `run_sync` 在锁内调 `detector.run(topk, tokens, topk_n)`。
 
 ### 6.3 检测任务生命周期
 
 - fire-and-forget：`asyncio.create_task`，异常全捕获。
 - 防 GC：`_pending_tasks` 持引用，`done_callback` 出集。
 - 关闭：未完成任务随 loop 取消（结果丢失不影响客户端）。
+
+### 6.4 resolver 生命周期
+
+- `_ensure_resolver` 双检锁（同 §6.1 `_ensure_runner`）；`finally` 置 `_resolver_inited`，
+  避免每请求重试昂贵加载。与 runner 不同：resolver 失败为**软降级**（返回 None 不抛，
+  不改 `enabled`），仍注入、仍 strip。
+- 首请求 init 可能含一次 loopback `GET /v1/models` + 一次本地 tokenizer 加载（百毫秒级），
+  一次性、进程生命期复用；与首请求 runner 构造同窗，可接受。
+- loopback HTTP 用 **async httpx**（非阻塞），事件循环可同时处理 `/v1/models`；中间件对 GET 放行，重入安全。
+- `resolve` 仅事件循环调用；`dict` 缓存单线程访问，无锁。
+- `shutdown` 无特殊清理（tokenizer 随进程退出）。
 
 ## 7. 边界条件与异常处理
 
@@ -467,23 +654,34 @@ worker: 累积全部 token 的 ILLDetector.run → record_detection
 | `Expect: 100-continue` | ASGI 不暴露，由 uvicorn/vLLM 处理，安全 |
 | chunked 请求 | ASGI 已合并为完整 body，`_read_all_body` 正确 |
 | 下游二次读 receive | 重放 receive 委托原始 `receive()` 取真实后续消息（`http.disconnect`）；不得合成空 body 的 `http.request`（实测 vLLM 会重复请求） |
+| `VLLM_ANOMALY_TOKENIZER_MODEL` 设但 `from_pretrained` 抛错 | 落到 model_hint 自动解析；记 INFO |
+| `from_pretrained(model_hint)` 抛错 | 落到 loopback `/v1/models` 兜底；记 INFO |
+| `/v1/models` 不可达 / 非预期格式 | 落到 HF 缓存扫描；仍失败 → resolver 不可用终态，记一次 WARNING |
+| 缓存扫描命中但 `from_pretrained` 抛错 | 记 WARNING，继续下一候选 / 落到不可用终态 |
+| `decode([id])` 对个别 id 抛错 | `resolve` 内 try/except → 该 id 返回 None（置 null），不影响其余 |
+| resolver 不可用 | strip 退回：chat 主 token 走 bytes、其余 null、completions null；**绝不泄漏 `token_id:`**；不影响检测 |
+| tk2cat 生成失败 | resolver 仍可用（strip 正常），检测降级为无词表（rare/garbled 走 top1 logp），记 WARNING |
+| tokenizer 无 decode 路径 | `generate_tk2cat` raise → tk2cat 不注入 → 无词表检测 |
+| 预热线程未完成 / 未设定 | 首请求 `_ensure_resolver` 慢路径补生成 tk2cat（一次性，进程复用） |
+| 自定义 `--tokenizer` 路径 | resolver 加载的 tokenizer 可能与 vLLM 实际所用不同 → 客户端文本偶发不一致（token_id 整数仍对、检测不受影响）；设 `VLLM_ANOMALY_TOKENIZER_MODEL` 为该 `--tokenizer` 路径以对齐 |
 
 ## 8. 部署
 
-前置：vLLM 运行环境能 `import vllm_anomaly_middleware` 即可。包内已内置 vendored
-`response_anomaly/` 及 configs（`configs/`、`token2category/`），随包定位，无需额外数据路径。
+前置：vLLM 运行环境能 `import vllm_anomaly_middleware` 即可。包内已内置检测器
+（`detector.py`）与算法默认参数（`defaults/detector.yaml`），随包分发，无需额外数据路径。
+token2category 映射在运行时从 tokenizer 生成，无预生成文件依赖。
 
 项目路径：path=xxx/vllm_anomaly_middleware
 
 两种接入方式（任选其一）：
 - **方式 A（推荐）**：`pip install -e $path`
-  —— 可编辑安装，自动安装依赖（`prometheus_client`、`pyyaml`），任意工作目录启动均可 import。
+  —— 可编辑安装，自动安装依赖（`prometheus_client`、`pyyaml`、`numpy`、`httpx`），任意工作目录启动均可 import。
 - **方式 B（免安装）**：vLLM 环境已装有依赖时，仅需把项目根加入导入路径后启动：
   ```powershell
   $env:PYTHONPATH = $path
   vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware
   ```
-  （依赖缺失则先 `pip install prometheus_client pyyaml`。）
+  （依赖缺失则先 `pip install prometheus_client pyyaml numpy httpx`。）
 
 启动：`vllm serve <model> --middleware vllm_anomaly_middleware.AnomalyMiddleware`。
 - 无需 entry-point 注册、无需 `VLLM_PLUGINS` 白名单、无需特定 vLLM 插件接口，
