@@ -47,6 +47,8 @@ async def client_factory():
         )
         mw._runner = None
         mw._runner_inited = False
+        mw._resolver = None
+        mw._resolver_inited = True  # 默认跳过 _ensure_resolver（e2e 默认 resolver 不可用）
         client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         )

@@ -13,43 +13,23 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
+"""token 分类纯函数 + 运行时 token2category 映射生成（spec §4.2 / §4.4）。
 
+本模块为可导入模块：分类纯函数（categorize_token / invert_vocab / _classify_char）
+供检测器与中间件共享；`generate_tk2cat(tokenizer)` 在运行时从已加载 tokenizer 直接
+生成 `{str(token_id): category}` 映射，由中间件通过 set_vocabulary 注入检测器，
+不再落盘为预生成文件。
+
+transformers 改懒导入（本模块不强依赖 transformers）；decode 降级链优先
+backend_tokenizer.decoder.decode，退到 tokenizer.decode，均无则 raise（调用方降级）。
+"""
 from __future__ import annotations
 
-import argparse
-import json
-import os
-import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
-from transformers import AutoTokenizer
-
-
-def check_path_exists(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"path does not exist: {path}")
-    return True
-
-def save_json(json_path, data):
-    json_path = os.path.realpath(json_path)
-    print(json_path)
-    try:
-        with open(json_path, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        raise RuntimeError(f"Save json file {json_path} failed.") from e
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="")
-    parser.add_argument(
-        "--model-path",
-        required=True,
-        help="Path of the model for starting the service.",
-    )  # 目标模型路径
-    parser.add_argument("--model-name", default=None, type=str)  # 保存的文件名以及mtype_config.json文件里对应的key
-    return parser.parse_args()
+from typing import Dict, Optional, Tuple
 
 
 @dataclass
@@ -206,77 +186,60 @@ def invert_vocab(vocab):
     return tokens
 
 
-def _normalize_name(name):
-    return "-".join(re.split(r"\.|-|_", name.lower()))
+# --------------------------------------------------------------------------- #
+# decode 降级链 + 运行时 generate_tk2cat（spec §4.2 / §4.4）
+# --------------------------------------------------------------------------- #
+def _get_decode_fn(tokenizer):
+    """返回 (token_str, idx) -> Optional[str] 的闭包，或 None。
+
+    优先 backend_tokenizer.decoder.decode（最精确）；
+    退到 tokenizer.decode([idx])（高层 API，覆盖慢速 tokenizer）；均无则 None。
+    """
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    decoder = getattr(backend, "decoder", None) if backend is not None else None
+    if decoder is not None and hasattr(decoder, "decode"):
+        def _backend(token, idx):
+            return decoder.decode([token])
+        return _backend
+    if hasattr(tokenizer, "decode"):
+        def _highlevel(token, idx):
+            return tokenizer.decode([idx])
+        return _highlevel
+    return None
 
 
-def read_tokenid(path):
-    eos_token_id, bos_token_id = None, None
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            eos_token_id = data.get("eos_token_id")
-            bos_token_id = data.get("bos_token_id")
-    return eos_token_id, bos_token_id
+def _safe_decode(decode_fn, token, idx):
+    """逐 token decode + 异常吞掉；失败或无 decode_fn 返回 None（该 token 跳过）。"""
+    if decode_fn is None:
+        return None
+    try:
+        return decode_fn(token, idx)
+    except Exception:
+        return None
 
 
-def parse_eos_token(tokenizer, model_name, model_path):
-    generation_config_path = os.path.join(model_path, "generation_config.json")
-    eos_token_id, bos_token_id = read_tokenid(generation_config_path)
-    if eos_token_id is None:
-        config_path = os.path.join(model_path, "config.json")
-        eos_token_id, bos_token_id = read_tokenid(config_path)
+def generate_tk2cat(tokenizer) -> Tuple[Dict[str, str], int]:
+    """从 tokenizer 生成 {str(token_id): category} 映射 + vocab_size。
 
-    if eos_token_id is None:
-        eos_token_id = tokenizer.eos_token_id
-
-    result = {model_name: {"bos": bos_token_id, "eos": eos_token_id}}
-
-    return result
-
-
-def main():
-    args = parse_args()
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-    model_path = args.model_path
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)  # nosec B615: 使用Transformer命令加载本地模型路径，不会从Hugging Face上下载，不涉及安全问题
-
-    # 处理model_name
-    model_name = args.model_name
-    if model_name is None:
-        model_name = model_path.rstrip(os.sep).split(os.sep)[-1]
-    model_name = _normalize_name(model_name)
-
-    # 获取eos、bos token_id，并将其保存到mtype_config.json文件里
-    result = parse_eos_token(tokenizer, model_name, model_path)
-    path = os.path.abspath(os.path.join(os.getcwd(), ".."))
-    save_path = os.path.join(path, "configs/")
-    check_path_exists(save_path)
-    save_json(os.path.join(save_path, "mtype_config.json"), result)
-
-    vocab_size = tokenizer.vocab_size  # 获取到vocab_size
-    # 生成 token 到 category 的映射文件, 命名规则为 (model_name+vocab_size).json
+    返回 (id_to_category, vocab_size)。无可用 decode 路径 -> raise（调用方降级）。
+    逐 token 解码失败 -> 跳过（不入映射），不影响其余 token。
+    """
     vocab = tokenizer.get_vocab()
     tokens = invert_vocab(vocab)
-    category_counts = Counter()
+    vocab_size = tokenizer.vocab_size
 
-    decode = tokenizer.backend_tokenizer.decoder.decode
-    tokens_info = []
+    decode_fn = _get_decode_fn(tokenizer)
+    if decode_fn is None:
+        raise RuntimeError(
+            "tokenizer 无可用 decode 路径"
+            "（backend_tokenizer.decoder.decode / tokenizer.decode 均缺失）"
+        )
+
+    id_to_category: Dict[str, str] = {}
     for idx, token in enumerate(tokens):
-        decoded = decode([token])
+        decoded = _safe_decode(decode_fn, token, idx)
+        if decoded is None:
+            continue
         info = categorize_token(idx, token, decoded)
-        tokens_info.append(info)
-        category_counts[info.category] += 1
-
-    save_path = os.path.join(path, "token2category/")
-    check_path_exists(save_path)
-
-    name = model_name + f"_{vocab_size}"  # 保存的文件名
-    id_to_category = {info.token_id: info.category for info in tokens_info}
-    save_json(os.path.join(save_path, f"{name}.json"), id_to_category)
-
-
-if __name__ == "__main__":
-    main()
+        id_to_category[str(info.token_id)] = info.category
+    return id_to_category, vocab_size

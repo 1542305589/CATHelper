@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from _helpers import build_chat_response, chat_top_entry
+from _helpers import build_chat_response, chat_top_entry, install_fake_resolver
 from conftest import drain
 
 NI = "你"
@@ -151,3 +151,78 @@ async def test_chat_detect_truncate_n_vs_client(client_factory):
     await drain(mw)
     text = mw.metrics.render_metrics().decode()
     assert "vllm_anomaly_requests_total 1" in text
+
+
+async def test_chat_top_logprobs_resolver_text_no_leak(client_factory):
+    # 真实 vLLM 形态：top bytes 破损（解码为 token_id: 字符串）→ resolver 还原为文本
+    def fn(scope, body):
+        e = chat_top_entry(200, HAO, -0.2, n_top=5, vllm_broken_top_bytes=True)
+        return (
+            "json",
+            {
+                "id": "c",
+                "object": "chat.completion",
+                "model": "glm-4-7",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "x"},
+                        "logprobs": {"content": [e]},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    client, fake, mw = client_factory(fn)
+    install_fake_resolver(
+        mw, {200: HAO, 10000: "甲", 10001: "乙", 10002: "丙", 10003: "丁", 10004: "戊"}
+    )
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "glm-4-7",
+            "messages": [],
+            "logprobs": True,
+            "top_logprobs": 3,
+        },
+    )
+    entry = resp.json()["choices"][0]["logprobs"]["content"][0]
+    assert entry["token"] == HAO  # 主 token resolver 优先
+    assert len(entry["top_logprobs"]) == 3
+    for tp in entry["top_logprobs"]:
+        assert tp["token"] in ("甲", "乙", "丙", "丁", "戊")  # resolver 文本，非 token_id:
+    assert "token_id:" not in resp.text
+
+
+async def test_chat_top_logprobs_no_resolver_broken_bytes_no_leak(client_factory):
+    # resolver off + 破损 bytes → top_logprobs token=null，绝不泄漏 token_id:
+    def fn(scope, body):
+        e = chat_top_entry(200, HAO, -0.2, n_top=5, vllm_broken_top_bytes=True)
+        return (
+            "json",
+            {
+                "id": "c",
+                "object": "chat.completion",
+                "model": "glm-4-7",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "x"},
+                        "logprobs": {"content": [e]},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    client, fake, mw = client_factory(fn)
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={"model": "glm-4-7", "messages": [], "logprobs": True, "top_logprobs": 3},
+    )
+    entry = resp.json()["choices"][0]["logprobs"]["content"][0]
+    assert entry["token"] == HAO  # 主 token bytes 仍正确
+    for tp in entry["top_logprobs"]:
+        assert tp["token"] is None  # 破损 bytes 被守卫置 null
+    assert "token_id:" not in resp.text

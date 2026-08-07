@@ -13,6 +13,7 @@ dependencies = [
     "prometheus_client>=0.16",
     "pyyaml>=5.4",
     "numpy>=1.20",
+    "httpx>=0.24",
 ]
 
 [project.optional-dependencies]
@@ -26,13 +27,11 @@ test = [
 [tool.setuptools]
 # 项目根目录即包目录（flat layout: root == package vllm_anomaly_middleware）
 package-dir = {"vllm_anomaly_middleware" = "."}
-packages = ["vllm_anomaly_middleware", "vllm_anomaly_middleware.response_anomaly"]
+packages = ["vllm_anomaly_middleware"]
 
 [tool.setuptools.package-data]
-"vllm_anomaly_middleware.response_anomaly" = [
-    "configs/*.yaml",
-    "configs/*.json",
-    "token2category/*.json",
+"vllm_anomaly_middleware" = [
+    "defaults/*.yaml",
 ]
 
 [tool.pytest.ini_options]

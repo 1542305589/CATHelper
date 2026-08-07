@@ -9,6 +9,7 @@ from _helpers import (
     chat_stream_chunk,
     chat_top_entry,
     completions_stream_chunk,
+    install_fake_resolver,
 )
 from conftest import drain
 
@@ -171,3 +172,62 @@ async def test_stream_no_buffering_done_present(client_factory):
     # 至少包含两条恢复块 + DONE（中间件未先全缓冲再发）
     assert content.count(b"data: ") >= 3
     assert content.rstrip().endswith(b"data: [DONE]")
+
+
+async def test_chat_stream_resolver_per_chunk_no_leak(client_factory):
+    # 流式 + resolver：每块 top_logprobs token 还原为文本（破损 bytes fixture），全文无 token_id:
+    def fn(scope, body):
+        e1 = chat_top_entry(100, NI, -0.1, n_top=5, vllm_broken_top_bytes=True)
+        e2 = chat_top_entry(200, HAO, -0.2, n_top=5, vllm_broken_top_bytes=True)
+        chunks = [
+            chat_stream_chunk("glm-4-7", e1, delta_text=NI),
+            chat_stream_chunk("glm-4-7", e2, delta_text=HAO),
+            None,
+        ]
+        return ("stream", chunks)
+
+    client, fake, mw = client_factory(fn)
+    install_fake_resolver(
+        mw,
+        {
+            100: NI, 200: HAO,
+            10000: "甲", 10001: "乙", 10002: "丙", 10003: "丁", 10004: "戊",
+            10005: "己",
+        },
+    )
+    content = await _collect_stream(
+        client,
+        "/v1/chat/completions",
+        {
+            "model": "glm-4-7",
+            "messages": [],
+            "stream": True,
+            "logprobs": True,
+            "top_logprobs": 3,
+        },
+    )
+    assert b"data: [DONE]" in content
+    assert b"token_id:" not in content  # 全文无泄漏（含破损 bytes 的 top_logprobs）
+
+
+async def test_completions_stream_resolver_text_per_chunk(client_factory):
+    # 流式 completions + resolver：每块 tokens/top_logprobs 还原为文本，全文无 token_id:
+    def fn(scope, body):
+        chunks = [
+            completions_stream_chunk("glm-4-7", 100, -0.1, n_top=5),
+            completions_stream_chunk("glm-4-7", 200, -0.2, n_top=5),
+            None,
+        ]
+        return ("stream", chunks)
+
+    client, fake, mw = client_factory(fn)
+    install_fake_resolver(
+        mw, {100: NI, 200: HAO, 10000: "甲", 10001: "乙", 10002: "丙", 10003: "丁", 10004: "戊"}
+    )
+    content = await _collect_stream(
+        client,
+        "/v1/completions",
+        {"model": "glm-4-7", "prompt": "x", "stream": True, "logprobs": 3},
+    )
+    assert b"data: [DONE]" in content
+    assert b"token_id:" not in content

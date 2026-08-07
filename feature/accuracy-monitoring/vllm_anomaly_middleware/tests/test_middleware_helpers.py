@@ -202,3 +202,62 @@ async def test_dispatch_disabled_passthrough_no_body_read():
     body = json.dumps({"model": "m", "messages": []}).encode()
     await _drive(mw, "POST", "/v1/chat/completions", body=body)
     assert len(rec.calls) == 1
+
+
+# --------------------------- _ensure_resolver --------------------------- #
+class _FakeTok:
+    def __init__(self, m):
+        self._m = m
+
+    def decode(self, ids, **kw):
+        return "".join(self._m.get(i, "") for i in ids)
+
+
+def _make_mw_for_resolver():
+    rec = _Recorder()
+    mw = AnomalyMiddleware(rec)
+    mw.config = PluginConfig(enabled=True, top_logprobs=20)
+    mw._runner = object()  # 跳过 runner 构造
+    mw._runner_inited = True
+    return mw
+
+
+@pytest.mark.asyncio
+async def test_ensure_resolver_uses_acquire_and_caches(monkeypatch):
+    mw = _make_mw_for_resolver()
+    import vllm_anomaly_middleware.token_resolver as tr
+
+    async def fake_acquire(hint, server, explicit=None):
+        assert hint == "m"
+        assert server == ("127.0.0.1", 8000)
+        return _FakeTok({1: "x"})
+
+    monkeypatch.setattr(tr, "acquire_tokenizer", fake_acquire)
+    r = await mw._ensure_resolver("m", ("127.0.0.1", 8000))
+    assert r is not None
+    assert r.resolve(1) == "x"
+
+    # 双检锁：第二次不重复 acquire
+    called = {"n": 0}
+
+    async def counting(hint, server, explicit=None):
+        called["n"] += 1
+        return _FakeTok({})
+
+    monkeypatch.setattr(tr, "acquire_tokenizer", counting)
+    r2 = await mw._ensure_resolver("m", ("127.0.0.1", 8000))
+    assert r2 is r  # 同一实例
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_resolver_failure_returns_none(monkeypatch):
+    mw = _make_mw_for_resolver()
+    import vllm_anomaly_middleware.token_resolver as tr
+
+    async def fail(hint, server):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tr, "acquire_tokenizer", fail)
+    r = await mw._ensure_resolver("m", ("127.0.0.1", 8000))
+    assert r is None  # 失败软降级，不抛

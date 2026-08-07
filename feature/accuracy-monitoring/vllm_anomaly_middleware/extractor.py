@@ -111,6 +111,27 @@ def _decode_bytes(b: Any) -> Optional[str]:
     return None
 
 
+def _token_text(token_id_value: Any, bytes_value: Any, resolver: Any) -> Optional[str]:
+    """统一 token_id -> 文本（spec §5，resolver 优先）。
+
+    1) 优先 resolver：覆盖 chat 主 token / top_logprobs / completions 全部字段。
+    2) resolver 缺失/未解析 → 退回 bytes，仅当解码出真实文本（不含 token_id: 前缀）。
+       该守卫独立修复泄漏：chat top_logprobs 的破损 bytes 被置 null，绝不回写 token_id:。
+    3) 都无 → null。
+    """
+    if resolver is not None:
+        tid = parse_token_id(token_id_value)
+        if tid >= 0:
+            txt = resolver.resolve(tid)
+            if txt is not None:
+                return txt
+    if bytes_value is not None:
+        s = _decode_bytes(bytes_value)
+        if s is not None and not s.startswith(TOKEN_ID_PREFIX):
+            return s
+    return None
+
+
 def _truncate_topk(d: Dict[int, float], n: Optional[int]) -> Dict[int, float]:
     """按 logprob 降序取前 n 项（供检测，截断到 N）。"""
     if not n or n <= 0 or not d:
@@ -205,7 +226,7 @@ def extract_completions_response(
 # --------------------------------------------------------------------------- #
 # 恢复（供客户端，按原始参数）
 # --------------------------------------------------------------------------- #
-def strip_chat_response(data: Any, orig: OriginalParams) -> None:
+def strip_chat_response(data: Any, orig: OriginalParams, resolver: Any = None) -> None:
     """chat 响应恢复（原位修改 data）。"""
     if not isinstance(data, dict):
         return
@@ -236,18 +257,22 @@ def strip_chat_response(data: Any, orig: OriginalParams) -> None:
                 else:
                     tps = []
                 if not orig.return_tokens_as_token_ids:
-                    entry["token"] = _decode_bytes(entry.get("bytes"))
+                    entry["token"] = _token_text(
+                        entry.get("token"), entry.get("bytes"), resolver
+                    )
                     for tp in tps:
                         if isinstance(tp, dict):
-                            tp["token"] = _decode_bytes(tp.get("bytes"))
+                            tp["token"] = _token_text(
+                                tp.get("token"), tp.get("bytes"), resolver
+                            )
                 entry["top_logprobs"] = tps
 
 
-def strip_completions_response(data: Any, orig: OriginalParams) -> None:
+def strip_completions_response(data: Any, orig: OriginalParams, resolver: Any = None) -> None:
     """completions 响应恢复（原位修改 data）。
 
-    无 tokenizer：客户端未请求 return_tokens_as_token_ids 时
-    tokens[]=[None]*len、top_logprobs[]=[None]*len（绝不留 token_id:）。
+    resolver 可用时 tokens[] / top_logprobs[] 还原为真实文本（resolver 优先）；
+    resolver 不可用时退回 null（绝不留 token_id:）。
     """
     if not isinstance(data, dict):
         return
@@ -278,13 +303,17 @@ def strip_completions_response(data: Any, orig: OriginalParams) -> None:
                 if orig.return_tokens_as_token_ids:
                     new_tlp.append({k: v for k, v in items})
                 else:
-                    # 无 tokenizer，无法将 token_id 解码为文本 → null（绝不留 token_id:）
-                    new_tlp.append(None)
+                    rebuilt: Dict[str, Any] = {}
+                    for k, v in items:
+                        txt = _token_text(k, None, resolver)  # completions 无 bytes
+                        if txt is not None:
+                            rebuilt[txt] = v
+                    new_tlp.append(rebuilt if rebuilt else None)
             lp["top_logprobs"] = new_tlp
         if not orig.return_tokens_as_token_ids:
             toks = lp.get("tokens")
             if isinstance(toks, list):
-                lp["tokens"] = [None] * len(toks)
+                lp["tokens"] = [_token_text(t, None, resolver) for t in toks]
 
 
 # --------------------------------------------------------------------------- #
@@ -296,12 +325,12 @@ class SSEStreamProcessor:
     转发：增量无状态（每块即发）；检测数据：跨块有状态 append。
     """
 
-    def __init__(self, is_chat: bool, orig: OriginalParams, n_detect: int) -> None:
+    def __init__(self, is_chat: bool, orig: OriginalParams, n_detect: int, resolver: Any = None) -> None:
         self._is_chat = is_chat
         self._orig = orig
         self._n_detect = n_detect
+        self._resolver = resolver
         self._buffer = bytearray()
-        self._model: Optional[str] = None
         # chat 累积：choice_index -> list[entry]
         self._chat_acc: Dict[int, List[Dict[str, Any]]] = {}
         # completions 累积：choice_index -> {tokens, token_logprobs, top_logprobs}
@@ -365,10 +394,6 @@ class SSEStreamProcessor:
             return event + b"\n\n"
         if not isinstance(parsed, dict):
             return event + b"\n\n"
-        # 捕获 model
-        model = parsed.get("model")
-        if isinstance(model, str) and model:
-            self._model = model
         # 累积检测数据
         self._extract_streaming(parsed)
         # 每块无状态恢复
@@ -433,14 +458,14 @@ class SSEStreamProcessor:
 
     def _strip_streaming(self, parsed: Dict[str, Any]) -> None:
         if self._is_chat:
-            strip_chat_response(parsed, self._orig)
+            strip_chat_response(parsed, self._orig, self._resolver)
         else:
-            strip_completions_response(parsed, self._orig)
+            strip_completions_response(parsed, self._orig, self._resolver)
 
     # ---- 检测数据 ---- #
     def get_detection_data(
         self,
-    ) -> Tuple[List[List[Dict[int, float]]], List[List[int]], List[str]]:
+    ) -> Tuple[List[List[Dict[int, float]]], List[List[int]]]:
         topk_all: List[List[Dict[int, float]]] = []
         tokens_all: List[List[int]] = []
         if self._is_chat:
@@ -488,9 +513,7 @@ class SSEStreamProcessor:
                 tokens_list = [parse_token_id(t) for t in toks]
                 topk_all.append(topk_list)
                 tokens_all.append(tokens_list)
-        n = max(len(topk_all), 1)
-        configs = [self._model or "unknown"] * n
-        return topk_all, tokens_all, configs
+        return topk_all, tokens_all
 
 
 def _entry_token(entry: Any) -> Any:

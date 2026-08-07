@@ -17,8 +17,13 @@ def chat_top_entry(
     logprob: float,
     n_top: int = 20,
     nan_at: Optional[int] = None,
+    vllm_broken_top_bytes: bool = False,
 ) -> Dict[str, Any]:
-    """构造 chat logprobs.content[] 的一个 entry（含 token_id: 前缀）。"""
+    """构造 chat logprobs.content[] 的一个 entry（含 token_id: 前缀）。
+
+    vllm_broken_top_bytes：复现真实 vLLM 在 return_tokens_as_token_ids=true 下的
+    破损形态——top_logprobs 的 bytes 是 "token_id:NNN" 字符串本身的字节（非 token 真实字节）。
+    """
     b = text_bytes(text)
     tps: List[Dict[str, Any]] = []
     for i in range(n_top):
@@ -26,11 +31,16 @@ def chat_top_entry(
         lp = logprob - i * 0.1
         if nan_at is not None and i == nan_at:
             lp = float("nan")
+        top_b = (
+            list(f"token_id:{cid}".encode("utf-8"))
+            if vllm_broken_top_bytes
+            else b
+        )
         tps.append(
             {
                 "token": f"token_id:{cid}",
                 "logprob": lp,
-                "bytes": b,
+                "bytes": top_b,
             }
         )
     return {
@@ -142,6 +152,24 @@ def completions_stream_chunk(
             }
         ],
     }
+
+
+class FakeTokenizer:
+    """测试用伪 HF tokenizer：id -> text 字典。"""
+
+    def __init__(self, mapping):
+        self._m = mapping
+
+    def decode(self, ids, **kwargs):
+        return "".join(self._m.get(i, "") for i in ids)
+
+
+def install_fake_resolver(mw, mapping):
+    """给 mw 注入基于 FakeTokenizer(mapping) 的 TokenTextResolver，并标记已初始化。"""
+    from vllm_anomaly_middleware.token_resolver import TokenTextResolver
+
+    mw._resolver = TokenTextResolver(FakeTokenizer(mapping))
+    mw._resolver_inited = True
 
 
 class FakeVLLM:

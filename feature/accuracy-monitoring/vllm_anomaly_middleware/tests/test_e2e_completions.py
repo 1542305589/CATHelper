@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from _helpers import build_completions_response
+from _helpers import build_completions_response, install_fake_resolver
 from conftest import drain
 
 pytestmark = pytest.mark.asyncio
@@ -64,6 +64,38 @@ async def test_completions_restore_token_ids_kept(client_factory):
 
 async def test_completions_restore_no_token_ids_null(client_factory):
     # 客户端 logprobs=3, 无 token_ids → tokens=null, top_logprobs=null（绝不留 token_id:）
+    client, fake, mw = client_factory(_comp_resp_fn(n_top=20))
+    resp = await client.post(
+        "/v1/completions",
+        json={"model": "m", "prompt": "x", "logprobs": 3},
+    )
+    lp = resp.json()["choices"][0]["logprobs"]
+    assert lp["tokens"] == [None, None]
+    assert lp["top_logprobs"] == [None, None]
+    assert "token_id:" not in resp.text
+
+
+async def test_completions_restore_text_with_resolver(client_factory):
+    # resolver on：tokens 还原为文本、top_logprobs 还原为 {文本:logprob}，全文无 token_id:
+    client, fake, mw = client_factory(_comp_resp_fn(n_top=20))
+    install_fake_resolver(
+        mw, {100: "你", 200: "好", 10000: "甲", 10001: "乙", 10002: "丙"}
+    )
+    resp = await client.post(
+        "/v1/completions",
+        json={"model": "m", "prompt": "x", "logprobs": 3},
+    )
+    lp = resp.json()["choices"][0]["logprobs"]
+    assert lp["tokens"] == ["你", "好"]
+    assert len(lp["top_logprobs"]) == 2
+    for pos in lp["top_logprobs"]:
+        assert len(pos) == 3  # 截断到 3
+        assert all(isinstance(k, str) and not k.startswith("token_id:") for k in pos)
+    assert "token_id:" not in resp.text
+
+
+async def test_completions_resolver_off_still_no_leak(client_factory):
+    # 默认 resolver off → tokens/top_logprobs null，全文无 token_id:
     client, fake, mw = client_factory(_comp_resp_fn(n_top=20))
     resp = await client.post(
         "/v1/completions",

@@ -1,15 +1,14 @@
 """配置与检测器路径解析（design §3.8 / spec §2.11 / §2.12）。
 
-全部运行时配置来自环境变量；构造除 app 外无参数，故配置走 env。
-路径解析：vendored 固定路径为主（用户明确路径固定），显式 env 覆盖可选，
-external 导入兜底；均无则返回 None 触发降级。
+重构后检测器仅依赖 config.yaml（算法阈值）+ 运行时注入的 tk2cat 映射。
+mtype_config.json / token2category 预生成文件已移除（运行时生成取代），
+故路径解析仅返回 config.yaml 单路径：显式 env 覆盖 → vendored 固定路径 → None（降级）。
 """
 from __future__ import annotations
 
-import importlib
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 METRICS_PATH_DEFAULT = "/anomaly/metrics"
 TOP_LOGPROBS_DEFAULT = 20
@@ -63,8 +62,7 @@ class PluginConfig:
     sample_rate: float = SAMPLE_RATE_DEFAULT
     detector_workers: int = DETECTOR_WORKERS_DEFAULT
     detector_config_path: Optional[str] = None
-    mtype_config_path: Optional[str] = None
-    tk2cat_path: Optional[str] = None
+    tokenizer_model: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "PluginConfig":
@@ -89,8 +87,7 @@ class PluginConfig:
             sample_rate=sample_rate,
             detector_workers=workers,
             detector_config_path=_env_str("VLLM_ANOMALY_DETECTOR_CONFIG_PATH"),
-            mtype_config_path=_env_str("VLLM_ANOMALY_MTYPE_CONFIG_PATH"),
-            tk2cat_path=_env_str("VLLM_ANOMALY_TK2CAT_PATH"),
+            tokenizer_model=_env_str("VLLM_ANOMALY_TOKENIZER_MODEL"),
         )
 
 
@@ -98,80 +95,35 @@ def _file_exists(path: str) -> bool:
     return os.path.isfile(path)
 
 
-def _dir_exists(path: str) -> bool:
-    return os.path.isdir(path)
+def _vendored_config_path(base_dir: str) -> str:
+    """包内 vendored 检测器算法默认值固定路径（design §2.2 / §3.8 tier 1）。
+
+    `defaults/detector.yaml` 是检测器算法默认参数（vendored 资源）；
+    与 `config.py` 运行时插件环境配置（PluginConfig.from_env）分离。
+    """
+    return os.path.join(base_dir, "defaults", "detector.yaml")
 
 
-def _vendored_paths(base_dir: str) -> Tuple[str, str, str]:
-    """包内 response_anomaly 固定路径（design §2.2 / §3.8 tier 1）。"""
-    ra = os.path.join(base_dir, "response_anomaly")
-    return (
-        os.path.join(ra, "configs", "config.yaml"),
-        os.path.join(ra, "configs", "mtype_config.json"),
-        os.path.join(ra, "token2category"),
-    )
-
-
-def _external_paths() -> Optional[Tuple[str, str, str]]:
-    """外部可导入 response_anomaly / msprobe.response_anomaly（§3.8 tier 2 兜底）。"""
-    for modname in ("response_anomaly", "msprobe.response_anomaly"):
-        try:
-            mod = importlib.import_module(modname)
-        except Exception:
-            continue
-        # 跳过 vendored 自身（避免把 vendored 子包当 external）
-        if mod.__file__ is None:
-            continue
-        d = os.path.dirname(os.path.abspath(mod.__file__))
-        return (
-            os.path.join(d, "configs", "config.yaml"),
-            os.path.join(d, "configs", "mtype_config.json"),
-            os.path.join(d, "token2category"),
-        )
-    return None
-
-
-def resolve_detector_paths(
+def resolve_config_path(
     config: PluginConfig, base_dir: Optional[str] = None
-) -> Optional[Tuple[str, str, str]]:
-    """解析检测后端三路径：config.yaml / mtype_config.json / token2category/。
+) -> Optional[str]:
+    """解析检测器 detector.yaml 路径。
 
     顺序：
-      1. 显式 env 覆盖（三者齐备且存在）。
-      2. vendored 固定路径（默认/主）。
-      3. external 导入兜底。
-      4. 都无 → None（触发降级）。
+      1. 显式 env 覆盖（VLLM_ANOMALY_DETECTOR_CONFIG_PATH，文件须存在）。
+      2. vendored 固定路径（defaults/detector.yaml，默认/主）。
+      3. 都无 → None（触发降级）。
     """
     # 1. 显式覆盖
-    if (
-        config.detector_config_path
-        and config.mtype_config_path
-        and config.tk2cat_path
-    ):
-        if (
-            _file_exists(config.detector_config_path)
-            and _file_exists(config.mtype_config_path)
-            and _dir_exists(config.tk2cat_path)
-        ):
-            return (
-                config.detector_config_path,
-                config.mtype_config_path,
-                config.tk2cat_path,
-            )
+    if config.detector_config_path and _file_exists(config.detector_config_path):
+        return config.detector_config_path
 
     # 2. vendored 固定路径
     if base_dir is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    cfg, mtype, tk2 = _vendored_paths(base_dir)
-    if _file_exists(cfg) and _file_exists(mtype) and _dir_exists(tk2):
-        return (cfg, mtype, tk2)
+    cfg = _vendored_config_path(base_dir)
+    if _file_exists(cfg):
+        return cfg
 
-    # 3. external 导入兜底
-    ext = _external_paths()
-    if ext is not None:
-        cfg2, mtype2, tk22 = ext
-        if _file_exists(cfg2) and _file_exists(mtype2) and _dir_exists(tk22):
-            return ext
-
-    # 4. 都无 → None（降级）
+    # 3. 都无 → None（降级）
     return None
