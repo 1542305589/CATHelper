@@ -52,8 +52,8 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events (3 anomalous, 1 normal skipped), got %d", len(events))
 	}
-	// Card 3 → critical + thermal_throttle root cause.
-	ev3 := findEmit(events, "3")
+	// Card 3 → critical + thermal_throttle root cause (node defaults to "none").
+	ev3 := findEmit(events, "none:3")
 	if ev3 == nil {
 		t.Fatal("missing card 3 event")
 	}
@@ -67,12 +67,12 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 		t.Errorf("composite_score wrong: %+v", ev3.Detail)
 	}
 	// Card 1 → warning (early degradation).
-	ev1 := findEmit(events, "1")
+	ev1 := findEmit(events, "none:1")
 	if ev1 == nil || ev1.Severity != "warning" {
 		t.Errorf("card1 should be warning: %+v", ev1)
 	}
 	// Card 7 → info (individual variance).
-	ev7 := findEmit(events, "7")
+	ev7 := findEmit(events, "none:7")
 	if ev7 == nil || ev7.Severity != "info" {
 		t.Errorf("card7 should be info: %+v", ev7)
 	}

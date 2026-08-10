@@ -85,10 +85,16 @@ func buildEvent(s CardDetectionSummary, rc RootCauseResult) FaultEvent {
 		}
 		detail["confidence"] = string(rc.Confidence)
 	}
+	// NPUID includes the node so cards from different nodes with the same
+	// per-node card ID do not collide in faultsub.
+	node := s.Node
+	if node == "" {
+		node = noneNode
+	}
 	return FaultEvent{
 		Type:      "straggler_detected",
 		Component: "npu",
-		NPUID:     strconv.Itoa(s.CardID),
+		NPUID:     node + ":" + strconv.Itoa(s.CardID),
 		Severity:  sev,
 		Detail:    detail,
 		Timestamp: time.Now(),

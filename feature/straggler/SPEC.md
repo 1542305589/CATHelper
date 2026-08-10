@@ -112,13 +112,23 @@ ExportJSON    WriteReport    EmitToFaultSub
 
 ### 1.2 输入格式
 
+指标 JSON 支持**平铺**（单节点）和**嵌套**（多节点）两种形态。card ID 在**每个节点内从 0 开始**编号，身份 = (node, cardID)。
+
+- **平铺** `{cardID: value}` → 单节点 `"none"`（向后兼容）
+- **嵌套** `{nodeName: {cardID: value}}` → 多节点，空间检测在节点内对比
+
 #### CSV 格式（`--kpi-csv`）
 
 由 `kpi_collect.sh` 采集，每分钟一行（~2s 采集频率 → 每分钟约 30 个原始点聚合为一行），列以 JSON dict 编码各卡数值：
 
 ```
+# 平铺（单节点）
 timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 1784547926,"{""0"":1628,""1"":1747}","{""0"":47,""1"":51}",...,"{""cpu1"":""4.26""}"
+
+# 嵌套（多节点，node 名可为 IP/主机名）
+timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
+1784547926,"{""node-ip-1"":{""0"":1628,""1"":1747},""node-ip-2"":{""0"":2629,""1"":2640}}","{""node-ip-1"":{""0"":47,""1"":51},""node-ip-2"":{""0"":50,""1"":52}}",...
 ```
 
 #### JSONL 格式（`--kpi-jsonl-dir`）
@@ -128,6 +138,7 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 ```json
 {"ts":1784547926,"vals":{"0":{"temp":47,"power":1628,"aicore_freq":1800,...},"1":{...}},"cpu_avg":{"cpu1":"4.26"}}
 ```
+嵌套（多节点）时 `vals` 外层是节点名：`{"node-ip-1": {"0": {"temp":47,...}, "1": {...}}, "node-ip-2": {...}}`。
 
 `ReadKPIFiles()` 根据 `--baseline-hours` 计算日期范围，读取对应日期的 JSONL 文件并重建 `TimeSeriesData`，与 CSV 路径共享后续全部检测管线。
 
@@ -135,7 +146,7 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 
 #### Step 1: CSV 解析 → `TimeSeriesData`
 
-`ParseCSV()` 按列名映射解析 CSV，每行输出一个 `CSVRow`（各指标以 `map[cardID]float64` 存储）。自动发现所有 card ID。
+`ParseCSV()` 按列名映射解析 CSV，每行输出一个 `CSVRow`（各指标以 `map[全局卡ID]float64` 存储）。通过 `cardIndexer` 把 `(node, cardID)` 映射为全局整数卡 ID，并记录 `NodeOf`（全局ID→节点名）和 `LocalID`（全局ID→节点内卡ID）；平铺输入全局 ID 等于原始卡 ID。自动发现所有卡。
 
 #### Step 2: 1 分钟聚合
 
@@ -171,9 +182,9 @@ CPU 取桶内最后一个值。
 
 #### Step 5: 空间维度检测（Peer Comparison）
 
-`detectSpaceAnomalies()` 在检测窗口内逐时间点逐指标计算：
+`detectSpaceAnomalies()` 在检测窗口内逐时间点逐指标计算。**对每个时间点，peer 组 = 同一节点内的在场卡**（跨节点不互比）；平铺输入（单节点 "none"）时与之前一致，peer 组 = 全体在场卡。
 
-**对每个时间点，取所有卡在该指标上的值作为 peer 组**，按 `SpaceMethod` 判定：
+**对每个时间点、每个节点**，按 `SpaceMethod` 判定：
 
 | SpaceMethod | 适用指标 | 机制 | 异常判定 |
 |-------------|---------|------|---------|
@@ -201,8 +212,10 @@ CPU 取桶内最后一个值。
 
 | TimeMethod | 适用指标 | 公式 | 零离散度处理 |
 |------------|---------|------|-------------|
-| **`mad`** | temp / power / aicore_freq / aicore_util / hbm_bandwidth_util | `Z = |currentMedian − baseline.Median| / (1.4826 × baseline.Mad)` | `Mad==0` 且 |Δ|>0.01 → 999 |
-| `zscore` | hbm_util / tx_bandwidth / 4× error counters | `Z = |currentMean − baseline.Mean| / baseline.StdDev` | `StdDev==0` 且 |Δ|>0.01 → 999 |
+| **MAD Zscore** | temp / power / aicore_freq / aicore_util / hbm_bandwidth_util | `Z = |currentMedian − baseline.Median| / (1.4826 × baseline.Mad)` | `Mad==0` 且 |Δ|>0.01 → 999 |
+| **Mean/std Zscore** | hbm_util / tx_bandwidth / 4× error counters | `Z = |currentMean − baseline.Mean| / baseline.StdDev` | `StdDev==0` 且 |Δ|>0.01 → 999 |
+
+> 两种 TimeMethod 都是 Z-Score，区别只在基线统计量：**MAD Zscore** 用鲁棒 median/MAD，**Mean/std Zscore** 用经典 mean/std。
 
 **MAD 鲁棒性原理**：Median 和 MAD 崩溃点为 50%。只要基线窗口内正常数据占多数，少数异常时段不会带偏统计量。`1.4826 = 1/0.6745` 使 MAD 标定至 σ 尺度，阈值语义不变。
 
@@ -278,21 +291,61 @@ Time异常    early_degradation  confirmed_anomaly
 | stdout | — | 文本报告内容 |
 | FaultSub | `--faultsub-url` | 异常卡事件回传 |
 
+**JSON 输出结构**（`npu_resource_detection_result.json`）：
+
+```json
+{
+  "summary": { "total_cards": 16, "total_nodes": 2, "...": "不变" },  // total_nodes 新增
+  "results": [
+    {
+      "node": "node-ip-1",              // 新增：节点名，平铺输入为 "none"
+      "card_id": 0,                     // 节点内卡 ID（每节点从 0 起）
+      "quadrant": 2,
+      "anomaly_details": [
+        {
+          "metric": "temp",
+          "space_score": 132.7,
+          "time_score": 0.67,
+          "fusion_score": 53.49,
+          "space_abnormal": true,
+          "time_abnormal": false,
+          "quadrant": 2,
+          "space_method": "cluster",     // 新增
+          "time_method": "mad",          // 新增
+          "current_median": 80,          // MAD 指标；zscore 指标为 current_mean
+          "time_baseline_median": 55,    // 时域基线：MAD 指标；zscore 指标为 time_baseline_mean
+          "time_baseline_mad": 1.4826,   // MAD 指标；zscore 指标为 time_baseline_std
+          "space_baseline_mean": 55,     // 空间参照（cluster）；其他方法为 peer_mean
+          "space_scale": 0.185           // 空间噪声尺度（cluster）；其他方法无此字段
+        }
+      ],
+      "composite_score": 53.3,
+      "severity": "info"
+    }
+  ],
+  "root_causes": [                       // evidence[] 同样带方法感知字段
+    { "node": "node-ip-1", "card_id": 0, "category": "...", "evidence": [ { "...": "同上" } ] }
+  ]
+}
+```
+
+时间值字段按 `time_method` 命名（MAD → current_median/time_baseline_median/time_baseline_mad，zscore → current_mean/time_baseline_mean/time_baseline_std）；空间字段按 `space_method` 命名（cluster → space_baseline_mean + space_scale，其他 → peer_mean）。
+
 ### 1.5 NPU 资源指标
 
 | 指标名 | 分类 | 异常方向 | SpaceMethod | TimeMethod | 说明 |
 |--------|------|---------|-------------|------------|------|
-| `temp` | 计算 | ↑ 偏高 | cluster | **mad** | NPU 温度 (°C)，对称连续 |
-| `power` | 计算 | ↑ 偏高 | cluster | **mad** | NPU 功耗 (W)，对称连续 |
-| `aicore_freq` | 计算 | ↓ 偏低 | direct | **mad** | AI Core 频率 (MHz)，单点/对称 |
-| `aicore_util` | 计算 | ↓ 偏低 | cluster | **mad** | AI Core 利用率 (%)，双峰（80%+ 工作态） |
-| `hbm_bandwidth_util` | 计算 | ↓ 偏低 | cluster | **mad** | HBM 带宽使用率 (%)，双峰 |
-| `hbm_util` | 计算 | ↓ 偏低 | cluster | zscore | HBM 内存使用率 (%)，仅跟踪不参与规则 |
-| `tx_bandwidth` | 通信 | ↓ 偏低 | cluster | zscore | TX 带宽，近似连续 |
-| `rx_pfc_pkt` | 通信 | ↑ 偏高 | absolute | zscore | PFC 暂停帧（累积计数器） |
-| `roce_tx_err_pkt` | 通信 | ↑ 偏高 | absolute | zscore | RoCE 发送错误包（累积计数器） |
-| `roce_out_of_order` | 通信 | ↑ 偏高 | absolute | zscore | RoCE 乱序包（累积计数器） |
-| `roce_new_pkt_rty` | 通信 | ↑ 偏高 | absolute | zscore | RoCE 重传包（累积计数器） |
+| `temp` | 计算 | ↑ 偏高 | cluster | **MAD Zscore** | NPU 温度 (°C)，对称连续 |
+| `power` | 计算 | ↑ 偏高 | cluster | **MAD Zscore** | NPU 功耗 (W)，对称连续 |
+| `aicore_freq` | 计算 | ↓ 偏低 | direct | **MAD Zscore** | AI Core 频率 (MHz)，单点/对称 |
+| `aicore_util` | 计算 | ↓ 偏低 | cluster | **MAD Zscore** | AI Core 利用率 (%)，双峰（80%+ 工作态） |
+| `hbm_bandwidth_util` | 计算 | ↓ 偏低 | cluster | **MAD Zscore** | HBM 带宽使用率 (%)，双峰 |
+| `hbm_util` | 计算 | ↓ 偏低 | cluster | Mean/std Zscore | HBM 内存使用率 (%)，仅跟踪不参与规则 |
+| `tx_bandwidth` | 通信 | ↓ 偏低 | cluster | Mean/std Zscore | TX 带宽，近似连续 |
+| `rx_pfc_pkt` | 通信 | ↑ 偏高 | absolute | Mean/std Zscore | PFC 暂停帧（累积计数器） |
+| `roce_tx_err_pkt` | 通信 | ↑ 偏高 | absolute | Mean/std Zscore | RoCE 发送错误包（累积计数器） |
+| `roce_out_of_order` | 通信 | ↑ 偏高 | absolute | Mean/std Zscore | RoCE 乱序包（累积计数器） |
+| `roce_new_pkt_rty` | 通信 | ↑ 偏高 | absolute | Mean/std Zscore | RoCE 重传包（累积计数器） |
 
 ### 1.6 边界情况
 
@@ -301,6 +354,7 @@ Time异常    early_degradation  confirmed_anomaly
 | 基线数据不足（N<2） | 时间维度 Z=0，不判定异常 |
 | 检测窗口无数据 | `RunDetection` 返回错误 |
 | 空间维度同行点 < 2 卡 | Z=0（无法做 peer comparison） |
+| 某节点在场卡 < 2 | 该节点 Z=0（节点内无法做 peer comparison），其他节点不受影响 |
 | MAD=0（历史值恒定）且当前有偏差 | sentinel 999 → 判定异常 |
 | 裁尾后数据不足 | 降级为中位数 |
 | 计数器回绕 | 自动加 `MaxUint64` 修正 |

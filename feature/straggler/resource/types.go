@@ -8,6 +8,8 @@
 package resource
 
 import (
+	"bytes"
+	"encoding/json"
 	"math"
 	"sort"
 )
@@ -37,13 +39,22 @@ type CSVRow struct {
 // TimeSeriesData holds the complete parsed time series split into windows.
 type TimeSeriesData struct {
 	Rows    []CSVRow // aggregated rows (1 per minute after aggregation)
-	CardIDs []int    // all card IDs found in the data
+	CardIDs []int    // all global card IDs found in the data
 	RawRows []CSVRow // raw rows before aggregation (for counter calculations)
+	// NodeOf maps each global card ID to its node name; LocalID maps it back to
+	// the per-node card ID (0-based within the node). Flat (single-node) input
+	// assigns every card node "none" and LocalID == global ID.
+	NodeOf map[int]string
+	LocalID map[int]int
 }
 
 // =============================================================================
 // Metric Enumeration
 // =============================================================================
+
+// noneNode is the node name assigned to flat (single-node) inputs, where the
+// metric JSON is {cardID: value} without a node layer.
+const noneNode = "none"
 
 // MetricName enumerates all NPU resource metrics.
 type MetricName string
@@ -220,6 +231,11 @@ func (q Quadrant) String() string {
 }
 
 // MetricAnomalyDetail records the dual-dimension anomaly scores for one metric on one card.
+//
+// The JSON output is method-aware (see MarshalJSON): the time value fields are
+// named current_median/baseline_median/baseline_mad for MAD metrics vs
+// current_mean/baseline_mean/baseline_std for mean/std; the space reference is
+// cluster_mean for the cluster method vs peer_mean otherwise.
 type MetricAnomalyDetail struct {
 	Metric        MetricName `json:"metric"`
 	SpaceScore    float64    `json:"space_score"`
@@ -228,15 +244,96 @@ type MetricAnomalyDetail struct {
 	SpaceAbnormal bool       `json:"space_abnormal"`
 	TimeAbnormal  bool       `json:"time_abnormal"`
 	Quadrant      Quadrant   `json:"quadrant"`
-	CurrentMean   float64    `json:"current_mean"`
-	BaselineMean  float64    `json:"baseline_mean,omitempty"`
-	BaselineStd   float64    `json:"baseline_std,omitempty"`
-	PeerMean      float64    `json:"peer_mean,omitempty"`
+	CurrentMean   float64    `json:"-"` // median (MAD) or mean (zscore)
+	BaselineMean  float64    `json:"-"`
+	BaselineStd   float64    `json:"-"` // 1.4826×MAD (MAD) or std (zscore)
+	PeerMean      float64    `json:"-"` // peer arithmetic mean (non-cluster)
+
+	// unexported: method labels + space reference/scale used by MarshalJSON.
+	SpaceMethod DetectionMethod `json:"-"`
+	TimeMethod  DetectionMethod `json:"-"`
+	SpaceRef    float64         `json:"-"` // space baseline mean (cluster) or 0
+	SpaceScale  float64         `json:"-"` // space noise scale (cluster), 1.4826×Mad median
+}
+
+// MarshalJSON emits method-aware field names in a stable, declaration-ordered
+// sequence. SpaceMethod/TimeMethod/SpaceRef are populated in mergeDetails
+// (fusion.go), after which encoding/json uses this method everywhere the
+// detail is serialized (anomaly_details, secondary_comm_anomalies,
+// root_causes[].evidence). marshalOrderedJSON keeps the key order (Go's
+// json.Marshal sorts map keys alphabetically, which we do not want).
+func (d MetricAnomalyDetail) MarshalJSON() ([]byte, error) {
+	pairs := [][2]interface{}{
+		{"metric", d.Metric},
+		{"space_score", d.SpaceScore},
+		{"time_score", d.TimeScore},
+		{"fusion_score", d.FusionScore},
+		{"space_abnormal", d.SpaceAbnormal},
+		{"time_abnormal", d.TimeAbnormal},
+		{"quadrant", d.Quadrant},
+		{"space_method", d.SpaceMethod},
+		{"time_method", d.TimeMethod},
+	}
+	// Time value fields: robust median/MAD vs classic mean/std. Baseline
+	// fields carry the time_ prefix to mirror the space_* fields.
+	if d.TimeMethod == MethodMAD {
+		pairs = append(pairs,
+			[2]interface{}{"current_median", d.CurrentMean},
+			[2]interface{}{"time_baseline_median", d.BaselineMean},
+			[2]interface{}{"time_baseline_mad", d.BaselineStd},
+		)
+	} else {
+		pairs = append(pairs,
+			[2]interface{}{"current_mean", d.CurrentMean},
+			[2]interface{}{"time_baseline_mean", d.BaselineMean},
+			[2]interface{}{"time_baseline_std", d.BaselineStd},
+		)
+	}
+	// Space reference + scale: cluster method exposes its baseline mean and
+	// noise scale; other methods expose the peer arithmetic mean.
+	if d.SpaceMethod == MethodCluster {
+		pairs = append(pairs,
+			[2]interface{}{"space_baseline_mean", d.SpaceRef},
+			[2]interface{}{"space_scale", d.SpaceScale},
+		)
+	} else {
+		pairs = append(pairs, [2]interface{}{"peer_mean", d.PeerMean})
+	}
+	return marshalOrderedJSON(pairs)
+}
+
+// marshalOrderedJSON marshals key-value pairs as a JSON object preserving the
+// given order (encoding/json sorts map keys alphabetically, which is not the
+// desired output shape).
+func marshalOrderedJSON(pairs [][2]interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, kv := range pairs {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		kb, err := json.Marshal(kv[0])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(kb)
+		buf.WriteByte(':')
+		vb, err := json.Marshal(kv[1])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(vb)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
 }
 
 // CardDetectionSummary is the per-card detection result.
+// CardID is the per-node card ID (0-based within the node) at output time;
+// Node disambiguates cards across nodes. Set in applyNodeIdentity (report.go).
 type CardDetectionSummary struct {
 	CardID                 int                   `json:"card_id"`
+	Node                   string                `json:"node"`
 	AnomalyCategory        AnomalyCategory       `json:"anomaly_category"`
 	Quadrant               Quadrant              `json:"quadrant"`
 	AnomalyDetails         []MetricAnomalyDetail `json:"anomaly_details,omitempty"`
@@ -280,6 +377,7 @@ const (
 // RootCauseResult is the diagnosed root cause for one anomalous card.
 type RootCauseResult struct {
 	CardID     int                   `json:"card_id"`
+	Node       string                `json:"node"`
 	Category   RootCauseCategory     `json:"category"`
 	Confidence Confidence            `json:"confidence"`
 	Evidence   []MetricAnomalyDetail `json:"evidence"`
@@ -403,6 +501,7 @@ type DetectionResult struct {
 // DetectionSummary is the overview section of the output.
 type DetectionSummary struct {
 	TotalCards         int    `json:"total_cards"`
+	TotalNodes         int    `json:"total_nodes"`
 	ConfirmedAnomalies int    `json:"confirmed_anomalies"`
 	EarlyDegradation   int    `json:"early_degradation"`
 	IndividualVariance int    `json:"individual_variance"`
@@ -411,12 +510,18 @@ type DetectionSummary struct {
 	TotalTimePoints    int    `json:"total_time_points"`
 	BaselineWindow     string `json:"baseline_window"`
 	DetectionWindow    string `json:"detection_window"`
-	DetectionMethod    string `json:"detection_method"`
 }
 
 // SpaceDetectionResult holds per-time-point space anomaly scores.
 type SpaceDetectionResult struct {
-	Scores map[int]map[MetricName][]float64
+	Scores     map[int]map[MetricName][]float64
+	// ClusterRef holds, for the cluster method, the per-time-point baseline
+	// (majority) cluster mean for each card's node (non-cluster → 0). Aligned
+	// with Scores; aggregated to the reported space_baseline_mean.
+	ClusterRef map[int]map[MetricName][]float64
+	// ScaleRef holds, for the cluster method, the node's noise scale
+	// (1.4826 × median of baseline.Mad) — the reported space_scale.
+	ScaleRef map[int]map[MetricName]float64
 }
 
 // TimeDetectionResult holds per-card time anomaly scores.

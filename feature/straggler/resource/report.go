@@ -76,15 +76,15 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 	baselines := BuildBaselines(baselineRows, rawData.CardIDs)
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Built baselines for %d cards\n", len(baselines))
 
-	// 5. Space detection.
+	// 5. Space detection (peer comparison within each node).
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 5/9: Space (peer) detection...\n")
-	spaceResult := detectSpaceAnomalies(detectionRows, baselines, rawData.CardIDs, cfg)
+	spaceResult := detectSpaceAnomalies(detectionRows, baselines, rawData.CardIDs, cfg, rawData.NodeOf)
 	spaceDetails := aggregateSpaceScores(spaceResult, rawData.CardIDs, cfg)
 
 	// 6. Time detection.
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 6/9: Time (self) detection...\n")
 	timeResult := detectTimeAnomalies(detectionRows, baselines, rawData.CardIDs, cfg)
-	timeDetails := aggregateTimeScores(timeResult, detectionRows, baselines, rawData.CardIDs, cfg)
+	timeDetails := aggregateTimeScores(timeResult, detectionRows, baselines, rawData.CardIDs, cfg, rawData.NodeOf)
 
 	// 7. Fuse + compute-first ordering.
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 7/9: 2D cross-validation (compute-first)...\n")
@@ -98,6 +98,11 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 	// 9. Cross-card correlation.
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 9/9: Cross-card correlation...\n")
 	correlations := CrossCardCorrelation(rootCauses, summaries)
+
+	// 9.5 Node identity at the output boundary: convert global card IDs to
+	// per-node IDs and attach the node name. Runs after root cause/correlation
+	// so those stages keep using global IDs.
+	summaries, rootCauses = applyNodeIdentity(summaries, rootCauses, rawData.NodeOf, rawData.LocalID)
 
 	// Build result.
 	confirmed := 0
@@ -117,9 +122,19 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 		}
 	}
 
+	// Distinct node count (flat/single-node input → 1).
+	nodeSet := make(map[string]bool)
+	for _, n := range rawData.NodeOf {
+		nodeSet[n] = true
+	}
+	if len(nodeSet) == 0 {
+		nodeSet[noneNode] = true
+	}
+
 	result := &DetectionResult{
 		Summary: DetectionSummary{
 			TotalCards:         len(rawData.CardIDs),
+			TotalNodes:         len(nodeSet),
 			ConfirmedAnomalies: confirmed,
 			EarlyDegradation:   earlyDeg,
 			IndividualVariance: indiv,
@@ -128,7 +143,6 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 			TotalTimePoints:    len(aggregated),
 			BaselineWindow:     fmt.Sprintf("%.0fh", cfg.BaselineHours),
 			DetectionWindow:    fmt.Sprintf("%.0fh", cfg.DetectionHours),
-			DetectionMethod:    string(cfg.SpaceMethod),
 		},
 		Results:      summaries,
 		RootCauses:   rootCauses,
@@ -139,6 +153,34 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 		confirmed, earlyDeg, indiv, normal)
 
 	return result, nil
+}
+
+// applyNodeIdentity converts global card IDs to per-node IDs and attaches the
+// node name at the output boundary. It is a pure bijection (LocalID), so scores,
+// quadrants and ordering are untouched — only the reported identity changes.
+func applyNodeIdentity(
+	summaries []CardDetectionSummary,
+	rootCauses []RootCauseResult,
+	nodeOf map[int]string,
+	localID map[int]int,
+) ([]CardDetectionSummary, []RootCauseResult) {
+	for i := range summaries {
+		g := summaries[i].CardID
+		summaries[i].Node = nodeOf[g]
+		if summaries[i].Node == "" {
+			summaries[i].Node = noneNode
+		}
+		summaries[i].CardID = localID[g]
+	}
+	for i := range rootCauses {
+		g := rootCauses[i].CardID
+		rootCauses[i].Node = nodeOf[g]
+		if rootCauses[i].Node == "" {
+			rootCauses[i].Node = noneNode
+		}
+		rootCauses[i].CardID = localID[g]
+	}
+	return summaries, rootCauses
 }
 
 // =============================================================================
@@ -176,7 +218,6 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 	fmt.Fprintf(&b, "  数据点:     %d (分钟级)\n", result.Summary.TotalTimePoints)
 	fmt.Fprintf(&b, "  基线窗口:   %s\n", result.Summary.BaselineWindow)
 	fmt.Fprintf(&b, "  检测窗口:   %s\n", result.Summary.DetectionWindow)
-	fmt.Fprintf(&b, "  检测方法:   %s\n", result.Summary.DetectionMethod)
 	fmt.Fprintf(&b, "  总卡数:     %d\n", result.Summary.TotalCards)
 	fmt.Fprintf(&b, "  ✓ 正常:     %d\n", result.Summary.Normal)
 	fmt.Fprintf(&b, "  ✗ 确认异常: %d\n", result.Summary.ConfirmedAnomalies)
@@ -191,13 +232,14 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 		b.WriteString("================================================================================\n\n")
 
 		for _, rc := range result.RootCauses {
-			fmt.Fprintf(&b, "  Card %d | %s | 置信度: %s\n", rc.CardID, rc.Category, rc.Confidence)
+			fmt.Fprintf(&b, "  Node %s Card %d | %s | 置信度: %s\n", rc.Node, rc.CardID, rc.Category, rc.Confidence)
 			fmt.Fprintf(&b, "  建议: %s\n", rc.Suggestion)
 			if len(rc.Evidence) > 0 {
 				b.WriteString("  异常指标:\n")
 				for _, e := range rc.Evidence {
-					fmt.Fprintf(&b, "    %-20s space=%.1f time=%.1f quadrant=%s current=%.1f baseline=%.1f\n",
-						e.Metric, e.SpaceScore, e.TimeScore, e.Quadrant, e.CurrentMean, e.BaselineMean)
+					fmt.Fprintf(&b, "    %-20s space=%.1f time=%.1f quadrant=%s %s=%.1f %s=%.1f\n",
+						e.Metric, e.SpaceScore, e.TimeScore, e.Quadrant,
+						currentLabel(e.TimeMethod), e.CurrentMean, baselineLabel(e.TimeMethod), e.BaselineMean)
 				}
 			}
 			b.WriteString("\n")
@@ -211,11 +253,13 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 		b.WriteString("  早期劣化（关注列表）\n")
 		b.WriteString("================================================================================\n\n")
 		for _, s := range earlyCards {
-			fmt.Fprintf(&b, "  Card %d | score=%.2f\n", s.CardID, s.CompositeScore)
+			fmt.Fprintf(&b, "  Node %s Card %d | score=%.2f\n", s.Node, s.CardID, s.CompositeScore)
 			for _, d := range s.AnomalyDetails {
 				if d.TimeAbnormal {
-					fmt.Fprintf(&b, "    %-20s time_z=%.1f current=%.1f baseline=%.1f±%.1f\n",
-						d.Metric, d.TimeScore, d.CurrentMean, d.BaselineMean, d.BaselineStd)
+					fmt.Fprintf(&b, "    %-20s time_z=%.1f %s=%.1f %s=%.1f±%.1f\n",
+						d.Metric, d.TimeScore,
+						currentLabel(d.TimeMethod), d.CurrentMean,
+						baselineLabel(d.TimeMethod), d.BaselineMean, d.BaselineStd)
 				}
 			}
 			if len(s.TrendFindings) > 0 {
@@ -260,6 +304,22 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+// currentLabel / baselineLabel return the method-aware field label for the
+// text report (median/MAD metrics vs mean/std metrics).
+func currentLabel(m DetectionMethod) string {
+	if m == MethodMAD {
+		return "current_median"
+	}
+	return "current_mean"
+}
+
+func baselineLabel(m DetectionMethod) string {
+	if m == MethodMAD {
+		return "time_baseline_median"
+	}
+	return "time_baseline_mean"
+}
 
 func filterByQuadrant(summaries []CardDetectionSummary, q Quadrant) []CardDetectionSummary {
 	var result []CardDetectionSummary

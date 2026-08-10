@@ -50,10 +50,19 @@
 
 ### 2.1 CSV 结构
 
+指标 JSON 支持**平铺**（单节点）和**嵌套**（多节点）两种形态，card ID 在每个节点内从 0 开始编号：
+
 ```
-timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL,NPU_CARD_HBM_BANDWIDTH_UTIL,NPU_CARD_HBM_UTIL,NPU_TX_BANDWIDTH,NPU_RX_PFC_PKT,NPU_ROCE_TX_ERR_PKT,NPU_ROCE_OUT_OF_ORDER,NPU_ROCE_NEW_PKT_RTY,NPU_NIC_RX_ALL_PKG,CPU_average
+# 平铺（单节点 "none"，向后兼容）
+timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 1784547926,"{""0"":1628,...,""7"":1688}","{""0"":47,...,""7"":50}",...,"{""cpu1"":""4.26"",...}"
+
+# 嵌套（多节点，node 名可为 IP/主机名）
+timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
+1784547926,"{""node-ip-1"":{""0"":1628,...,""7"":1688},""node-ip-2"":{""0"":2629,...}}","{""node-ip-1"":{""0"":47,...},""node-ip-2"":{""0"":50,...}}",...
 ```
+
+内部把 `(node, cardID)` 映射为全局整数卡 ID（`cardIndexer`），并记录 `NodeOf`（全局ID→节点名）与 `LocalID`（全局ID→节点内卡ID）；平铺输入全局 ID = 原始卡 ID。**空间检测的 peer 组是同一节点内的卡**，跨节点不互比。
 
 | 列 | 含义 | 单位 | 类型 |
 |---|------|------|------|
@@ -257,25 +266,25 @@ if 增量 > 0: 聚合值 = 增量
 
 ### 5.1 空间维度检测（Peer Comparison）
 
-对检测窗口内的每个时间点，逐指标执行。**主方法为多数簇聚类（MethodCluster）**：空间维度问"谁偏离同伴"，同伴的标准是多数卡的行为（"谁多谁有理"）。
+对检测窗口内的每个时间点，逐指标执行。**peer 组 = 同一节点内的在场卡**（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为多数簇聚类（MethodCluster）**：空间维度问"谁偏离同伴"，同伴的标准是多数卡的行为（"谁多谁有理"）。
 
 **方法 A：多数簇聚类（MethodCluster，默认）**
 
 ```
-对时间点 t，指标 m，所有在场卡的值 V：
+对时间点 t，指标 m，节点 N 内的在场卡值 V：
 1. 递归二分：在最大相邻间隙处切分，两侧都继续，
    直到子块无显著间隙（maxGap ≥ 跨度/2）→ 完整簇划分
 2. 基线簇 = 成员最多的簇；成员数并列 → 方向极值簇
    （DirHigh→均值最低，DirLow→均值最高）；基线均值 = 多数簇均值
 3. 基线簇成员豁免；对每个非基线簇成员单侧判定（只查异常方向）：
-   z = |该卡值 − 基线均值| / scale[m]
-   scale[m] = 各卡历史噪声 1.4826×baseline.Mad 的中位数（自我标定）
+   z = |该卡值 − 基线均值| / scale[m, N]
+   scale[m, N] = 节点 N 各卡历史噪声 1.4826×baseline.Mad 的中位数（自我标定）
    if z > k（SpaceClusterK，默认 3.0）→ 该卡标记
 4. 记录每卡每时间点的 z（被标记卡的 z，其余 0）
 聚合：对每卡求 mean_z（= 持续占比 × 平均幅度），mean_z > k 判空间异常
 ```
 
-适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH
+适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH（在各节点内独立检测）
 
 **设计要点**：
 - **基线 = 多数簇**：单卡降频时多数卡兜底，2~7/8 多卡异常也能检出，无 mean/std 稀释

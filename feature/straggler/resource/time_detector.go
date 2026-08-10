@@ -95,17 +95,41 @@ func detectTimeAnomalies(
 
 // aggregateTimeScores converts raw time Z-Scores into MetricAnomalyDetail,
 // merging with the space details computed earlier.
+// nodeOf is optional: when provided, the reported peer mean is scoped to the
+// card's own node (cards in other nodes are not counted as peers).
 func aggregateTimeScores(
 	time *TimeDetectionResult,
 	detectionRows []CSVRow,
 	baselines map[int]map[MetricName]*CardBaseline,
 	cardIDs []int,
 	cfg DetectionConfig,
+	nodeOf ...map[int]string,
 ) map[int]map[MetricName]*MetricAnomalyDetail {
 	result := make(map[int]map[MetricName]*MetricAnomalyDetail)
 
+	// nodeName resolves a card's node, defaulting to "none" (flat input).
+	nodeName := func(g int) string {
+		if len(nodeOf) > 0 {
+			if n := nodeOf[0][g]; n != "" {
+				return n
+			}
+		}
+		return noneNode
+	}
+
 	for _, cid := range cardIDs {
 		result[cid] = make(map[MetricName]*MetricAnomalyDetail)
+		// Peers = other cards in cid's node (or all cards when nodeOf absent).
+		var peerIDs []int
+		for _, ocid := range cardIDs {
+			if ocid == cid {
+				continue
+			}
+			if nodeName(ocid) == nodeName(cid) {
+				peerIDs = append(peerIDs, ocid)
+			}
+		}
+
 		for _, metric := range AllMetrics {
 			baseline := baselines[cid][metric]
 			timeZ := time.Scores[cid][metric]
@@ -141,17 +165,14 @@ func aggregateTimeScores(
 				currentMean = Median(curVals)
 			}
 
-			// Peer mean across detection window.
+			// Peer mean across detection window (same node only).
 			var peerVals []float64
 			for _, row := range detectionRows {
 				dict := getMetricDict(row, metric)
 				if dict == nil {
 					continue
 				}
-				for _, ocid := range cardIDs {
-					if ocid == cid {
-						continue
-					}
+				for _, ocid := range peerIDs {
 					if v, ok := dict[ocid]; ok {
 						peerVals = append(peerVals, v)
 					}

@@ -13,122 +13,145 @@ import (
 // across all metrics over the detection window.
 //
 // Returns: cardID → metric → []score (one per detection-window time point).
+// nodeOf is optional; when provided, peer comparison happens WITHIN each node
+// (cards in different nodes are never compared). Omitted → single "none" node.
 func detectSpaceAnomalies(
 	detectionRows []CSVRow,
 	baselines map[int]map[MetricName]*CardBaseline,
 	cardIDs []int,
 	cfg DetectionConfig,
+	nodeOf ...map[int]string,
 ) *SpaceDetectionResult {
 	result := &SpaceDetectionResult{
-		Scores: make(map[int]map[MetricName][]float64),
+		Scores:     make(map[int]map[MetricName][]float64),
+		ClusterRef: make(map[int]map[MetricName][]float64),
+		ScaleRef:   make(map[int]map[MetricName]float64),
 	}
 
-	// Per-metric robust noise scale, self-calibrated from the historical
-	// baselines (median across cards of 1.4826 × MAD). Used by the cluster
-	// method to judge cluster significance in each metric's own noise units.
-	scale := make(map[MetricName]float64, len(AllMetrics))
-	for _, metric := range AllMetrics {
-		scale[metric] = spaceMetricScale(metric, baselines, cardIDs)
+	// Group cards by node. nodes is a partition of cardIDs, so every card is
+	// processed exactly once per (row, metric).
+	var nodes map[string][]int
+	if len(nodeOf) > 0 {
+		nodes = buildNodeGroups(cardIDs, nodeOf[0])
+	} else {
+		nodes = map[string][]int{noneNode: append([]int(nil), cardIDs...)}
 	}
+	nodeList := sortedNodeKeys(nodes)
 
-	// Init.
-	for _, cid := range cardIDs {
-		result.Scores[cid] = make(map[MetricName][]float64)
+	// Per-node, per-metric robust noise scale, self-calibrated from the
+	// historical baselines (median across the node's cards of 1.4826 × MAD).
+	scale := make(map[string]map[MetricName]float64, len(nodeList))
+	for _, node := range nodeList {
+		scale[node] = make(map[MetricName]float64, len(AllMetrics))
 		for _, metric := range AllMetrics {
-			result.Scores[cid][metric] = make([]float64, 0, len(detectionRows))
+			scale[node][metric] = spaceMetricScale(metric, baselines, nodes[node])
 		}
 	}
 
-	// For each time point, for each metric, compute Z-Scores.
+	// Init per-card score + cluster-ref + scale slices.
+	for _, cid := range cardIDs {
+		result.Scores[cid] = make(map[MetricName][]float64)
+		result.ClusterRef[cid] = make(map[MetricName][]float64)
+		result.ScaleRef[cid] = make(map[MetricName]float64)
+		for _, metric := range AllMetrics {
+			result.Scores[cid][metric] = make([]float64, 0, len(detectionRows))
+			result.ClusterRef[cid][metric] = make([]float64, 0, len(detectionRows))
+		}
+	}
+
+	// appendScore records one time-point score and (for cluster) the node's
+	// baseline-cluster mean reference into the aligned arrays.
+	appendScore := func(cid int, metric MetricName, z, ref float64) {
+		result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
+		result.ClusterRef[cid][metric] = append(result.ClusterRef[cid][metric], ref)
+	}
+
+	// For each time point, for each metric, for each node: peer comparison
+	// happens WITHIN the node only.
 	for _, row := range detectionRows {
 		for _, metric := range AllMetrics {
 			meta := MetricMetaRegistry[metric]
-			vals := getMetricValues(row, metric, cardIDs)
+			dict := getMetricDict(row, metric)
 
-			// Filter to valid cards present at this time point.
-			present := make([]int, 0, len(cardIDs))
-			presentVals := make([]float64, 0, len(cardIDs))
-			for i, cid := range cardIDs {
-				dict := getMetricDict(row, metric)
-				if dict == nil {
+			for _, node := range nodeList {
+				nodeCardIDs := nodes[node]
+				vals := getMetricValues(row, metric, nodeCardIDs)
+				present, presentVals := filterPresent(dict, nodeCardIDs, vals)
+
+				if len(presentVals) < 2 {
+					// Need at least 2 cards present IN THIS NODE for peer comparison.
+					for _, cid := range nodeCardIDs {
+						appendScore(cid, metric, 0, 0)
+					}
 					continue
 				}
-				if _, ok := dict[cid]; ok {
-					present = append(present, i)
-					presentVals = append(presentVals, vals[i])
-				}
-			}
 
-			if len(presentVals) < 2 {
-				// Need at least 2 cards for peer comparison.
-				for _, cid := range cardIDs {
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
-				}
-				continue
-			}
-
-			// Compute Z-Scores based on method.
-			switch meta.SpaceMethod {
-			case MethodAbsolute:
-				// Absolute threshold: > threshold → anomaly.
-				for i, cid := range cardIDs {
-					z := 0.0
-					if vals[i] > meta.AbsThreshold {
-						z = 999 // sentinel for "absolute anomaly"
+				switch meta.SpaceMethod {
+				case MethodAbsolute:
+					// Absolute threshold: > threshold → anomaly.
+					for _, cid := range nodeCardIDs {
+						z := 0.0
+						if v, ok := dict[cid]; ok && v > meta.AbsThreshold {
+							z = 999 // sentinel for "absolute anomaly"
+						}
+						appendScore(cid, metric, z, 0)
 					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
-				}
 
-			case MethodDirect:
-				// Direct comparison (for freq): below min of others → anomaly.
-				allVals := presentVals
-				sort.Float64s(allVals)
-				minVal := allVals[0]
-				for i, cid := range cardIDs {
-					z := 0.0
-					if vals[i] < minVal || (vals[i] < minVal+cfg.FreqDownclockGap) {
-						// If significantly below the minimum peer value.
-						if vals[i] < minVal {
+				case MethodDirect:
+					// Direct comparison (for freq): a card is downclocked when it
+					// runs at least FreqDownclockGap below its peers' minimum.
+					// The peer minimum EXCLUDES the card itself — a single
+					// downclocked card (the global min) is compared against the
+					// second-smallest value. Cards absent at this time point are
+					// never flagged.
+					sorted := make([]float64, len(presentVals))
+					copy(sorted, presentVals)
+					sort.Float64s(sorted)
+					globalMin := sorted[0]
+					secondMin := sorted[1] // len(presentVals) >= 2 enforced above
+					for _, cid := range nodeCardIDs {
+						v, ok := dict[cid]
+						if !ok {
+							appendScore(cid, metric, 0, 0)
+							continue
+						}
+						peerMin := globalMin
+						if v <= globalMin {
+							// Card is (tied for) the minimum → its lowest peer
+							// is the second-smallest present value. A tie with
+							// another card at the same low value is not a unique
+							// downclock (secondMin equals globalMin then).
+							peerMin = secondMin
+						}
+						z := 0.0
+						if v < peerMin-cfg.FreqDownclockGap {
 							z = 999
 						}
+						appendScore(cid, metric, z, 0)
 					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
-				}
 
-			case MethodIQR:
-				sorted := make([]float64, len(presentVals))
-				copy(sorted, presentVals)
-				sort.Float64s(sorted)
-				q1 := Percentile(sorted, 0.25)
-				q3 := Percentile(sorted, 0.75)
-				iqr := q3 - q1
-				lower := q1 - cfg.SpaceIQRMult*iqr
-				upper := q3 + cfg.SpaceIQRMult*iqr
-
-				for i, cid := range cardIDs {
-					z := 0.0
-					if vals[i] < lower || vals[i] > upper {
-						z = 999
+				case MethodIQR:
+					sorted := make([]float64, len(presentVals))
+					copy(sorted, presentVals)
+					sort.Float64s(sorted)
+					q1 := Percentile(sorted, 0.25)
+					q3 := Percentile(sorted, 0.75)
+					iqr := q3 - q1
+					lower := q1 - cfg.SpaceIQRMult*iqr
+					upper := q3 + cfg.SpaceIQRMult*iqr
+					for _, cid := range nodeCardIDs {
+						z := 0.0
+						if v, ok := dict[cid]; ok && (v < lower || v > upper) {
+							z = 999
+						}
+						appendScore(cid, metric, z, 0)
 					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
-				}
 
-			case MethodCluster:
-				// Majority-mode clustering (space): "whoever has the majority
-				// is the peer norm". Recursively split at the largest gap into
-				// a full partition to locate the majority (baseline) cluster,
-				// then judge each NON-baseline card by its own deviation from
-				// the baseline mean (per-point, one-sided by direction), in
-				// units of the metric's historical noise.
-				//
-				// Baseline (majority) members are exempt — they ARE the normal
-				// reference. This preserves the "spread fleet = normal" guard:
-				// a fleet with no dominant gap is one cluster → everyone is in
-				// the baseline → nobody is scored, so the edges of a normal
-				// spread are never flagged even when each card is individually
-				// stable (which would otherwise collapse the noise scale).
-				zAtT := make(map[int]float64, len(cardIDs)) // cardID → z (0 if not flagged)
-				if len(presentVals) >= 2 {
+				case MethodCluster:
+					// Majority-mode clustering within THIS node: full partition,
+					// majority (baseline) cluster mean as the reference, baseline
+					// members exempt, per-point one-sided z in the node's noise.
+					zAtT := make(map[int]float64, len(nodeCardIDs))
 					sortedIdx := make([]int, len(present))
 					for k := range present {
 						sortedIdx[k] = k // index into present/presentVals
@@ -154,30 +177,68 @@ func detectSpaceAnomalies(
 							(meta.Direction == DirLow && pv >= baseMean) {
 							continue
 						}
-						z := math.Abs(pv-baseMean) / scale[metric]
+						z := math.Abs(pv-baseMean) / scale[node][metric]
 						if z > cfg.SpaceClusterK {
-							zAtT[cardIDs[present[pi]]] = z
+							zAtT[nodeCardIDs[present[pi]]] = z
 						}
 					}
-				}
-				for _, cid := range cardIDs {
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], zAtT[cid])
-				}
-
-			default: // MethodZScore
-				mean, std := MeanStd(presentVals)
-				for i, cid := range cardIDs {
-					z := 0.0
-					if std > 0 {
-						z = math.Abs(vals[i]-mean) / std
+					for _, cid := range nodeCardIDs {
+						appendScore(cid, metric, zAtT[cid], baseMean)
+						result.ScaleRef[cid][metric] = scale[node][metric]
 					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
+
+				default: // MethodZScore
+					mean, std := MeanStd(presentVals)
+					for _, cid := range nodeCardIDs {
+						z := 0.0
+						if v, ok := dict[cid]; ok && std > 0 {
+							z = math.Abs(v-mean) / std
+						}
+						appendScore(cid, metric, z, 0)
+					}
 				}
 			}
 		}
 	}
 
 	return result
+}
+
+// buildNodeGroups partitions cardIDs by node name (defaulting missing cards to
+// "none"). Each card appears in exactly one group.
+func buildNodeGroups(cardIDs []int, nodeOf map[int]string) map[string][]int {
+	nodes := make(map[string][]int)
+	for _, cid := range cardIDs {
+		n := nodeOf[cid]
+		if n == "" {
+			n = noneNode
+		}
+		nodes[n] = append(nodes[n], cid)
+	}
+	return nodes
+}
+
+// sortedNodeKeys returns the node names sorted for deterministic iteration.
+func sortedNodeKeys(nodes map[string][]int) []string {
+	keys := make([]string, 0, len(nodes))
+	for k := range nodes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// filterPresent returns the indices (into nodeCardIDs) of cards present in
+// dict, along with their values. Absent cards are excluded so they are never
+// scored (their getMetricValues slot is 0).
+func filterPresent(dict map[int]float64, nodeCardIDs []int, vals []float64) (present []int, presentVals []float64) {
+	for i, cid := range nodeCardIDs {
+		if _, ok := dict[cid]; ok {
+			present = append(present, i)
+			presentVals = append(presentVals, vals[i])
+		}
+	}
+	return present, presentVals
 }
 
 // =============================================================================
@@ -325,6 +386,8 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 
 			var spaceScore float64
 			var spaceAbnormal bool
+			var spaceRef float64
+			var spaceScale float64
 			switch {
 			case isSentinel:
 				// For absolute/direct: abnormal if >50% of points flagged.
@@ -335,6 +398,17 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 				// energy = persistence × magnitude) exceeds the significance k.
 				spaceScore = sum / float64(len(zscores))
 				spaceAbnormal = spaceScore > cfg.SpaceClusterK
+				// SpaceRef = window mean of the per-time-point baseline-cluster
+				// mean (the peer-majority reference the card was compared to).
+				refs := space.ClusterRef[cid][metric]
+				var refSum float64
+				for _, r := range refs {
+					refSum += r
+				}
+				if len(refs) > 0 {
+					spaceRef = refSum / float64(len(refs))
+				}
+				spaceScale = space.ScaleRef[cid][metric]
 			default:
 				spaceScore = sum / float64(len(zscores))
 				spaceAbnormal = spaceScore > cfg.SpaceZThreshold
@@ -344,6 +418,8 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 				Metric:        metric,
 				SpaceScore:    spaceScore,
 				SpaceAbnormal: spaceAbnormal,
+				SpaceRef:      spaceRef,
+				SpaceScale:    spaceScale,
 			}
 		}
 	}

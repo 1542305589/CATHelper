@@ -11,6 +11,76 @@ import (
 )
 
 // =============================================================================
+// Card Indexer (node-aware global IDs)
+// =============================================================================
+
+// cardIndexer assigns global integer card IDs to (node, cardID) pairs so that
+// per-node card IDs (0-based within each node) can coexist in the shared
+// map[int]float64 metric dicts without colliding. Flat (single-node) input
+// keeps the raw card IDs as the global IDs for backward compatibility.
+type cardIndexer struct {
+	nodeCard map[string]map[int]int // node → local card ID → global ID
+	nodeOf   map[int]string         // global → node
+	localOf  map[int]int            // global → local (per-node) card ID
+	nextID   int
+}
+
+func newCardIndexer() *cardIndexer {
+	return &cardIndexer{
+		nodeCard: map[string]map[int]int{},
+		nodeOf:   map[int]string{},
+		localOf:  map[int]int{},
+	}
+}
+
+// globalID returns the global ID for (node, cardID), assigning a fresh one on
+// first sight. Named nodes get sequential globals (0,1,2,...); the "none" node
+// keeps the raw card ID so flat input behaves exactly as before.
+func (ci *cardIndexer) globalID(node string, cardID int) int {
+	if m, ok := ci.nodeCard[node]; ok {
+		if g, ok := m[cardID]; ok {
+			return g
+		}
+	} else {
+		ci.nodeCard[node] = map[int]int{}
+	}
+	var g int
+	if node == noneNode {
+		g = cardID // flat: preserve raw IDs
+		for ci.occupied(g) {
+			g++
+		}
+	} else {
+		g = ci.nextID
+		for ci.occupied(g) {
+			g++
+		}
+		ci.nextID = g + 1
+	}
+	ci.nodeCard[node][cardID] = g
+	ci.nodeOf[g] = node
+	ci.localOf[g] = cardID
+	return g
+}
+
+func (ci *cardIndexer) occupied(g int) bool {
+	_, ok := ci.nodeOf[g]
+	return ok
+}
+
+func (ci *cardIndexer) sortedGlobalIDs() []int {
+	ids := make([]int, 0, len(ci.nodeOf))
+	for g := range ci.nodeOf {
+		ids = append(ids, g)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+func (ci *cardIndexer) nodeMap() map[int]string { return ci.nodeOf }
+func (ci *cardIndexer) localMap() map[int]int   { return ci.localOf }
+
+// =============================================================================
 // CSV Parsing
 // =============================================================================
 
@@ -19,6 +89,9 @@ import (
 // The CSV format is:
 //   timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 //   1784547926,"{""0"":1628,...}","{""0"":47,...}",...,"{""cpu1"":""4.26"",...}"
+//
+// Metric cells may be flat {cardID: value} (single node "none") or nested
+// {nodeName: {cardID: value}} (multi-node).
 func ParseCSV(filePath string) (*TimeSeriesData, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -45,26 +118,19 @@ func ParseCSV(filePath string) (*TimeSeriesData, error) {
 		return nil, fmt.Errorf("CSV %s: %w", filePath, err)
 	}
 
-	// Parse data rows.
+	// Parse data rows. One indexer spans the whole file so a (node, cardID)
+	// pair always maps to the same global ID across rows and metrics.
+	idx := newCardIndexer()
 	rows := make([]CSVRow, 0, len(records)-1)
-	cardIDSet := make(map[int]bool)
 
 	for i := 1; i < len(records); i++ {
 		rec := records[i]
-		row, err := parseRow(rec, colIdx)
+		row, err := parseRow(rec, colIdx, idx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] skipping row %d in %s: %v\n", i, filePath, err)
 			continue
 		}
 		rows = append(rows, row)
-
-		// Collect all card IDs.
-		for cid := range row.Power {
-			cardIDSet[cid] = true
-		}
-		for cid := range row.Temp {
-			cardIDSet[cid] = true
-		}
 	}
 
 	if len(rows) == 0 {
@@ -74,17 +140,12 @@ func ParseCSV(filePath string) (*TimeSeriesData, error) {
 	// Sort rows by timestamp.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Timestamp < rows[j].Timestamp })
 
-	// Build sorted card ID list.
-	cardIDs := make([]int, 0, len(cardIDSet))
-	for cid := range cardIDSet {
-		cardIDs = append(cardIDs, cid)
-	}
-	sort.Ints(cardIDs)
-
 	return &TimeSeriesData{
 		Rows:    rows,
 		RawRows: rows, // keep raw for counter metric processing
-		CardIDs: cardIDs,
+		CardIDs: idx.sortedGlobalIDs(),
+		NodeOf:  idx.nodeMap(),
+		LocalID: idx.localMap(),
 	}, nil
 }
 
@@ -170,7 +231,7 @@ func buildColumnIndex(header []string) (columnIndex, error) {
 // Row Parsing
 // =============================================================================
 
-func parseRow(rec []string, ci columnIndex) (CSVRow, error) {
+func parseRow(rec []string, ci columnIndex, idx *cardIndexer) (CSVRow, error) {
 	row := CSVRow{}
 
 	// Timestamp.
@@ -183,19 +244,19 @@ func parseRow(rec []string, ci columnIndex) (CSVRow, error) {
 	}
 	row.Timestamp = ts
 
-	// Parse each metric column as JSON dict.
-	row.Power = parseMetricJSON(rec, ci.power, "NPU_CARD_POWER")
-	row.Temp = parseMetricJSON(rec, ci.temp, "NPU_CARD_TEMP")
-	row.AICoreFreq = parseMetricJSON(rec, ci.aicoreFreq, "NPU_CARD_AICORE_FREQ")
-	row.AICoreUtil = parseMetricJSON(rec, ci.aicoreUtil, "NPU_CARD_AICORE_UTIL")
-	row.HBMBandwidthUtil = parseMetricJSON(rec, ci.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL")
-	row.HBMUtil = parseMetricJSON(rec, ci.hbmUtil, "NPU_CARD_HBM_UTIL")
-	row.TXBandwidth = parseMetricJSON(rec, ci.txBandwidth, "NPU_TX_BANDWIDTH")
-	row.RXPfcPkt = parseMetricJSON(rec, ci.rxPfcPkt, "NPU_RX_PFC_PKT")
-	row.RocETxErrPkt = parseMetricJSON(rec, ci.roceTxErrPkt, "NPU_ROCE_TX_ERR_PKT")
-	row.RocEOutOfOrder = parseMetricJSON(rec, ci.roceOutOfOrder, "NPU_ROCE_OUT_OF_ORDER")
-	row.RocENewPktRty = parseMetricJSON(rec, ci.roceNewPktRty, "NPU_ROCE_NEW_PKT_RTY")
-	row.NICRxAllPkg = parseMetricJSON(rec, ci.nicRxAllPkg, "NPU_NIC_RX_ALL_PKG")
+	// Parse each metric column as JSON dict (flat or node-nested).
+	row.Power = parseMetricJSON(rec, ci.power, "NPU_CARD_POWER", idx)
+	row.Temp = parseMetricJSON(rec, ci.temp, "NPU_CARD_TEMP", idx)
+	row.AICoreFreq = parseMetricJSON(rec, ci.aicoreFreq, "NPU_CARD_AICORE_FREQ", idx)
+	row.AICoreUtil = parseMetricJSON(rec, ci.aicoreUtil, "NPU_CARD_AICORE_UTIL", idx)
+	row.HBMBandwidthUtil = parseMetricJSON(rec, ci.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL", idx)
+	row.HBMUtil = parseMetricJSON(rec, ci.hbmUtil, "NPU_CARD_HBM_UTIL", idx)
+	row.TXBandwidth = parseMetricJSON(rec, ci.txBandwidth, "NPU_TX_BANDWIDTH", idx)
+	row.RXPfcPkt = parseMetricJSON(rec, ci.rxPfcPkt, "NPU_RX_PFC_PKT", idx)
+	row.RocETxErrPkt = parseMetricJSON(rec, ci.roceTxErrPkt, "NPU_ROCE_TX_ERR_PKT", idx)
+	row.RocEOutOfOrder = parseMetricJSON(rec, ci.roceOutOfOrder, "NPU_ROCE_OUT_OF_ORDER", idx)
+	row.RocENewPktRty = parseMetricJSON(rec, ci.roceNewPktRty, "NPU_ROCE_NEW_PKT_RTY", idx)
+	row.NICRxAllPkg = parseMetricJSON(rec, ci.nicRxAllPkg, "NPU_NIC_RX_ALL_PKG", idx)
 
 	// CPU_average has string values (e.g. "4.26") so parse separately.
 	row.CPUAvg = parseCPUJSON(rec, ci.cpuAvg)
@@ -203,38 +264,84 @@ func parseRow(rec []string, ci columnIndex) (CSVRow, error) {
 	return row, nil
 }
 
-// parseMetricJSON parses a JSON dict like {"0":1628,"1":1747,...} → map[int]float64.
-func parseMetricJSON(rec []string, idx int, name string) map[int]float64 {
+// parseMetricJSON parses a metric column into map[int]float64 keyed by GLOBAL
+// card ID. The cell may be flat {cardID: value} (single node "none") or nested
+// {nodeName: {cardID: value}} (multi-node). The indexer keeps (node, cardID)
+// → global ID consistent across rows and metrics.
+func parseMetricJSON(rec []string, idx int, name string, ci *cardIndexer) map[int]float64 {
 	if idx < 0 || idx >= len(rec) || rec[idx] == "" {
 		return nil
 	}
-	raw := rec[idx]
 	// The CSV quoting may double-quote the JSON. Un-double if needed.
 	// e.g. "{""0"":1628}" → {"0":1628}
-	raw = strings.ReplaceAll(raw, `""`, `"`)
+	raw := strings.ReplaceAll(rec[idx], `""`, `"`)
 
-	var rawMap map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &rawMap); err != nil {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &top); err != nil {
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] cannot parse %s JSON: %v (raw: %.80s...)\n", name, err, raw)
 		return nil
 	}
 
-	result := make(map[int]float64, len(rawMap))
-	for k, v := range rawMap {
-		cardID, err := strconv.Atoi(k)
-		if err != nil {
-			continue
-		}
-		switch n := v.(type) {
-		case float64:
-			result[cardID] = n
-		case string:
-			if f, err := strconv.ParseFloat(n, 64); err == nil {
-				result[cardID] = f
+	result := make(map[int]float64, len(top))
+	for k, rawVal := range top {
+		if isJSONObject(rawVal) {
+			// Nested: {node: {cardID: value}}
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal(rawVal, &inner); err != nil {
+				continue
 			}
+			for ck, cv := range inner {
+				v, ok := parseJSONNumber(cv)
+				if !ok {
+					continue
+				}
+				c, aerr := strconv.Atoi(ck)
+				if aerr != nil {
+					continue
+				}
+				result[ci.globalID(k, c)] = v
+			}
+		} else {
+			// Flat: {cardID: value}
+			v, ok := parseJSONNumber(rawVal)
+			if !ok {
+				continue
+			}
+			c, aerr := strconv.Atoi(k)
+			if aerr != nil {
+				continue
+			}
+			result[ci.globalID(noneNode, c)] = v
 		}
 	}
 	return result
+}
+
+// isJSONObject reports whether raw is a JSON object ({...}).
+func isJSONObject(raw json.RawMessage) bool {
+	raw = trimSpace(raw)
+	return len(raw) > 0 && raw[0] == '{'
+}
+
+// parseJSONNumber extracts a numeric value from a JSON raw value, accepting a
+// JSON number or a JSON string that parses as a number.
+func parseJSONNumber(raw json.RawMessage) (float64, bool) {
+	var num float64
+	if err := json.Unmarshal(raw, &num); err == nil {
+		return num, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+func trimSpace(raw json.RawMessage) json.RawMessage {
+	s := strings.TrimSpace(string(raw))
+	return json.RawMessage(s)
 }
 
 // parseCPUJSON parses CPU_average column: {"cpu1":"4.26","cpu2":"3.41",...}.

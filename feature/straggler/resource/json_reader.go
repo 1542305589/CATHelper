@@ -15,16 +15,20 @@ import (
 // (features/stragglerout/sample.go). One record = one timestamp's per-card KPI
 // values, 1:1 with this package's CSVRow so the JSON reader can feed the same
 // detection pipeline the CSV parser does.
+//
+// Vals may be flat {cardID: {field: value}} (single node "none") or nested
+// {nodeName: {cardID: {field: value}}} (multi-node). RawMessage preserves both
+// shapes until sampleToRow sniffs them.
 type KPISample struct {
-	Timestamp int64                          `json:"ts"`
-	Vals      map[string]map[string]float64  `json:"vals,omitempty"`    // cardID -> field -> value
-	CPUAvg    map[string]string              `json:"cpu_avg,omitempty"`  // cpuName -> util%
+	Timestamp int64                         `json:"ts"`
+	Vals      map[string]json.RawMessage    `json:"vals,omitempty"`
+	CPUAvg    map[string]string             `json:"cpu_avg,omitempty"` // cpuName -> util%
 }
 
 // ReadKPIFiles reads all straggler_kpi_{date}.jsonl files in dir whose date
 // falls in [since, until] (inclusive, by local date) and reconstructs the
 // same *TimeSeriesData ParseCSV would produce. Rows are sorted by timestamp;
-// CardIDs are the union of all cards seen.
+// CardIDs/NodeOf/LocalID come from one indexer spanning all date files.
 //
 // Field names in the JSONL are the straggler KPI field names (temp, power,
 // aicore_freq, aicore_util, hbm_bandwidth_util, hbm_util, tx_bandwidth,
@@ -32,24 +36,16 @@ type KPISample struct {
 // back onto the CSVRow metric dicts.
 func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 	dates := dateRange(since, until)
+	idx := newCardIndexer()
 	var rows []CSVRow
-	cardIDSet := make(map[int]bool)
 
 	for _, date := range dates {
 		path := filepath.Join(dir, "straggler_kpi_"+date+".jsonl")
-		fileRows, err := readKPIFile(path)
+		fileRows, err := readKPIFile(path, idx)
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range fileRows {
-			rows = append(rows, r)
-			for cid := range r.Power {
-				cardIDSet[cid] = true
-			}
-			for cid := range r.Temp {
-				cardIDSet[cid] = true
-			}
-		}
+		rows = append(rows, fileRows...)
 	}
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("no KPI samples in %s for range [%s, %s]", dir, since.Format("2006-01-02"), until.Format("2006-01-02"))
@@ -57,21 +53,17 @@ func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Timestamp < rows[j].Timestamp })
 
-	cardIDs := make([]int, 0, len(cardIDSet))
-	for cid := range cardIDSet {
-		cardIDs = append(cardIDs, cid)
-	}
-	sort.Ints(cardIDs)
-
 	return &TimeSeriesData{
 		Rows:    rows,
 		RawRows: rows,
-		CardIDs: cardIDs,
+		CardIDs: idx.sortedGlobalIDs(),
+		NodeOf:  idx.nodeMap(),
+		LocalID: idx.localMap(),
 	}, nil
 }
 
 // readKPIFile decodes one straggler_kpi_{date}.jsonl file into CSVRows.
-func readKPIFile(path string) ([]CSVRow, error) {
+func readKPIFile(path string, idx *cardIndexer) ([]CSVRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -96,7 +88,7 @@ func readKPIFile(path string) ([]CSVRow, error) {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] skipping bad kpi line in %s: %v\n", path, err)
 			continue
 		}
-		rows = append(rows, sampleToRow(s))
+		rows = append(rows, sampleToRow(s, idx))
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -105,16 +97,52 @@ func readKPIFile(path string) ([]CSVRow, error) {
 }
 
 // sampleToRow converts one KPISample to a CSVRow, mapping the straggler KPI
-// field names back onto the CSVRow metric dicts (cardID int → value).
-func sampleToRow(s KPISample) CSVRow {
+// field names back onto the CSVRow metric dicts (global card ID → value).
+// Vals may be flat {cardID: {field: value}} or nested {node: {cardID: {field: value}}}.
+func sampleToRow(s KPISample, idx *cardIndexer) CSVRow {
 	row := CSVRow{Timestamp: s.Timestamp, CPUAvg: s.CPUAvg}
-	for cidStr, fields := range s.Vals {
-		cid, err := strconv.Atoi(cidStr)
-		if err != nil {
+	for key, rawInner := range s.Vals {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawInner, &fields); err != nil {
 			continue
 		}
-		for field, val := range fields {
-			assignMetricField(&row, cid, field, val)
+		nested := false
+		for _, fv := range fields {
+			if isJSONObject(fv) {
+				nested = true
+			}
+			break // sniff on the first field value
+		}
+		if !nested {
+			// flat: key = cardID, fields = field → value
+			c, err := strconv.Atoi(key)
+			if err != nil {
+				continue
+			}
+			g := idx.globalID(noneNode, c)
+			for field, fv := range fields {
+				if v, ok := parseJSONNumber(fv); ok {
+					assignMetricField(&row, g, field, v)
+				}
+			}
+			continue
+		}
+		// nested: key = node, fields = cardID → {field: value}
+		for ck, cv := range fields {
+			var cardFields map[string]json.RawMessage
+			if err := json.Unmarshal(cv, &cardFields); err != nil {
+				continue
+			}
+			c, err := strconv.Atoi(ck)
+			if err != nil {
+				continue
+			}
+			g := idx.globalID(key, c)
+			for field, fv := range cardFields {
+				if v, ok := parseJSONNumber(fv); ok {
+					assignMetricField(&row, g, field, v)
+				}
+			}
 		}
 	}
 	return row

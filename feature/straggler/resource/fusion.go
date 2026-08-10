@@ -173,10 +173,16 @@ func mergeDetails(
 		sd := spaceM[metric]
 		td := timeM[metric]
 
-		d := &MetricAnomalyDetail{Metric: metric}
+		d := &MetricAnomalyDetail{
+			Metric:      metric,
+			SpaceMethod: MetricMetaRegistry[metric].SpaceMethod,
+			TimeMethod:  MetricMetaRegistry[metric].TimeMethod,
+		}
 		if sd != nil {
 			d.SpaceScore = sd.SpaceScore
 			d.SpaceAbnormal = sd.SpaceAbnormal
+			d.SpaceRef = sd.SpaceRef    // cluster baseline-cluster mean reference
+			d.SpaceScale = sd.SpaceScale // cluster noise scale
 		}
 		if td != nil {
 			d.TimeScore = td.TimeScore
@@ -185,6 +191,11 @@ func mergeDetails(
 			d.BaselineMean = td.BaselineMean
 			d.BaselineStd = td.BaselineStd
 			d.PeerMean = td.PeerMean
+		}
+		// For non-cluster space methods, the reported peer reference is the
+		// peer arithmetic mean from the time dimension.
+		if d.SpaceMethod != MethodCluster {
+			d.SpaceRef = d.PeerMean
 		}
 
 		// Compute fusion score.
