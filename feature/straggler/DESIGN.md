@@ -144,52 +144,39 @@ for npuID, value := range ZP_Bubble:
 
 ### spacedetector
 ```go
-type IndexAndValue struct { Index int; Value float64 }
-
 func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
     degradationPercent float64, abnormalType string) ([]int, []float64)
 ```
 
-**recurseDimensionalClusteringWithDegradation**：
+**核心流程**（与 KPI 资源检测 MethodCluster 同构，用比值作显著性）：
 ```
-baseVal = abnormalType=="max" ? min(data) : max(data)     // baseVal==0 → SmallestNonzeroFloat64
-input = dataList, result = nil
-loop:
-  tmpResult, nextList = oneDimensionalClustering(input, threshold, type)
-  if tmpResult empty → break
-  input = nextList
-  映射局部索引 → 原始 dataList 索引（通过 result 中间层）
-degradation = abnormalType=="max" ? data[i]/baseVal : baseVal/data[i]
-```
-
-**oneDimensionalClustering**：
-```
-1. sortDataByIndexAndValue(data) → 升序 IndexAndValue 列表
-2. calculateDifferences → diff[i] = sorted[i+1].Value - sorted[i].Value + totalSum
-3. maxDiffIdx = argmax(diff)
-4. 条件1: diff[maxDiffIdx] >= totalSum / 2.0
-5. 分割：littleGroup = sorted[:maxDiffIdx+1], bigGroup = sorted[maxDiffIdx+1:]
-6. 条件2: bigMean/littleMean >= threshold（littleMean != 0）
-7. abnormalType=="max" → 返回 bigGroup 的 Index/Value
-   abnormalType=="min" → 返回 littleGroup 的 Index/Value
+1. 全分解：递归在最大间隙处切分，两侧都继续，直到子块无主导间隙
+   （maxGap*2 < span）→ 完整簇划分
+2. 基线簇 = 成员最多的簇；成员数并列按方向取极值簇
+   （"max"→低均值簇，"min"→高均值簇）；基线均值 = 多数簇均值
+3. 基线簇成员豁免；对每个非基线簇成员单侧判定：
+   "max": 该卡值 / 基线均值 >= threshold
+   "min": 基线均值 / 该卡值 >= threshold
+degradation = 对应比值
 ```
 
-时间复杂度 O(n²) 最坏，空间复杂度 O(n)。
+时间复杂度 O(n log n)（排序主导），空间复杂度 O(n)。
 
 ### utils
 ```go
-func Write_result(finalResult map[string]map[string]float64, parallels map[string][][]int)
+func WriteNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) error
 func CheckFileOrDirectoryReadMode(path string) bool
 func CheckFileOrDirectoryIsSoftLink(path string) bool
 func TransferFloatArrayToInt(ids []interface{}) []int
 func ReadFile(filePath string) ([]byte, error)
 ```
 
-**Write_result 逻辑**：
-1. 对每个类别构建 `[]DetectionEntry`
-2. 排序：bubble 升序，其余降序
-3. comm 的 display_key：将 groupKey（如 `"0,1,2,3"`）通过 parallels 匹配找到域名称 → `"tp[0, 1, 2, 3]"`
-4. 写入 `config.FilePath/straggler_detection_result.json` + stdout 打印
+**WriteNodeResult 逻辑**（节点聚合输出）：
+1. 读 `op_metric/host_info_{N}.json`（hostName）+ `npu_info_{N}.json`（NPU id）作为每 rank 元数据
+2. cal / npu_bubble（逐 rank）→ 按 hostname 分组、按 NPU id 聚合 → `node_result[].npu[]`，只含有异常的节点/NPU
+3. cpu（逐 rank，节点级）→ `node_result[].cpu`（节点内 rank 值相同，取共享值）
+4. comm → 用 `findDomainForRanks` 解析域名 → `comm_domain_result[域名][组key] = score`
+5. 写入 `config.FilePath/straggler_detection_result.json` + stdout 摘要
 
 ### report
 ```go

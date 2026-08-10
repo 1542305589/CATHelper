@@ -229,8 +229,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 7. Write results.
-	utils.Write_result(result, parallels)
+	// 7. Write results (node-aggregated JSON).
+	if err := utils.WriteNodeResult(result, parallels); err != nil {
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write node result: %v\n", err)
+	}
 
 	// 8. Generate text report.
 	report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath, degradation)

@@ -402,7 +402,7 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
   └── DelimitDetection()       → 执行 4 类检测
   │
   ▼
-[utils]  Write_result()       → stdout + straggler_detection_result.json
+[utils]  WriteNodeResult()    → stdout + straggler_detection_result.json（节点聚合）
 [report] WriteReport()        → analysis_result/detection_report.log
 ```
 
@@ -461,25 +461,33 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 
 #### straggler_detection_result.json
 
+节点聚合结构：结果按**物理节点**（hostname，来自 HOST_INFO.hostName）+ **NPU**（id，来自 NPU_INFO.id）分组；通信结果按**并行域**分组。只含有异常的节点/NPU。
+
 ```json
 {
-  "cal": [
-    {"display_key": "0", "metric_value": 1.5, "is_abnormal": true}
+  "node_result": [
+    {
+      "hostname": "<hostName>",
+      "npu": [
+        {
+          "id": 0,
+          "cal":        { "score": 1.5 },
+          "npu_bubble": { "score": 3200.0 }
+        }
+      ],
+      "cpu": { "score": 1.4 }
+    }
   ],
-  "comm": [
-    {"display_key": "tp[0, 1, 2, 3]", "metric_value": 3.2, "is_abnormal": true}
-  ],
-  "cpu": [
-    {"display_key": "2", "metric_value": 1.4, "is_abnormal": true}
-  ],
-  "npu_bubble": [
-    {"display_key": "3", "metric_value": 3200.0, "is_abnormal": true}
-  ]
+  "comm_domain_result": {
+    "tp": {
+      "0,1,2,3": 3.2
+    }
+  }
 }
 ```
 
-排序：`npu_bubble` 升序（越小越异常），其余降序（越大越异常）。
-display_key：`comm` 为 `域名[排序后的 rank 列表]`，其余为 rank 字符串。
+- `node_result[]`：每个异常节点一条，含 `hostname`（HOST_INFO.hostName，缺失回退 hostUid）、`npu[]`（只含异常的 NPU，`id` 来自 NPU_INFO.id，`cal`/`npu_bubble` score 仅在异常时出现）、`cpu`（节点级，慢节点的共享值）
+- `comm_domain_result`：key = 通信域名字（可读域名，如 tp），value = 组内 rank 集（逗号连接）→ score
 
 #### detection_report.log
 
@@ -493,20 +501,21 @@ display_key：`comm` 为 `域名[排序后的 rank 列表]`，其余为 rank 字
 
 ### 2.7 均质化聚类算法
 
-唯一的异常检测算法，通过方向和阈值参数化适配所有检测场景。
+唯一的异常检测算法，通过方向和阈值参数化适配所有检测场景。**与 KPI 资源检测的 MethodCluster 同构**（多数簇聚类 + 单侧判定），只是用比值作显著性（Profiler 是单快照，无历史噪声可做 z）。
 
 **核心流程**：
 1. 按值升序排序（保留原始索引）
-2. 计算相邻差值，找最大间隙位置
-3. 条件 1：`maxDiff ≥ sum(allDiff) / 2`（最大间隙至少占总跨度一半）
-4. 条件 2：`bigMean / littleMean ≥ threshold`（两组均值比达阈值）
-5. 按方向取异常组（"max"→大值组, "min"→小值组）
-6. 对异常组递归执行，直到无法再分割
+2. 递归在最大间隙处切分，**两侧都继续**（全分解），直到子块无主导间隙（`maxGap ≥ 跨度/2`）——分离所有异常层级
+3. 基线簇 = 成员最多的簇（"谁多谁有理"）；成员数并列按方向取极值簇（"max"→低均值簇，"min"→高均值簇）
+4. 基线簇成员豁免；对每个非基线簇成员单侧判定（只查异常方向）：`比值 = 该卡值 / 基线均值`（"max" 方向）或 `基线均值 / 该卡值`（"min" 方向）
+5. `比值 ≥ threshold` → 该卡异常
 
 **示例**：数据 `[10, 10, 20, 10]`，阈值 1.3，方向 "max"
-- 排序：`[(0,10), (1,10), (3,10), (2,20)]`，最大差值 10（位置 2）
-- `10 ≥ 10/2 ✓`，`20/10 = 2.0 ≥ 1.3 ✓`
-- 返回索引 2（异常），劣化 = 20/10 = 2.0
+- 全分解：最大间隙 10（10↔20），切出 {10,10,10} 和 {20}
+- 基线簇 = {10×3}（多数），基线均值 10
+- 卡 20：20/10 = 2.0 ≥ 1.3 → 异常，劣化 = 2.0
+
+**与旧版（单侧递归）的差别**：旧版只递归进异常侧，会漏掉中间层异常（如 [10,10,10,13,13,20] 只报 20，漏 13）；全分解把正常侧也切开，13 和 20 都能检出。
 
 ### 2.8 SQLite 源表
 
