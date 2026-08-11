@@ -3,10 +3,10 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm_anomaly_middleware"
+name = "anomaly_middleware"
 version = "0.1.0"
 description = "vLLM 推理精度异常检测 ASGI 中间件（透明拦截 + 后台检测 + Prometheus 指标）"
-readme = "PLAN.md"
+readme = "docs/README.md"
 requires-python = ">=3.8"
 license = { text = "Mulan PSL v2" }
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
     "pyyaml>=5.4",
     "numpy>=1.20",
     "httpx>=0.24",
+    "colorlog>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -25,14 +26,8 @@ test = [
 ]
 
 [tool.setuptools]
-# 项目根目录即包目录（flat layout: root == package vllm_anomaly_middleware）
-package-dir = {"vllm_anomaly_middleware" = "."}
-packages = ["vllm_anomaly_middleware"]
-
-[tool.setuptools.package-data]
-"vllm_anomaly_middleware" = [
-    "defaults/*.yaml",
-]
+package-dir = {"anomaly_middleware" = "anomaly_middleware"}
+packages = ["anomaly_middleware"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

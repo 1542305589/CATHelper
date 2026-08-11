@@ -62,17 +62,21 @@ async def test_completions_restore_token_ids_kept(client_factory):
         assert all(k.startswith("token_id:") for k in pos)
 
 
-async def test_completions_restore_no_token_ids_null(client_factory):
-    # 客户端 logprobs=3, 无 token_ids → tokens=null, top_logprobs=null（绝不留 token_id:）
+async def test_completions_no_resolver_fallback_to_token_id(client_factory):
+    # 触发降级回退（completions + logprobs=3 + 未设 rtati + resolver off）
+    # → tokens/top_logprobs 回退 token_id:NNN，保证 topk logprob 数据不丢失
     client, fake, mw = client_factory(_comp_resp_fn(n_top=20))
     resp = await client.post(
         "/v1/completions",
         json={"model": "m", "prompt": "x", "logprobs": 3},
     )
     lp = resp.json()["choices"][0]["logprobs"]
-    assert lp["tokens"] == [None, None]
-    assert lp["top_logprobs"] == [None, None]
-    assert "token_id:" not in resp.text
+    assert lp["tokens"] == ["token_id:100", "token_id:200"]
+    assert len(lp["top_logprobs"]) == 2
+    for pos in lp["top_logprobs"]:
+        assert len(pos) == 3  # 截断到 3
+        assert all(k.startswith("token_id:") for k in pos.keys())
+    assert "token_id:" in resp.text  # 例外允许泄漏
 
 
 async def test_completions_restore_text_with_resolver(client_factory):
@@ -94,14 +98,12 @@ async def test_completions_restore_text_with_resolver(client_factory):
     assert "token_id:" not in resp.text
 
 
-async def test_completions_resolver_off_still_no_leak(client_factory):
-    # 默认 resolver off → tokens/top_logprobs null，全文无 token_id:
+async def test_completions_no_topk_no_resolver_no_leak(client_factory):
+    # 客户端未请求 logprobs（无 topk）→ 中间件置 logprobs=null，不触发降级，全文无 token_id:
     client, fake, mw = client_factory(_comp_resp_fn(n_top=20))
     resp = await client.post(
         "/v1/completions",
-        json={"model": "m", "prompt": "x", "logprobs": 3},
+        json={"model": "m", "prompt": "x"},  # 未请求 logprobs
     )
-    lp = resp.json()["choices"][0]["logprobs"]
-    assert lp["tokens"] == [None, None]
-    assert lp["top_logprobs"] == [None, None]
+    assert resp.json()["choices"][0]["logprobs"] is None
     assert "token_id:" not in resp.text

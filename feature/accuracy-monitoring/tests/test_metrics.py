@@ -1,7 +1,7 @@
 """metrics 单元测试：独立 registry + per-HTTP-request + choice_index + 四 gauge（spec §2.10）。"""
 from __future__ import annotations
 
-from vllm_anomaly_middleware.metrics import (
+from anomaly_middleware.metrics import (
     ILL_GARBLED,
     ILL_NAN,
     ILL_NORMAL,

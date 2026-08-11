@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 from _helpers import chat_stream_chunk, chat_top_entry, completions_stream_chunk
-from vllm_anomaly_middleware.extractor import OriginalParams, SSEStreamProcessor
+from anomaly_middleware.extractor import OriginalParams, SSEStreamProcessor
 
 NI = "你"
 HAO = "好"
@@ -192,3 +192,45 @@ def test_non_json_data_passthrough():
     )
     out = sse.feed(b"data: not-json\n\n")
     assert out == b"data: not-json\n\n"  # 非 JSON 原样透传
+
+
+def test_multi_data_line_event_passthrough():
+    """多 data: 行（payload 非法 JSON）-> 原样透传（spec §2.4 不改非结构化事件）。"""
+    sse = SSEStreamProcessor(
+        True, OriginalParams(True, None, None, False, 1, False), 20
+    )
+    raw = b"data: {\"choices\": []}\ndata: tail\n\n"
+    out = sse.feed(raw)
+    assert out == raw
+
+
+def test_extra_event_fields_preserved():
+    """事件含 event:/id: 等附加字段 -> 恢复重发时保留。"""
+    orig = OriginalParams(True, None, None, False, 1, False)
+    sse = SSEStreamProcessor(True, orig, 20)
+    e = chat_top_entry(100, NI, -0.1, n_top=20)
+    chunk = chat_stream_chunk("glm-4-7", e, delta_text=NI)
+    raw = (b"id: 7\nevent: message\ndata: " +
+           json.dumps(chunk, ensure_ascii=False).encode() + b"\n\n")
+    out = sse.feed(raw)
+    assert b"id: 7" in out and b"event: message" in out  # 附加字段保留
+    assert b'"logprobs": null' in out  # 仍执行恢复
+    assert b"token_id:" not in out
+
+
+def test_event_split_across_many_chunks():
+    """单条事件被拆成多个 body 块 -> 全部重组后才输出（不半截转发）。"""
+    sse = SSEStreamProcessor(
+        True, OriginalParams(True, True, 3, False, 1, False), 20
+    )
+    e = chat_top_entry(100, NI, -0.1, n_top=20)
+    raw = _sse_bytes(chat_stream_chunk("glm-4-7", e, delta_text=NI))
+    outs = []
+    for i in range(len(raw) - 1):
+        out = sse.feed(raw[i:i + 1])  # 逐字节喂入
+        outs.append(out)
+        assert out == b""  # 事件未完整前不输出
+    final = sse.feed(raw[-1:])
+    assert final.count(b"data: ") == 1  # 补齐后输出一条完整事件
+    assert final.endswith(b"\n\n")
+    assert b"token_id:" not in final  # 恢复生效
