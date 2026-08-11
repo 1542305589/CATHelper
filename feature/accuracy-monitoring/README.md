@@ -27,7 +27,7 @@ cd accuracy-monitoring/
 pip install -e .
 ```
 
-依赖：`prometheus_client`、`pyyaml`、`numpy`、`httpx`
+依赖：`prometheus_client`、`pyyaml`、`numpy`、`httpx`、`colorlog`
 
 ### 2.2 部署
 
