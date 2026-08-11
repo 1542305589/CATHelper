@@ -111,13 +111,21 @@ def _decode_bytes(b: Any) -> Optional[str]:
     return None
 
 
-def _token_text(token_id_value: Any, bytes_value: Any, resolver: Any) -> Optional[str]:
-    """统一 token_id -> 文本（spec §5，resolver 优先）。
+def _token_text(
+    token_id_value: Any,
+    bytes_value: Any,
+    resolver: Any,
+    *,
+    fallback_to_id: bool = False,
+) -> Optional[str]:
+    """统一 token_id -> 文本（spec §5，resolver 优先 + §4.7 降级例外）。
 
     1) 优先 resolver：覆盖 chat 主 token / top_logprobs / completions 全部字段。
     2) resolver 缺失/未解析 → 退回 bytes，仅当解码出真实文本（不含 token_id: 前缀）。
        该守卫独立修复泄漏：chat top_logprobs 的破损 bytes 被置 null，绝不回写 token_id:。
-    3) 都无 → null。
+    3) 都无 → fallback_to_id=True 时返回 `token_id:NNN`（§4.7 降级例外：客户端请求了
+       topk + 未设 return_tokens_as_token_ids + resolver 不可用，保证 topk logprob 数据不丢失）；
+       否则 None。
     """
     if resolver is not None:
         tid = parse_token_id(token_id_value)
@@ -129,6 +137,10 @@ def _token_text(token_id_value: Any, bytes_value: Any, resolver: Any) -> Optiona
         s = _decode_bytes(bytes_value)
         if s is not None and not s.startswith(TOKEN_ID_PREFIX):
             return s
+    if fallback_to_id:
+        tid = parse_token_id(token_id_value)
+        if tid >= 0:
+            return f"{TOKEN_ID_PREFIX}{tid}"
     return None
 
 
@@ -233,6 +245,13 @@ def strip_chat_response(data: Any, orig: OriginalParams, resolver: Any = None) -
     choices = data.get("choices")
     if not isinstance(choices, list):
         return
+    # §4.7 降级例外：客户端请求 topk + 未设 rtati + resolver 不可用 → 三层兜底落 token_id:NNN
+    fallback_to_id = (
+        not orig.return_tokens_as_token_ids
+        and resolver is None
+        and orig.logprobs is True
+        and (orig.top_logprobs or 0) > 0
+    )
     for choice in choices:
         if not isinstance(choice, dict):
             continue
@@ -258,12 +277,18 @@ def strip_chat_response(data: Any, orig: OriginalParams, resolver: Any = None) -
                     tps = []
                 if not orig.return_tokens_as_token_ids:
                     entry["token"] = _token_text(
-                        entry.get("token"), entry.get("bytes"), resolver
+                        entry.get("token"),
+                        entry.get("bytes"),
+                        resolver,
+                        fallback_to_id=fallback_to_id,
                     )
                     for tp in tps:
                         if isinstance(tp, dict):
                             tp["token"] = _token_text(
-                                tp.get("token"), tp.get("bytes"), resolver
+                                tp.get("token"),
+                                tp.get("bytes"),
+                                resolver,
+                                fallback_to_id=fallback_to_id,
                             )
                 entry["top_logprobs"] = tps
 
@@ -272,13 +297,20 @@ def strip_completions_response(data: Any, orig: OriginalParams, resolver: Any = 
     """completions 响应恢复（原位修改 data）。
 
     resolver 可用时 tokens[] / top_logprobs[] 还原为真实文本（resolver 优先）；
-    resolver 不可用时退回 null（绝不留 token_id:）。
+    resolver 不可用 + 触发降级（§4.7 例外）→ 回退 token_id:NNN，保证 topk logprob 数据不丢失；
+    resolver 不可用 + 未触发 → 退回 null（绝不留 token_id:）。
     """
     if not isinstance(data, dict):
         return
     choices = data.get("choices")
     if not isinstance(choices, list):
         return
+    # §4.7 降级例外：completions 客户端请求 topk(logprobs>0) + 未设 rtati + resolver 不可用
+    fallback_to_id = (
+        not orig.return_tokens_as_token_ids
+        and resolver is None
+        and (orig.logprobs or 0) > 0
+    )
     for choice in choices:
         if not isinstance(choice, dict):
             continue
@@ -305,7 +337,9 @@ def strip_completions_response(data: Any, orig: OriginalParams, resolver: Any = 
                 else:
                     rebuilt: Dict[str, Any] = {}
                     for k, v in items:
-                        txt = _token_text(k, None, resolver)  # completions 无 bytes
+                        txt = _token_text(
+                            k, None, resolver, fallback_to_id=fallback_to_id
+                        )  # completions 无 bytes
                         if txt is not None:
                             rebuilt[txt] = v
                     new_tlp.append(rebuilt if rebuilt else None)
@@ -313,7 +347,10 @@ def strip_completions_response(data: Any, orig: OriginalParams, resolver: Any = 
         if not orig.return_tokens_as_token_ids:
             toks = lp.get("tokens")
             if isinstance(toks, list):
-                lp["tokens"] = [_token_text(t, None, resolver) for t in toks]
+                lp["tokens"] = [
+                    _token_text(t, None, resolver, fallback_to_id=fallback_to_id)
+                    for t in toks
+                ]
 
 
 # --------------------------------------------------------------------------- #

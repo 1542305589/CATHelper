@@ -166,7 +166,7 @@ class FakeTokenizer:
 
 def install_fake_resolver(mw, mapping):
     """给 mw 注入基于 FakeTokenizer(mapping) 的 TokenTextResolver，并标记已初始化。"""
-    from vllm_anomaly_middleware.token_resolver import TokenTextResolver
+    from anomaly_middleware.token_resolver import TokenTextResolver
 
     mw._resolver = TokenTextResolver(FakeTokenizer(mapping))
     mw._resolver_inited = True

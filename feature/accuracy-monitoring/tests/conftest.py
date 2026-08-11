@@ -13,8 +13,8 @@ _PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
-from vllm_anomaly_middleware import AnomalyMiddleware  # noqa: E402
-from vllm_anomaly_middleware.config import PluginConfig  # noqa: E402
+from anomaly_middleware import AnomalyMiddleware  # noqa: E402
+from anomaly_middleware.env import PluginConfig  # noqa: E402
 from _helpers import FakeVLLM  # noqa: E402
 
 
@@ -31,7 +31,7 @@ async def client_factory():
         response_fn,
         *,
         top_logprobs: int = 20,
-        sample_rate: float = 1.0,
+        monitor_rate: float = 1.0,
         enabled: bool = True,
         workers: int = 1,
         metrics_path: str = "/anomaly/metrics",
@@ -42,7 +42,7 @@ async def client_factory():
             enabled=enabled,
             top_logprobs=top_logprobs,
             metrics_path=metrics_path,
-            sample_rate=sample_rate,
+            monitor_rate=monitor_rate,
             detector_workers=workers,
         )
         mw._runner = None

@@ -12,14 +12,14 @@ tk2cat 映射由 set_vocabulary 注入（运行时生成），_get_detector 懒�
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Set
 
+from .logging import get_logger
 from .metrics import Metrics
 
-logger = logging.getLogger("vllm_anomaly_middleware")
+logger = get_logger()
 
 
 class DetectorRunner:

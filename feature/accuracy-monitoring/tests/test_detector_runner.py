@@ -6,14 +6,14 @@ import asyncio
 
 import pytest
 
-from vllm_anomaly_middleware.config import PluginConfig, resolve_config_path
-from vllm_anomaly_middleware.detector_runner import DetectorRunner, schedule_detection
-from vllm_anomaly_middleware.metrics import Metrics
+from anomaly_middleware.env import PluginConfig, resolve_config_path
+from anomaly_middleware.detector_runner import DetectorRunner, schedule_detection
+from anomaly_middleware.metrics import Metrics
 
 
 @pytest.fixture
 def vendored_config():
-    return resolve_config_path(PluginConfig())
+    return resolve_config_path()
 
 
 def _normal_data():

@@ -195,8 +195,10 @@ async def test_chat_top_logprobs_resolver_text_no_leak(client_factory):
     assert "token_id:" not in resp.text
 
 
-async def test_chat_top_logprobs_no_resolver_broken_bytes_no_leak(client_factory):
-    # resolver off + 破损 bytes → top_logprobs token=null，绝不泄漏 token_id:
+async def test_chat_top_logprobs_no_resolver_fallback_to_token_id(client_factory):
+    # resolver off + 客户端请求 topk + 未设 rtati → 触发降级回退（§4.7 例外）
+    # 主 token: bytes 真实文本（三层第二层 HAO）
+    # top_logprobs: bytes 破损 → 三层第三层 token_id:NNN（保证 topk logprob 数据不丢失）
     def fn(scope, body):
         e = chat_top_entry(200, HAO, -0.2, n_top=5, vllm_broken_top_bytes=True)
         return (
@@ -222,7 +224,8 @@ async def test_chat_top_logprobs_no_resolver_broken_bytes_no_leak(client_factory
         json={"model": "glm-4-7", "messages": [], "logprobs": True, "top_logprobs": 3},
     )
     entry = resp.json()["choices"][0]["logprobs"]["content"][0]
-    assert entry["token"] == HAO  # 主 token bytes 仍正确
+    assert entry["token"] == HAO  # 主 token 三层第二层（bytes 真实文本）
+    assert len(entry["top_logprobs"]) == 3
     for tp in entry["top_logprobs"]:
-        assert tp["token"] is None  # 破损 bytes 被守卫置 null
-    assert "token_id:" not in resp.text
+        assert tp["token"].startswith("token_id:")  # 三层第三层（token_id 回退）
+    assert "token_id:" in resp.text  # 例外允许泄漏

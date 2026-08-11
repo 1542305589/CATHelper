@@ -9,11 +9,12 @@ import os
 
 import pytest
 
-import vllm_anomaly_middleware
-from vllm_anomaly_middleware.detector import ILLDetector
+import anomaly_middleware
+from anomaly_middleware.detector import ILLDetector
 
-_PKG = os.path.dirname(os.path.abspath(vllm_anomaly_middleware.__file__))
-_CONFIG_PATH = os.path.join(_PKG, "defaults", "detector.yaml")
+_PKG = os.path.dirname(os.path.abspath(anomaly_middleware.__file__))
+_PROJECT_ROOT = os.path.dirname(_PKG)
+_CONFIG_PATH = os.path.join(_PROJECT_ROOT, "configs", "detector.yaml")
 
 
 @pytest.fixture

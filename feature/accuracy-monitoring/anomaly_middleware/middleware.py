@@ -6,14 +6,13 @@
 from __future__ import annotations
 
 import json
-import logging
 import random
 import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List, Optional, Set, Tuple
 
-from .config import PluginConfig, resolve_config_path
+from .env import PluginConfig, resolve_config_path
 from .detector_runner import DetectorRunner, schedule_detection
 from .extractor import (
     OriginalParams,
@@ -25,9 +24,10 @@ from .extractor import (
     strip_chat_response,
     strip_completions_response,
 )
+from .logging import get_logger
 from .metrics import METRICS_CONTENT_TYPE, Metrics
 
-logger = logging.getLogger("vllm_anomaly_middleware")
+logger = get_logger()
 
 TARGET_PATHS = ("/v1/chat/completions", "/v1/completions")
 
@@ -300,35 +300,81 @@ class AnomalyMiddleware:
         self._tk2cat = None
         self._vocab_size: Optional[int] = None
         self._preheat_thread = None
-        if self.config.tokenizer_model:
+        if self.config.enabled:
             self._start_preheat()
 
     def _start_preheat(self) -> None:
         """后台 daemon 线程预热 tokenizer + tk2cat 映射（spec §4.5）。
 
         复用 token_resolver._from_pretrained（已补 trust_remote_code，可 monkeypatch）。
+        模型路径来源优先级：
+          1. VLLM_ANOMALY_TOKENIZER_MODEL（显式 env）；
+          2. --tokenizer 从 sys.argv 解析（vLLM 实际使用的 tokenizer 路径）；
+          3. --model 位置参数从 sys.argv 解析（模型路径，无 --tokenizer 时 tokenizer 在此）；
+          4. /v1/models root 轮询（argv 解析失败时的 HTTP 兜底）；
+          5. 均失败 → 记录 ERROR，提示用户设置 VLLM_ANOMALY_TOKENIZER_MODEL。
         tokenizer 加载成功即设 resolver（strip 路径可用）；tk2cat 生成失败不影响 resolver。
         """
         import threading
 
         def _preheat() -> None:
             try:
-                from .token_resolver import _from_pretrained, TokenTextResolver
+                from .token_resolver import (
+                    _from_pretrained,
+                    parse_vllm_argv,
+                    poll_model_root,
+                    TokenTextResolver,
+                )
                 from .token_categorizer import generate_tk2cat
 
-                tok = _from_pretrained(
-                    self.config.tokenizer_model, local_files_only=True
-                )
+                path = self.config.tokenizer_model
+                source = "VLLM_ANOMALY_TOKENIZER_MODEL"
+
+                # 2-3. argv: --tokenizer → --model
+                info = None
+                if not path:
+                    info = parse_vllm_argv()
+                    if info is not None:
+                        if info.tokenizer:
+                            path = info.tokenizer
+                            source = "--tokenizer(argv)"
+                        elif info.model:
+                            path = info.model
+                            source = "serve <model>(argv)"
+
+                # 4. HTTP root 兜底
+                if not path and info is not None:
+                    root = poll_model_root(
+                        (info.host, info.port), timeout=60.0
+                    )
+                    if root:
+                        path = root
+                        source = "/v1/models root"
+
+                # 5. 均失败 → 明确报错
+                if not path:
+                    logger.error(
+                        "预热失败: 无法自动发现 tokenizer 路径，中间件将降级为无词表检测模式，检测算法能力会降级!"
+                        "请显式设置环境变量 VLLM_ANOMALY_TOKENIZER_MODEL 为 "
+                        "`vllm serve <model>` 的实际值"
+                        "（或 `--tokenizer` 的值，如使用独立 tokenizer）。"
+                    )
+                    return
+
+                tok = _from_pretrained(path, local_files_only=True)
                 self._resolver = TokenTextResolver(tok)
                 self._resolver_inited = True
-                logger.info("预热: tokenizer 已加载")
+                logger.info("预热: tokenizer 已加载 (%s, 来源=%s)", path, source)
                 try:
                     self._tk2cat, self._vocab_size = generate_tk2cat(tok)
                     logger.info(
-                        "预热完成: tk2cat 已加载 (vocab_size=%d)", self._vocab_size
+                        "预热完成: tk2cat 已加载 (vocab_size=%d)",
+                        self._vocab_size,
                     )
                 except Exception as exc:
-                    logger.warning("预热: tk2cat 生成失败, 检测将降级为无词表: %s", exc)
+                    logger.warning(
+                        "预热: tk2cat 生成失败, 检测将降级为无词表: %s", exc
+                    )
             except Exception as exc:
                 logger.warning("预热失败, 将在首请求时重试: %s", exc)
 
@@ -355,7 +401,7 @@ class AnomalyMiddleware:
             await self.app(scope, receive, send)
             return
         # 采样：未中 → 纯透传（不读 body、不注入、不恢复、不检测）
-        if random.random() >= self.config.sample_rate:
+        if random.random() >= self.config.monitor_rate:
             await self.app(scope, receive, send)
             return
         # 选中：读 body
@@ -408,7 +454,7 @@ class AnomalyMiddleware:
             if self._runner_inited:
                 return self._runner is not None
             try:
-                cfg = resolve_config_path(self.config)
+                cfg = resolve_config_path()
                 if cfg is None:
                     logger.error("检测器路径解析失败, 永久降级透传")
                     self.config.enabled = False

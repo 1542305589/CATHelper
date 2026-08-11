@@ -2,20 +2,20 @@
 
 ## 1. 目的与范围
 
-本文档规定基于 vllm 的在线精度异常检测中间件 `vllm_anomaly_middleware` 的功能行为、输入输出契约与验收标准。
+本文档规定基于 vllm 的在线精度异常检测中间件 `anomaly_middleware` 的功能行为、输入输出契约与验收标准。
 中间件通过 vLLM 的 `--middleware` 插件部署，监控推理异常现象，具体功能包括：拦截推理请求、
 强制采集 logprobs 和 token_id、后台运行算法异常检测、不影响客户端请求响应状态返回、
 并通过独立 Prometheus 端点暴露检测结果。整个过程客户端无感知。
 
-适用范围：vLLM 的 `POST /v1/chat/completions` 与 `POST /v1/completions` 在线推理请求端点，
+适用范围：vLLM 的 `/v1/chat/completions` 与 `/v1/completions` 在线推理请求端点，
 流式与非流式在线推理请求均覆盖。
 
 ## 2. 功能需求
 
 ### 2.1 请求拦截
 
-中间件仅拦截 `POST /v1/chat/completions` 与 `POST /v1/completions`。
-所有其他 HTTP 请求（任意方法或路径）和目标路径上的非 POST 方法均原样转发给下游应用（保持原先vllm处理方式一致）。
+中间件仅拦截 `/v1/chat/completions` 与 `/v1/completions`。
+所有其他 HTTP 请求（任意方法或路径）均原样转发给下游应用（保持原先vllm处理方式一致）。
 
 **验收**
 - `GET /v1/models` → 原样转发。
@@ -47,9 +47,9 @@
 响应处理后恢复为客户端原始请求被满足时的形态：
 - 客户端未请求 `logprobs`/`top_logprobs`  → `choice.logprobs` 置 null(vllm默认关闭)。
 - 客户端请求 `logprobs=M`/`top_logprobs=M` → 各 top-logprobs 列表截断至 M(vllm默认关闭)。
-- 客户端未请求 `return_tokens_as_token_ids=True` → 恢复响应中不得出现任何 `token_id:` 前缀字符串；
+- 客户端未请求 `return_tokens_as_token_ids=True` → 恢复响应中默认不得出现任何 `token_id:` 前缀字符串；
   token 文本经 `TokenTextResolver`（§2.15）以 `decode([id])` 还原，resolver 优先、`bytes` 兜底（仅当解码出真实
-  文本且不含 `token_id:` 前缀）、无法还原处置 null 而非 `token_id:` 字符串(vllm默认关闭)。
+  文本且不含 `token_id:` 前缀）、无法还原时按 §4.7 例外分流（触发降级 → `token_id:NNN`，未触发 → null）。
 - 适用于 chat 与 completions，流式与非流式。
 
 **验收**
@@ -57,12 +57,14 @@
 - chat 客户端设置`logprobs=true`、`top_logprobs=3` → 截断 `top_logprobs`，取前 3 项数据，
   每项 `token` 为解码文本（非 `token_id:`）。
 - chat 客户端设置`logprobs=true`、`top_logprobs=3`、真实 vLLM 响应（top bytes 为 `token_id:` 形态）
-  且 resolver 可用 → 每项 `token` 为 resolver 还原的真实文本，全文无 `token_id:`；resolver 不可用时该
-  top_logprobs 项置 null（破损 bytes 守卫，绝不泄漏）。
+  且 resolver 可用 → 每项 `token` 为 resolver 还原的真实文本，全文无 `token_id:`；resolver 不可用且
+  触发降级例外（客户端请求了 topk + 未设 return_tokens_as_token_ids）→ 每项 `token` 回退 `token_id:NNN`（保证 topk logprob
+  数据不丢失），主 token 仍优先 bytes 真实文本（三层兜底）。
 - chat 客户端设置`logprobs=true`、`top_logprobs=3`和`return_tokens_as_token_ids=True` →  截断 `top_logprobs`，取前 3 项数据，且每项原样保留 `token_id:`。
 - completions 客户端未请求 采集 logprobs 和 token_id → 恢复后 `choice.logprobs=null`，全文无 `token_id:`。
-- completions 客户端设置`logprobs=3` → 截断 `top_logprobs`，取前 3 项数据，
-  每项 `token` 为解码文本（非 `token_id:`）；resolver 不可用 → `tokens[]` 项为 null、`top_logprobs[]` 为 null。
+- completions 客户端设置`logprobs=3` → 截断 `top_logprobs`，取前 3 项数据,
+  每项 `token` 为解码文本（非 `token_id:`）；resolver 不可用且触发降级例外 → `tokens[]` 项与
+  `top_logprobs[]` 键回退 `token_id:NNN`（保证 topk logprob 数据不丢失）；未触发例外时 `tokens[]` 项为 null、`top_logprobs[]` 为 null。
 - completions 客户端设置`logprobs=3`、`return_tokens_as_token_ids=True` →  截断 `top_logprobs`，取前 3 项数据，且每项原样保留 `token_id:`。
 - chat 和 completions 客户端设置`logprobs=10`，而推理服务环境变量设置top-logprobs 数 N=4  → body 内 top-logprobs 的数量取二者最大值 10，推理请求输出的每个 token 有 10 项数据，送至检测截断前 4 项数据，返回给客户端 10 项数据。
 - chat 和 completions 请求下，客户端请求设置 `n=4` → 循环处理 4 份候选结果，客户端输出格式按上述方法验收 
@@ -117,15 +119,15 @@ token-id 序列，提交检测后端；
 - 两个被选中请求同时完成 → 其检测调用串行（一者等另一者），而非同实例并发。
 - 单请求多候选输出 → 整合多候选输出数据，一起送入检测算法。
 
-### 2.8 检测采样
+### 2.8 异常监控概率
 
-支持可配置采样率 ∈[0.0,1.0]。请求以等于采样率的概率被选中，未选中请求直接透传，不对用户请求做处理。1.0 表示全检测，0.0 表示不检测。
+支持可配置的异常监控概率 ∈[0.0,1.0]（`VLLM_ANOMALY_MONITOR_RATE`）。请求以等于该值的概率被选中做异常监控，未选中请求直接透传，不对用户请求做处理。1.0 表示全监控，0.0 表示不监控。
 默认 1.0。
 
 **验收**
-- 采样率 0.0 → 不提交检测，请求直接透传。
-- 采样率 1.0 → 每请求都提交检测。
-- 采样率 0.3  → 请求有 0.3 的概率会被修改请求内容，注入采集参数。有 0.7 的概率直接透传。
+- 监控概率 0.0 → 请求直接透传。
+- 监控概率 1.0 → 所有请求都做异常监控。
+- 监控概率 0.3  → 请求有 0.3 的概率会被修改请求内容，注入采集参数。有 0.7 的概率直接透传。
 
 ### 2.9 请求关联标识
 
@@ -150,26 +152,24 @@ token-id 序列，提交检测后端；
 ### 2.11 环境变量配置
 
 全部运行时配置从环境变量读取，如果没有配置，使用默认值。因构造除 app 外无参数。可选配：
-总开关；检测采样率；top-logprobs 数；指标路径；检测 worker 数；检测器 config
-路径显式覆盖；显式 tokenizer 加载源（§2.15）。
+总开关；异常监控概率；top-logprobs 数；指标端点路径；显式 tokenizer 加载源（§2.15）。
 
 **验收**
 - 总开关设置为 False → 不注入不检测（纯透传），但指标端点仍可达报零值计数。
-- `VLLM_ANOMALY_TOKENIZER_MODEL=<vllm serve --model 实际值>` → 优先用其加载 tokenizer，
+- `VLLM_ANOMALY_TOKENIZER_MODEL=<vllm serve --model 实际值或 --tokenizer 值>` → 优先用其加载 tokenizer，
   覆盖 served 名为裸 basename / 本地目录部署。
+- 未设 `VLLM_ANOMALY_TOKENIZER_MODEL` → 自动从同进程 `sys.argv` 解析 `vllm serve` 命令行
+  （`--tokenizer` → `--model` 位置参数），无需用户额外配置。
 
 
-### 2.12 检测器配置路径解析
+### 2.12 检测器配置路径
 
-解析检测后端算法默认参数文件（`detector.yaml`）。
-顺序：优先显式 env 覆盖（`VLLM_ANOMALY_DETECTOR_CONFIG_PATH`，文件须存在）；
-其次包内 vendored 固定路径（`defaults/detector.yaml`，默认/主）；
-都无 → 将详细信息写入日志，降级为透传方式。
+检测后端算法默认参数文件路径固定为 `configs/detector.yaml`（项目根目录），不可通过 env 覆盖。
+文件不存在 → 将详细信息写入日志，降级为透传方式。
 
 **验收**
-- 显式 env 指定且文件存在 → 使用该路径。
-- 未设 env → 使用 vendored 固定路径。
-- 都无（vendored 缺失）→ 记日志，降级为透传方式。
+- `configs/detector.yaml` 存在 → 使用该路径。
+- `configs/detector.yaml` 缺失 → 记日志，降级为透传方式。
 
 ### 2.13 优雅降级——检测功能不可用
 
@@ -187,7 +187,7 @@ token-id 序列，提交检测后端；
 vLLM 插件接口——仅需 vLLM 支持 `--middleware`。
 
 **验收**
-- `--middleware vllm_anomaly_middleware.AnomalyMiddleware` → 中间件以
+- `--middleware anomaly_middleware.AnomalyMiddleware` → 中间件以
   `AnomalyMiddleware(app)` 实例化，进程生命期内拦截目标请求。
 
 ### 2.15 token 文本还原（TokenTextResolver）
@@ -200,19 +200,27 @@ strip 路径，检测侧抽取继续用 token_id 整数、不动）。`vllm serv
 不可用返回 `None`（调用方置 null）。
 
 **tokenizer 获取顺序**（懒加载，首注入请求触发）：
-1. 显式 env `VLLM_ANOMALY_TOKENIZER_MODEL`（最高优先，设为 `vllm serve --model` 实际值）→
-   `from_pretrained(explicit, local_files_only=True)`。未设则跳过。
-2. `from_pretrained(model_hint, local_files_only=True)`：`model_hint` = 请求体 `model` 字段，零外网。
-3. loopback `GET /v1/models` 取 vLLM 实际 serve 的 id → `from_pretrained(served, local_files_only=True)`。
-4. HF 缓存扫描：served/model 名为裸 basename 而 HF 缓存键为完整 repo id 时，
+1. 显式 env `VLLM_ANOMALY_TOKENIZER_MODEL`（最高优先，设为 `vllm serve --model` 实际值或
+   `--tokenizer` 的值）→ `from_pretrained(explicit, local_files_only=True)`。未设则跳过。
+2. `--tokenizer` 从 `sys.argv` 解析（`parse_vllm_argv()`）：vLLM 启动命令中的 `--tokenizer <path>`
+   即 vLLM 实际使用的 tokenizer 路径。非 `serve` 命令返回 None。
+3. `--model` 位置参数从 `sys.argv` 解析：无 `--tokenizer` 时，`vllm serve <model>` 的
+   `<model>` 即 tokenizer 路径。
+4. `from_pretrained(model_hint, local_files_only=True)`：`model_hint` = 请求体 `model` 字段，零外网。
+5. loopback `GET /v1/models` 取 vLLM 实际 serve 的 root 路径与 served id →
+   `from_pretrained(root或served, local_files_only=True)`。
+6. HF 缓存扫描：served/model 名为裸 basename 而 HF 缓存键为完整 repo id 时，
    `huggingface_hub.scan_cache_dir()` 补全完整 repo id（短优先）后重试 `from_pretrained`。
-5. 均失败 → resolver 不可用终态，后续 `resolve` 恒返回 `None`，不再重试。
+7. 均失败 → 记一次 ERROR（提示设置 `VLLM_ANOMALY_TOKENIZER_MODEL`），resolver 不可用终态，后续 `resolve` 恒返回 `None`。
 
-**恢复统一规则**（`_token_text(token_id, bytes, resolver)`）：resolver 优先 `decode([id])`；
-resolver 缺失/未解析 → 退回 `bytes`（仅当解码出真实文本且不含 `token_id:` 前缀）；都无 → null。
-completions 无 `bytes`，resolver 不可用时恒落 null。
+**恢复统一规则**（`_token_text(token_id, bytes, resolver, *, fallback_to_id=False)`）：resolver 优先
+`decode([id])`；resolver 缺失/未解析 → 退回 `bytes`（仅当解码出真实文本且不含 `token_id:` 前缀）；都无 →
+`fallback_to_id=True` 时回退 `token_id:NNN`（§4.7 降级例外），否则 null。completions 无 `bytes`，
+resolver 不可用时按触发条件命中与否分流：触发 → `token_id:NNN`，未触发 → null。
 
-**降级**：resolver 不可用为软降级——仍注入、仍 strip，仅 token 文本回退 null/bytes，**绝不泄漏 `token_id:`**，
+**降级**：resolver 不可用为软降级——仍注入、仍 strip，仅 token 文本回退规则按 §4.7 例外分流：
+触发降级例外（客户端请求 topk + 未设 return_tokens_as_token_ids）时回退 `token_id:NNN`（保证 topk logprob 数据不丢失，
+chat 主 token 仍优先 bytes 兜底真实文本——三层兜底），未触发时回退 null/bytes，**绝不泄漏 `token_id:`**，
 不影响客户端、不影响检测（检测用 token_id 整数）。
 
 **验收**
@@ -221,8 +229,11 @@ completions 无 `bytes`，resolver 不可用时恒落 null。
 - completions 客户端设 `logprobs=3`、未设 `return_tokens_as_token_ids` 且 resolver 可用 → `tokens[]`
   为真实文本、`top_logprobs[]` 为 `{文本:logprob}`（截断到 3），全文无 `token_id:`。
 - 流式上述两路径逐块还原文本、不缓冲整流、`[DONE]` 透传、检测用 token_id 整数。
-- resolver 不可用（加载失败）→ chat 主 token 仍为文本（bytes）、其余 null、completions null、
-  全文无 `token_id:`、检测正常。
+- resolver 不可用（加载失败）+ 客户端请求了 topk + 未设 return_tokens_as_token_ids → 触发 §4.7 降级例外：
+  chat 主 token 仍为文本（bytes 兜底，三层第二层；bytes 破碎时落 `token_id:NNN`，三层第三层）、
+  chat top_logprobs token 回退 `token_id:NNN`、completions `tokens[]`/`top_logprobs[]` 回退 `token_id:NNN`
+  （保证 topk logprob 数据不丢失）；未触发例外（客户端未请求 topk）→ 维持 null/bytes、全文无 `token_id:`；
+  检测正常。
 - 客户端设 `return_tokens_as_token_ids=True` → 原样保留 `token_id:NNN`（不变）。
 - 多候选 `n>1` → 每 choice 同上。
 
@@ -259,7 +270,7 @@ completions 无 `bytes`，resolver 不可用时恒落 null。
 
 ## 4. 行为约束与不变量
 
-1. **透明无条件**： `enabled=True` 和采样共同作用，决定请求是否注入、响应恢复和检测。
+1. **透明无条件**： `enabled=True` 和异常监控概率共同作用，决定请求是否注入、响应恢复和检测。
 2. **降级即透传**：`enabled=False`（master 开关 off 或检测器不可构造）→ 不读 body、
    不注入、不拦截；指标端点独立可达。
 3. **top_logprobs 跨请求恒定**：默认 20，可配 1-20，但运行期不可变。
@@ -268,10 +279,11 @@ completions 无 `bytes`，resolver 不可用时恒落 null。
    不传入检测算法。token 类别映射在运行时从 tokenizer 生成并注入检测器（见 design §3.11）。
 5. **检测串行**：多请求检测调用不并发，单请求多候选输出物理上并发，检测内部串行。
 6. **检测不阻塞客户端**：检测在响应全发后调度，fire-and-forget，异常全捕获。
-7. **绝不泄漏 `token_id:`**：若用户请求未设置`return_tokens_as_token_ids=True`,恢复后响应不得含
-   `token_id:` 前缀；token 文本经 `TokenTextResolver`（§2.15）`decode([id])` 还原，`bytes` 解码出
-   `token_id:` 形态视为破损 → 置 null 或走 resolver，**绝不直接回写**；无文本处置 null。
-   resolver 不可用为软降级，不影响检测、不影响客户端响应完整性，仅个别 token 文本缺失为 null。
+7. **`token_id:` 限制**：未设 `return_tokens_as_token_ids=True` 时，恢复后响应默认不得含 `token_id:` 前缀；
+   文本经 `TokenTextResolver`（§2.15）还原，resolver 优先、`bytes` 兜底、缺失置 null，**绝不直接回写**。
+   **例外**：客户端请求了 topk（chat `logprobs=True && top_logprobs>0`；completions `logprobs>0`）**且**
+   resolver 不可用时，受影响字段回退 `token_id:NNN` 输出（保留 topk logprob 数据），chat 主 token 仍
+   优先 bytes 兜底（三层：resolver→bytes→`token_id:NNN`）。该降级不影响检测与客户端响应完整性。
 8. **流式不缓冲**：纯 ASGI，SSE 增量转发，不缓冲整流，保持流式响应原始机制。
 9. **指标隔离**：独立 CollectorRegistry，不与下游 `/metrics` 混用。
 
@@ -280,11 +292,13 @@ completions 无 `bytes`，resolver 不可用时恒落 null。
 - 非目标路径/方法透传不改 body。
 - 注入改 body 与请求 `Content-Length`；恢复按原始参数 null/截断/文本还原。
 - chat 和 completions 无 `token_id:` 泄漏，未请求 return_tokens_as_token_ids 时 经
-  `TokenTextResolver`（§2.15）将 token_id 转为 token 文本；resolver 不可用时 token 文本回退
+  `TokenTextResolver`（§2.15）将 token_id 转为 token 文本；resolver 不可用时按 §4.7 例外分流：
+  触发例外（客户端请求 topk）→ 回退 `token_id:NNN` 保留 topk logprob 数据；未触发 → 回退
   null/bytes（带 `token_id:` 泄漏守卫），全文仍无 `token_id:`、检测正常。
-- resolver 软降级不影响检测、不影响客户端响应完整性，仅个别 token 文本缺失为 null。
+- resolver 软降级不影响检测、不影响客户端响应完整性；触发例外时个别 token 文本以 `token_id:NNN`
+  保留数据，未触发时为 null。
 - 流式增量转发 + 跨块事件重组 + `[DONE]`/keep-alive 透传 + logprobs 和 token_id 缓存+ 流式推理结束后调用检测。
-- 采样 0.0 不检测/1.0 全检测。
+- 异常监控概率 0.0 不检测/1.0 全检测。
 - `x-anomaly-request-id` 头存在且唯一。
 - 内联 metrics 200 + 正确 content-type + Prometheus 文本；下游无路由也作答，不报错，详细记录至日志。
 - 降级：检测器不可构造 → 永久透传 + 指标报零 + 不改客户端响应 + 日志事件记录。

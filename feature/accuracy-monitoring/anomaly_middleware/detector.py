@@ -70,7 +70,7 @@ class ILLDetector:
 
     def __init__(
         self,
-        config_path: str = "./defaults/detector.yaml",
+        config_path: str = "./configs/detector.yaml",
     ) -> None:
         # 加载配置文件
         config_data = load_yaml(config_path)

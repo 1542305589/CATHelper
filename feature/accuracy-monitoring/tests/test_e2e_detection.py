@@ -1,6 +1,7 @@
 """e2e: 真实检测 — 正常/NaN/n>1 多候选不覆盖（spec §2.5 §2.7）。"""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -130,3 +131,18 @@ async def test_detection_empty_response_skipped(client_factory):
     await drain(mw)
     text = mw.metrics.render_metrics().decode()
     assert "vllm_anomaly_requests_total 0" in text  # 空响应不检测
+
+
+async def test_concurrent_requests_all_detected(client_factory):
+    """并发 5 请求（spec §2.7：检测串行、任务不丢）-> 全部计数、零错误。"""
+    client, fake, mw = client_factory(_normal_fn())
+    await asyncio.gather(*[
+        client.post("/v1/chat/completions",
+                    json={"model": "glm-4-7", "messages": [], "n": 2})
+        for _ in range(5)
+    ])
+    await drain(mw)
+    text = mw.metrics.render_metrics().decode()
+    assert "vllm_anomaly_requests_total 5" in text  # 5 请求全部检测
+    assert "vllm_anomaly_detection_errors_total 0" in text
+    assert mw._pending_tasks == set()

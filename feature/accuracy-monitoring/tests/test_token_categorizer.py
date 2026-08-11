@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from vllm_anomaly_middleware.token_categorizer import (
+from anomaly_middleware.token_categorizer import (
     generate_tk2cat,
     _get_decode_fn,
     _safe_decode,
