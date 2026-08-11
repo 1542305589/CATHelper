@@ -26,7 +26,6 @@
 - **Prometheus 指标**：独立 registry + 按 `ill_type`/`model`/`choice_index` 上报 + 四 gauge
 - **优雅降级**：配置非法/检测器不可用/路径缺失 → 永久透传 + 指标报零 + 日志事件
 - **tokenizer 获取链**：env → argv(--tokenizer/--model) → model_hint → /v1/models → HF 缓存扫描
-- **真实部署**：`vllm serve Qwen3-0.6B --middleware anomaly_middleware.AnomalyMiddleware` 全流程验证
 
 ### 1.2 测试结果汇总
 
@@ -49,16 +48,13 @@
 | 项目 | 配置 |
 |------|------|
 | 操作系统 | Linux (aarch64) |
-| NPU | Huawei Atlas 910B4 × 2（npu-smi 25.5.0.b060，device 2/5 可用） |
+| NPU | Huawei Atlas 910B4 × 2（device 2 & 5） |
 | Python | 3.11.15 |
-| vLLM | 0.20.2（源码 editable：`/vllm-workspace/vllm`）+ vLLM-Ascend 0.20.2rc1 |
-| torch / torch_npu | 2.10.0+cpu / 2.10.0 |
+| vLLM / vLLM-Ascend  | 0.20.2 |
+| torch / torch_npu | 2.10.0 |
 | transformers | 5.5.3 |
 | numpy / PyYAML / prometheus_client / httpx / pytest | 1.26.4 / 6.0.3 / 0.25.0 / 0.28.1 / 9.1.1 |
-| 测试模型 | Qwen3-0.6B（`/home/gyl/models/Qwen3-0.6B`，vocab_size=151643，max_model_len=40960） |
-| 服务端口 | 8008（`run_server.sh`：`--middleware anomaly_middleware.AnomalyMiddleware`） |
-| 服务启动 | `bash /vllm-workspace/vllm/run_server.sh`（ASCEND_RT_VISIBLE_DEVICES=0, tp=1） |
-| root 权限 | 是 |
+| 测试模型 | Qwen3-0.6B|
 
 ---
 
