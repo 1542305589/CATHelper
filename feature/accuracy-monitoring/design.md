@@ -58,6 +58,7 @@ project_root/
     ├── __init__.py            # 重导出 AnomalyMiddleware / ResponseInterceptor / RequestContext
     ├── middleware.py          # 统一中间件类 + RequestContext + ResponseInterceptor + 预热
     ├── env.py                 # 处理环境变量
+    ├── logging.py             # 日志格式
     ├── metrics.py             # 独立 CollectorRegistry + 指标记录/渲染
     ├── extractor.py           # 抽取/恢复（流式与非流式）+ SSEStreamProcessor
     ├── token_resolver.py      # TokenTextResolver + tokenizer 获取（argv/env/HTTP/缓存自动发现）+ parse_vllm_argv
