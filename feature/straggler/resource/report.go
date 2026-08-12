@@ -29,6 +29,24 @@ func RunDetection(csvPath string, cfg DetectionConfig) (*DetectionResult, error)
 	return runDetection(rawData, csvPath, cfg)
 }
 
+// RunDetectionFromDir runs the KPI detection pipeline on a directory of
+// per-node CSV files plus a fixed node_config.json (see ParseKPIDir). `dir`
+// labels the input in the report summary.
+func RunDetectionFromDir(dir string, cfg DetectionConfig) (*DetectionResult, error) {
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection starting: %s\n", dir)
+
+	// 1. Parse the directory (multi-node CSVs + node_config.json).
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/9: Parsing KPI directory...\n")
+	ts, err := ParseKPIDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("parse KPI dir: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Parsed %d rows, %d cards across %d nodes\n",
+		len(ts.Rows), len(ts.CardIDs), uniqueNodes(ts.NodeOf))
+
+	return runDetection(ts, dir, cfg)
+}
+
 // RunDetectionFromData runs the KPI detection pipeline on a pre-parsed
 // TimeSeriesData (e.g. produced by ReadKPIFiles from CATMonitor's
 // straggler_output JSONL). `source` labels the input in the report summary.
@@ -76,9 +94,9 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 	baselines := BuildBaselines(baselineRows, rawData.CardIDs)
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Built baselines for %d cards\n", len(baselines))
 
-	// 5. Space detection (peer comparison within each node).
+	// 5. Space detection (peer comparison within each node, last point only).
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 5/9: Space (peer) detection...\n")
-	spaceResult := detectSpaceAnomalies(detectionRows, baselines, rawData.CardIDs, cfg, rawData.NodeOf)
+	spaceResult := detectSpaceAnomalies(detectionRows, rawData.CardIDs, cfg, rawData.NodeOf)
 	spaceDetails := aggregateSpaceScores(spaceResult, rawData.CardIDs, cfg)
 
 	// 6. Time detection.
@@ -307,6 +325,15 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 
 // currentLabel / baselineLabel return the method-aware field label for the
 // text report (median/MAD metrics vs mean/std metrics).
+// uniqueNodes counts the distinct node names in a nodeOf mapping.
+func uniqueNodes(nodeOf map[int]string) int {
+	seen := make(map[string]bool)
+	for _, n := range nodeOf {
+		seen[n] = true
+	}
+	return len(seen)
+}
+
 func currentLabel(m DetectionMethod) string {
 	if m == MethodMAD {
 		return "current_median"

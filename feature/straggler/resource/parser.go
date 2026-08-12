@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -147,6 +148,192 @@ func ParseCSV(filePath string) (*TimeSeriesData, error) {
 		NodeOf:  idx.nodeMap(),
 		LocalID: idx.localMap(),
 	}, nil
+}
+
+// =============================================================================
+// KPI Directory Parsing (multiple per-node CSV files + node_config.json)
+// =============================================================================
+
+// NodeCSVConfig maps one CSV file in a KPI directory to a physical node and the
+// per-node cards (0-based) that are used.
+type NodeCSVConfig struct {
+	Node  string `json:"node"`
+	Cards []int  `json:"cards"`
+}
+
+// ParseKPIDir reads a KPI directory: multiple per-node CSV files plus a fixed
+// node_config.json describing, for each CSV file, the node it belongs to and
+// the cards used. Returns a merged TimeSeriesData with node-aware global card
+// IDs (via cardIndexer). Basic validation: every CSV has a config entry, every
+// config CSV exists, and configured cards have data (warn otherwise).
+func ParseKPIDir(dir string) (*TimeSeriesData, error) {
+	cfgBytes, err := os.ReadFile(filepath.Join(dir, "node_config.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read node_config.json in %s: %w", dir, err)
+	}
+	var nodeConfig map[string]NodeCSVConfig
+	if err := json.Unmarshal(cfgBytes, &nodeConfig); err != nil {
+		return nil, fmt.Errorf("parse node_config.json: %w", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	var csvFiles []string
+	csvSet := make(map[string]bool)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".csv") {
+			continue
+		}
+		csvFiles = append(csvFiles, filepath.Join(dir, e.Name()))
+		csvSet[e.Name()] = true
+	}
+	if len(csvFiles) == 0 {
+		return nil, fmt.Errorf("no CSV files in %s", dir)
+	}
+
+	// Basic validation: every CSV has a config entry; every config CSV exists.
+	for _, f := range csvFiles {
+		if _, ok := nodeConfig[filepath.Base(f)]; !ok {
+			return nil, fmt.Errorf("node_config.json missing entry for %s", filepath.Base(f))
+		}
+	}
+	for name := range nodeConfig {
+		if !csvSet[name] {
+			return nil, fmt.Errorf("node_config.json references missing CSV %s", name)
+		}
+	}
+
+	idx := newCardIndexer()
+	var rows []CSVRow
+	for _, f := range csvFiles {
+		cfg := nodeConfig[filepath.Base(f)]
+		fileRows, err := parseCSVWithNode(f, cfg.Node, cfg.Cards, idx)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, fileRows...)
+	}
+
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Timestamp < rows[j].Timestamp })
+
+	return &TimeSeriesData{
+		Rows:    rows,
+		RawRows: rows,
+		CardIDs: idx.sortedGlobalIDs(),
+		NodeOf:  idx.nodeMap(),
+		LocalID: idx.localMap(),
+	}, nil
+}
+
+// parseCSVWithNode parses one per-node CSV: flat cells only, cards filtered to
+// the node's configured set, and each card mapped to a global ID under the node
+// name. Configured cards with no data are reported as warnings.
+func parseCSVWithNode(csvPath, node string, cards []int, idx *cardIndexer) ([]CSVRow, error) {
+	allowed := make(map[int]bool, len(cards))
+	for _, c := range cards {
+		allowed[c] = true
+	}
+
+	f, err := os.Open(csvPath)
+	if err != nil {
+		return nil, fmt.Errorf("open CSV %s: %w", csvPath, err)
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("read CSV %s: %w", csvPath, err)
+	}
+	if len(records) < 2 {
+		return nil, fmt.Errorf("CSV %s has no data rows", csvPath)
+	}
+
+	colIdx, err := buildColumnIndex(records[0])
+	if err != nil {
+		return nil, fmt.Errorf("CSV %s: %w", csvPath, err)
+	}
+
+	var rows []CSVRow
+	for i := 1; i < len(records); i++ {
+		rec := records[i]
+		if colIdx.timestamp >= len(rec) || rec[colIdx.timestamp] == "" {
+			continue
+		}
+		ts, perr := strconv.ParseInt(strings.TrimSpace(rec[colIdx.timestamp]), 10, 64)
+		if perr != nil {
+			continue
+		}
+		row := CSVRow{Timestamp: ts}
+		row.Power = parseFlatMetricWithNode(rec, colIdx.power, "NPU_CARD_POWER", idx, node, allowed)
+		row.Temp = parseFlatMetricWithNode(rec, colIdx.temp, "NPU_CARD_TEMP", idx, node, allowed)
+		row.AICoreFreq = parseFlatMetricWithNode(rec, colIdx.aicoreFreq, "NPU_CARD_AICORE_FREQ", idx, node, allowed)
+		row.AICoreUtil = parseFlatMetricWithNode(rec, colIdx.aicoreUtil, "NPU_CARD_AICORE_UTIL", idx, node, allowed)
+		row.HBMBandwidthUtil = parseFlatMetricWithNode(rec, colIdx.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL", idx, node, allowed)
+		row.HBMUtil = parseFlatMetricWithNode(rec, colIdx.hbmUtil, "NPU_CARD_HBM_UTIL", idx, node, allowed)
+		row.TXBandwidth = parseFlatMetricWithNode(rec, colIdx.txBandwidth, "NPU_TX_BANDWIDTH", idx, node, allowed)
+		row.RXPfcPkt = parseFlatMetricWithNode(rec, colIdx.rxPfcPkt, "NPU_RX_PFC_PKT", idx, node, allowed)
+		row.RocETxErrPkt = parseFlatMetricWithNode(rec, colIdx.roceTxErrPkt, "NPU_ROCE_TX_ERR_PKT", idx, node, allowed)
+		row.RocEOutOfOrder = parseFlatMetricWithNode(rec, colIdx.roceOutOfOrder, "NPU_ROCE_OUT_OF_ORDER", idx, node, allowed)
+		row.RocENewPktRty = parseFlatMetricWithNode(rec, colIdx.roceNewPktRty, "NPU_ROCE_NEW_PKT_RTY", idx, node, allowed)
+		row.NICRxAllPkg = parseFlatMetricWithNode(rec, colIdx.nicRxAllPkg, "NPU_NIC_RX_ALL_PKG", idx, node, allowed)
+		row.CPUAvg = parseCPUJSON(rec, colIdx.cpuAvg)
+		rows = append(rows, row)
+	}
+
+	// Warn for configured cards with no data anywhere in this CSV.
+	seenLocal := make(map[int]bool)
+	for _, row := range rows {
+		for _, dict := range []map[int]float64{row.Power, row.Temp, row.AICoreFreq, row.AICoreUtil,
+			row.HBMBandwidthUtil, row.HBMUtil, row.TXBandwidth, row.RXPfcPkt,
+			row.RocETxErrPkt, row.RocEOutOfOrder, row.RocENewPktRty, row.NICRxAllPkg} {
+			for g := range dict {
+				seenLocal[idx.localMap()[g]] = true
+			}
+		}
+	}
+	for _, c := range cards {
+		if !seenLocal[c] {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] %s: card %d in node_config has no data\n",
+				filepath.Base(csvPath), c)
+		}
+	}
+
+	return rows, nil
+}
+
+// parseFlatMetricWithNode parses a flat {cardID: value} metric cell, keeping
+// only cards in `allowed` and mapping them to global IDs under `node`.
+func parseFlatMetricWithNode(rec []string, idx int, name string, ci *cardIndexer, node string, allowed map[int]bool) map[int]float64 {
+	if idx < 0 || idx >= len(rec) || rec[idx] == "" {
+		return nil
+	}
+	raw := strings.ReplaceAll(rec[idx], `""`, `"`)
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &top); err != nil {
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] cannot parse %s JSON: %v (raw: %.80s...)\n", name, err, raw)
+		return nil
+	}
+	result := make(map[int]float64)
+	for k, rawVal := range top {
+		v, ok := parseJSONNumber(rawVal)
+		if !ok {
+			continue
+		}
+		c, aerr := strconv.Atoi(k)
+		if aerr != nil {
+			continue
+		}
+		if !allowed[c] {
+			continue
+		}
+		result[ci.globalID(node, c)] = v
+	}
+	return result
 }
 
 // =============================================================================

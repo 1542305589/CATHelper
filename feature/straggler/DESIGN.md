@@ -103,7 +103,7 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
      ✓ → 指标 = ZP_Kernel，方向 = "max"
      ✗ → 指标 = ZP_Duration，方向 = "min"
   2. 收集非零值，要求 >= minRanksInGroup(2)
-  3. 均质化聚类 → AddSingle("cal", rank, degradation)
+  3. kmeans 比例检测 → AddSingle("cal", rank, degradation)
 ```
 
 #### 慢通信（detectionAllCommunicationParallel → HomogenizationForSlowCommunication）
@@ -113,7 +113,7 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
   1. 每个子组内部排序，组间字典序排序
   2. 每组取 {domain}_Duration 最小的卡为代表
   3. detectionCards 按 ppStageNum 均分桶
-  4. 每桶内对代表卡做均质化聚类（方向 "max"）
+  4. 每桶内对代表卡做 kmeans 比例检测（方向 "max"）
   5. 异常代表卡通过 rank2Group 映射回完整组
   → AddGroup("comm", fullGroup, degradation)
 ```
@@ -129,7 +129,7 @@ PP=1 时所有代表卡在同一桶，算法天然降级为普通聚类。
      ≤ 2 个 → 普通均值
    用均值覆盖节点内所有卡的值
    无 hostUid 的卡保持原始值不变
-3. 均质化聚类（方向 "max"）→ AddSingle("cpu", rank, degradation)
+3. kmeans 比例检测（方向 "max"）→ AddSingle("cpu", rank, degradation)
 ```
 
 注：旧版本硬编码每 4 个连续 rank 为一台机器，现已改为从 profiler 数据库 `HOST_INFO` 表读取实际 `hostUid` 进行分组。若 `HOST_INFO` 表不存在则对应卡跳过预处理。
@@ -142,25 +142,31 @@ for npuID, value := range ZP_Bubble:
 ```
 注：使用硬编码 `< 5000`，非 config 中的 `zpBubbleAbnormalBoundary = 50000`。
 
-### spacedetector
+### clustering（共享 kmeans 比例检测）
 ```go
 func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
     degradationPercent float64, abnormalType string) ([]int, []float64)
 ```
+`profiling/detector/clustering.go` 只是包装：把参数透传给共享包
+`feature/straggler/clustering` 的 `Detect(values, threshold, abnormalType != "min")`，
+再把 `Result.Index` 映射回 `fileRanks`、`Result.Ratio` 作为退化值。
 
-**核心流程**（与 KPI 资源检测 MethodCluster 同构，用比值作显著性）：
+**核心流程**（与 KPI 资源检测的空间 cluster 共享同一算法）：
 ```
-1. 全分解：递归在最大间隙处切分，两侧都继续，直到子块无主导间隙
-   （maxGap*2 < span）→ 完整簇划分
-2. 基线簇 = 成员最多的簇；成员数并列按方向取极值簇
-   （"max"→低均值簇，"min"→高均值簇）；基线均值 = 多数簇均值
-3. 基线簇成员豁免；对每个非基线簇成员单侧判定：
-   "max": 该卡值 / 基线均值 >= threshold
-   "min": 基线均值 / 该卡值 >= threshold
-degradation = 对应比值
+1. 过滤值 <= 0；不足 2 个 → 无异常退出
+2. Z-score 标准化（std≈0 → 强制 1）
+3. 肘部法选 k（K=2..min(n,10)，取 inertia 二阶差分最大）
+4. kmeans++ 初始化（首个质心 = data[0]，后续 D² 加权采样）
+5. Lloyd 迭代（≤300 轮，空簇处理，收敛 1e-9）
+6. 基线簇 = 方向极值簇（"max"→最小均值簇，"min"→最大均值簇）
+7. 簇均值比 > threshold → 异常簇
+   "max": 簇均值 / 基线均值 > threshold
+   "min": 基线均值 / 簇均值 > threshold
+8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
+9. 返回最深异常簇；degradation = 对应簇比例
 ```
 
-时间复杂度 O(n log n)（排序主导），空间复杂度 O(n)。
+时间复杂度：kmeans O(n·k·iter)（n ≤ 64，k ≤ 10，iter ≤ 300），递归深度 ≤ 10；空间复杂度 O(n)。
 
 ### utils
 ```go

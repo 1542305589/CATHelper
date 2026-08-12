@@ -430,10 +430,10 @@ type DetectionConfig struct {
 	DetectionHours float64 // detection window in hours, default 1
 
 	// Space dimension
-	SpaceMethod     DetectionMethod
-	SpaceZThreshold float64 // default 2.5
-	SpaceIQRMult    float64 // default 1.5
-	SpaceClusterK   float64 // cluster-method significance threshold, default 3.0
+	SpaceMethod          DetectionMethod
+	SpaceZThreshold      float64 // default 2.5
+	SpaceIQRMult         float64 // default 1.5
+	SpaceRatioThreshold  float64 // kmeans cluster ratio threshold (cluster mean / baseline mean), default 2.0
 
 	// Time dimension
 	TimeZThreshold float64 // default 2.0
@@ -465,10 +465,10 @@ func DefaultDetectionConfig() DetectionConfig {
 		BaselineHours:  360, // 15 days
 		DetectionHours: 1,
 
-		SpaceMethod:     MethodZScore,
-		SpaceZThreshold: 2.5,
-		SpaceIQRMult:    1.5,
-		SpaceClusterK:   3.0,
+		SpaceMethod:         MethodZScore,
+		SpaceZThreshold:     2.5,
+		SpaceIQRMult:        1.5,
+		SpaceRatioThreshold: 2.0,
 
 		TimeZThreshold: 2.0,
 
@@ -514,14 +514,7 @@ type DetectionSummary struct {
 
 // SpaceDetectionResult holds per-time-point space anomaly scores.
 type SpaceDetectionResult struct {
-	Scores     map[int]map[MetricName][]float64
-	// ClusterRef holds, for the cluster method, the per-time-point baseline
-	// (majority) cluster mean for each card's node (non-cluster → 0). Aligned
-	// with Scores; aggregated to the reported space_baseline_mean.
-	ClusterRef map[int]map[MetricName][]float64
-	// ScaleRef holds, for the cluster method, the node's noise scale
-	// (1.4826 × median of baseline.Mad) — the reported space_scale.
-	ScaleRef map[int]map[MetricName]float64
+	Scores map[int]map[MetricName][]float64
 }
 
 // TimeDetectionResult holds per-card time anomaly scores.

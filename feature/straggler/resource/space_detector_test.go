@@ -31,7 +31,7 @@ func TestSpaceFreqSingleDownclock(t *testing.T) {
 	cardIDs := freqCardIDs(8)
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 1800, 7: 1000}
 
-	res := detectSpaceAnomalies(freqRows(freqs), nil, cardIDs, cfg)
+	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	z := res.Scores[7][MetricAICoreFreq][0]
 	if z != 999 {
 		t.Fatalf("downclocked card 7 → space z = %v, want 999", z)
@@ -57,7 +57,7 @@ func TestSpaceFreqAllNormal(t *testing.T) {
 	cardIDs := freqCardIDs(4)
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800}
 
-	res := detectSpaceAnomalies(freqRows(freqs), nil, cardIDs, cfg)
+	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	for _, cid := range cardIDs {
 		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
 			t.Errorf("card %d at common clock → z = %v, want 0", cid, z)
@@ -72,7 +72,7 @@ func TestSpaceFreqTiedDownclock(t *testing.T) {
 	cardIDs := freqCardIDs(8)
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 1000, 7: 1000}
 
-	res := detectSpaceAnomalies(freqRows(freqs), nil, cardIDs, cfg)
+	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	for _, cid := range []int{6, 7} {
 		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
 			t.Errorf("tied-downclocked card %d → z = %v, want 0", cid, z)
@@ -86,7 +86,7 @@ func TestSpaceFreqAbsentCardNotFlagged(t *testing.T) {
 	cardIDs := freqCardIDs(4)
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800} // card 3 absent
 
-	res := detectSpaceAnomalies(freqRows(freqs), nil, cardIDs, cfg)
+	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	if z := res.Scores[3][MetricAICoreFreq][0]; z != 0 {
 		t.Errorf("absent card 3 → z = %v, want 0", z)
 	}
@@ -98,27 +98,15 @@ func TestSpaceFreqWithinGapTolerance(t *testing.T) {
 	cardIDs := freqCardIDs(4)
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1700}
 
-	res := detectSpaceAnomalies(freqRows(freqs), nil, cardIDs, cfg)
+	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	if z := res.Scores[3][MetricAICoreFreq][0]; z != 0 {
 		t.Errorf("card 3 within gap tolerance → z = %v, want 0", z)
 	}
 }
 
 // =============================================================================
-// detectSpaceAnomalies — MethodCluster (majority-mode) tests
+// detectSpaceAnomalies — MethodCluster (kmeans ratio) tests
 // =============================================================================
-
-// clusterBaselines builds a baselines map giving every card the same historical
-// Mad for one metric, so MethodCluster has a deterministic noise scale.
-func clusterBaselines(cardIDs []int, metric MetricName, mad float64) map[int]map[MetricName]*CardBaseline {
-	b := make(map[int]map[MetricName]*CardBaseline)
-	for _, cid := range cardIDs {
-		b[cid] = map[MetricName]*CardBaseline{
-			metric: {CardID: cid, Metric: metric, N: 100, Mad: mad},
-		}
-	}
-	return b
-}
 
 // clusterTempRows builds detection rows from per-row temp patterns (one slice
 // per row, aligned with cardIDs 0..n-1).
@@ -140,19 +128,20 @@ func clusterCardIDs(n int) []int {
 	return freqCardIDs(n)
 }
 
-// Single anomalous card (80°C vs 55°C peers) must be flagged.
-// mad=1.0 → scale = 1.4826 → z(80) = 25/1.4826 ≈ 16.9 >> k=3.
+// Single anomalous card (100°C vs 30°C peers, ratio 3.33 > 2.0) must be flagged.
 func TestSpaceClusterSingleAnomaly(t *testing.T) {
-	cfg := DefaultDetectionConfig()
+	cfg := DefaultDetectionConfig() // SpaceRatioThreshold = 2.0
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0)
 
-	rows := clusterTempRows([][]float64{{55, 55, 55, 55, 55, 55, 55, 80}})
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	rows := clusterTempRows([][]float64{{30, 30, 30, 30, 30, 30, 30, 100}})
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	if !details[7][MetricTemp].SpaceAbnormal {
 		t.Errorf("hot card 7 should be space-abnormal (score=%v)", details[7][MetricTemp].SpaceScore)
+	}
+	if got := details[7][MetricTemp].SpaceScore; got < 3.33 || got > 3.34 {
+		t.Errorf("hot card 7 space_score = %v, want ≈3.33", got)
 	}
 	for cid := 0; cid < 7; cid++ {
 		if details[cid][MetricTemp].SpaceAbnormal {
@@ -161,15 +150,14 @@ func TestSpaceClusterSingleAnomaly(t *testing.T) {
 	}
 }
 
-// Two anomalous cards (both 80°C) must BOTH be flagged — the multi-card case
+// Two anomalous cards (both 100°C) must BOTH be flagged — the multi-card case
 // that the old mean/std z-score diluted.
 func TestSpaceClusterMultiAnomaly(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0)
 
-	rows := clusterTempRows([][]float64{{55, 55, 55, 55, 55, 55, 80, 80}})
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	rows := clusterTempRows([][]float64{{30, 30, 30, 30, 30, 30, 100, 100}})
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	for _, cid := range []int{6, 7} {
@@ -184,16 +172,15 @@ func TestSpaceClusterMultiAnomaly(t *testing.T) {
 	}
 }
 
-// A spread fleet (54..60, max internal gap 1 < span/2=3) has no dominant gap →
-// one cluster → nobody flagged. The gap condition must prevent treating the
-// top of a normal spread as an anomaly.
+// A spread fleet (54..60, max ratio 60/54 ≈ 1.11 < 2.0) has no cluster whose
+// mean ratio exceeds the threshold → nobody flagged. Natural spread must not
+// be treated as an anomaly.
 func TestSpaceClusterMajorityNormalSpread(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0)
 
 	rows := clusterTempRows([][]float64{{54, 55, 55, 56, 57, 58, 59, 60}})
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	for _, cid := range cardIDs {
@@ -204,21 +191,21 @@ func TestSpaceClusterMajorityNormalSpread(t *testing.T) {
 	}
 }
 
-// When the MAJORITY itself is the anomaly (5 hot vs 3 normal), space stays
-// silent ("whoever has the majority is the norm") — the time dimension and
-// cross-card correlation own the fleet-wide signal.
+// A mild fleet-wide shift (60 vs 55, ratio 1.09 < 2.0) stays silent even when
+// the higher group is the majority — the ratio threshold, not majority
+// membership, decides.
 func TestSpaceClusterMajorityAnomaly(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0)
 
 	rows := clusterTempRows([][]float64{{60, 60, 60, 60, 60, 55, 55, 55}})
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	for _, cid := range cardIDs {
 		if details[cid][MetricTemp].SpaceAbnormal {
-			t.Errorf("card %d: space must be silent when the majority is anomalous", cid)
+			t.Errorf("card %d: mild fleet-wide shift must stay silent (score=%v)",
+				cid, details[cid][MetricTemp].SpaceScore)
 		}
 	}
 }
@@ -228,10 +215,9 @@ func TestSpaceClusterMajorityAnomaly(t *testing.T) {
 func TestSpaceClusterTieBaseline(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0)
 
-	rows := clusterTempRows([][]float64{{55, 55, 55, 55, 80, 80, 80, 80}})
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	rows := clusterTempRows([][]float64{{30, 30, 30, 30, 80, 80, 80, 80}})
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	for _, cid := range []int{4, 5, 6, 7} {
@@ -246,19 +232,18 @@ func TestSpaceClusterTieBaseline(t *testing.T) {
 	}
 }
 
-// DirLow metric (aicore_util): cards idle at 40% vs working 90% peers → the
-// low cluster is flagged (one-sided, baseline = majority working cluster).
+// DirLow metric (aicore_util): cards idle at 30% vs working 90% peers → the
+// low cluster is flagged (one-sided, baseline = direction extreme = working).
 func TestSpaceClusterDirLow(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricAICoreUtil, 2.0) // scale = 2.97
 
-	// 6 cards working at 90%, 2 cards at 40% (util dropped).
+	// 6 cards working at 90%, 2 cards at 30% (util dropped, ratio 3.0 > 2.0).
 	rows := []CSVRow{{
 		Timestamp:  1_000_000,
-		AICoreUtil: map[int]float64{0: 90, 1: 90, 2: 90, 3: 90, 4: 90, 5: 90, 6: 40, 7: 40},
+		AICoreUtil: map[int]float64{0: 90, 1: 90, 2: 90, 3: 90, 4: 90, 5: 90, 6: 30, 7: 30},
 	}}
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	for _, cid := range []int{6, 7} {
@@ -274,39 +259,36 @@ func TestSpaceClusterDirLow(t *testing.T) {
 	}
 }
 
-// mean_z aggregation = persistence × magnitude. A card deviating just above k
-// must deviate for most of the window to be space-anomalous; a brief deviation
-// stays below the threshold.
-func TestSpaceClusterMeanZPersistence(t *testing.T) {
+// Space detection judges ONLY the last aggregated minute point: an anomaly in
+// an earlier row (but a clean last row) is not flagged, and a clean earlier
+// row followed by an anomalous last row IS flagged.
+func TestSpaceClusterLastPointOnly(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0) // scale = 1.4826
 
-	// Card 7 at 60 → z = 5/1.4826 ≈ 3.37 > k=3. Present in only 1 of 3 rows.
-	rows := clusterTempRows([][]float64{
-		{55, 55, 55, 55, 55, 55, 55, 60},
-		{55, 55, 55, 55, 55, 55, 55, 55},
-		{55, 55, 55, 55, 55, 55, 55, 55},
+	// Anomaly in the first row only → last row is clean → nothing flagged.
+	rowsCleanLast := clusterTempRows([][]float64{
+		{30, 30, 30, 30, 30, 30, 30, 100},
+		{30, 30, 30, 30, 30, 30, 30, 30},
 	})
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg)
+	res := detectSpaceAnomalies(rowsCleanLast, cardIDs, cfg)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
-
 	if details[7][MetricTemp].SpaceAbnormal {
-		t.Errorf("brief deviation (1/3 rows) should NOT be space-abnormal, mean_z=%v",
-			details[7][MetricTemp].SpaceScore)
+		t.Errorf("card 7 flagged although the LAST point was normal")
 	}
 
-	// Same deviation in all 3 rows → mean_z = 3.37 > k → abnormal.
-	rowsAll := clusterTempRows([][]float64{
-		{55, 55, 55, 55, 55, 55, 55, 60},
-		{55, 55, 55, 55, 55, 55, 55, 60},
-		{55, 55, 55, 55, 55, 55, 55, 60},
+	// Clean first row, anomalous last row → flagged.
+	rowsLast := clusterTempRows([][]float64{
+		{30, 30, 30, 30, 30, 30, 30, 30},
+		{30, 30, 30, 30, 30, 30, 30, 100},
 	})
-	resAll := detectSpaceAnomalies(rowsAll, baselines, cardIDs, cfg)
-	detailsAll := aggregateSpaceScores(resAll, cardIDs, cfg)
-
-	if !detailsAll[7][MetricTemp].SpaceAbnormal {
-		t.Errorf("sustained deviation should be space-abnormal, mean_z=%v",
-			detailsAll[7][MetricTemp].SpaceScore)
+	resLast := detectSpaceAnomalies(rowsLast, cardIDs, cfg)
+	detailsLast := aggregateSpaceScores(resLast, cardIDs, cfg)
+	if !detailsLast[7][MetricTemp].SpaceAbnormal {
+		t.Errorf("card 7 should be flagged on the last point (score=%v)",
+			detailsLast[7][MetricTemp].SpaceScore)
+	}
+	if got := len(resLast.Scores[7][MetricTemp]); got != 1 {
+		t.Errorf("score array has %d elements, want exactly 1 (last point only)", got)
 	}
 }

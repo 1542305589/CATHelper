@@ -105,12 +105,12 @@ func TestParseCSVNodeNested(t *testing.T) {
 func TestSpaceClusterPerNode(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := []int{0, 1, 2, 3}
-	baselines := clusterBaselines(cardIDs, MetricTemp, 1.0) // scale = 1.4826
 	nodeOf := map[int]string{0: "node-a", 1: "node-a", 2: "node-b", 3: "node-b"}
 
-	// node-a: both 55 (normal). node-b: card 2 at 55, card 3 at 80 (hot).
-	rows := []CSVRow{{Timestamp: 1_000_000, Temp: map[int]float64{0: 55, 1: 55, 2: 55, 3: 80}}}
-	res := detectSpaceAnomalies(rows, baselines, cardIDs, cfg, nodeOf)
+	// node-a: both 30 (normal). node-b: card 2 at 30, card 3 at 80 (hot,
+	// ratio 2.67 > 2.0).
+	rows := []CSVRow{{Timestamp: 1_000_000, Temp: map[int]float64{0: 30, 1: 30, 2: 30, 3: 80}}}
+	res := detectSpaceAnomalies(rows, cardIDs, cfg, nodeOf)
 	details := aggregateSpaceScores(res, cardIDs, cfg)
 
 	if !details[3][MetricTemp].SpaceAbnormal {
@@ -168,16 +168,19 @@ func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
 	}
 	// Key order must be preserved (not alphabetized): metric first, then the
 	// method-aware fields in declaration order.
-	if got := string(b); len(got) < 1 || !strings.HasPrefix(got, `{"metric":`) {
+	got := string(b)
+	if len(got) < 1 || !strings.HasPrefix(got, `{"metric":`) {
 		t.Errorf("detail JSON should start with {\"metric\":..., got %s", got)
 	}
 	if idxMetric := strings.Index(got, `"metric"`); idxMetric < 0 || strings.Index(got, `"space_score"`) < idxMetric {
 		t.Errorf("metric must come before space_score in %s", got)
 	}
-	if idxSpace := strings.Index(got, `"space_baseline_mean"`); idxSpace < 0 {
+	idxSpace := strings.Index(got, `"space_baseline_mean"`)
+	if idxSpace < 0 {
 		t.Errorf("space_baseline_mean missing in %s", got)
 	}
-	if idxBaseline := strings.Index(got, `"time_baseline_mad"`); idxBaseline < 0 || idxBaseline > idxSpace {
+	idxBaseline := strings.Index(got, `"time_baseline_mad"`)
+	if idxBaseline < 0 || idxBaseline > idxSpace {
 		t.Errorf("time_baseline_mad must come before space_baseline_mean in %s", got)
 	}
 
@@ -247,5 +250,123 @@ func TestApplyNodeIdentityMissingDefaultsToNone(t *testing.T) {
 	)
 	if s[0].Node != noneNode {
 		t.Errorf("missing node map → node %q, want %q", s[0].Node, noneNode)
+	}
+}
+
+// =============================================================================
+// ParseKPIDir — multi-CSV directory + node_config.json
+// =============================================================================
+
+// writeFlatCSV writes a timestamp + NPU_CARD_TEMP CSV row (flat cell).
+func writeFlatCSV(t *testing.T, path string, ts, tempCell string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := csv.NewWriter(f)
+	w.Write([]string{"timestamp", "NPU_CARD_TEMP"})
+	w.Write([]string{ts, tempCell})
+	w.Flush()
+	f.Close()
+}
+
+func writeNodeConfig(t *testing.T, dir, cfg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "node_config.json"), []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseKPIDirBasic(t *testing.T) {
+	dir := t.TempDir()
+	writeFlatCSV(t, filepath.Join(dir, "node1.csv"), "1000", `{"0":55,"1":56}`)
+	writeFlatCSV(t, filepath.Join(dir, "node2.csv"), "1000", `{"0":60,"1":61}`)
+	writeNodeConfig(t, dir, `{"node1.csv": {"node": "node-1", "cards": [0,1]}, "node2.csv": {"node": "node-2", "cards": [0,1]}}`)
+
+	ts, err := ParseKPIDir(dir)
+	if err != nil {
+		t.Fatalf("ParseKPIDir: %v", err)
+	}
+	if len(ts.CardIDs) != 4 {
+		t.Fatalf("expected 4 global cards, got %v", ts.CardIDs)
+	}
+	// Distinct nodes = 2.
+	nodes := map[string]bool{}
+	for _, n := range ts.NodeOf {
+		nodes[n] = true
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %v", nodes)
+	}
+	// Per-node cards numbered from 0.
+	for _, cid := range ts.CardIDs {
+		if ts.LocalID[cid] != 0 && ts.LocalID[cid] != 1 {
+			t.Fatalf("card %d local %d, want 0 or 1", cid, ts.LocalID[cid])
+		}
+	}
+	// node-1 card 1 → temp 56; node-2 card 1 → temp 61. ParseKPIDir returns one
+	// row per CSV (the pipeline's AggregateByMinute merges same-timestamp rows),
+	// so scan every row.
+	var found56, found61 bool
+	for _, row := range ts.Rows {
+		for _, cid := range ts.CardIDs {
+			switch {
+			case ts.NodeOf[cid] == "node-1" && ts.LocalID[cid] == 1 && row.Temp[cid] == 56:
+				found56 = true
+			case ts.NodeOf[cid] == "node-2" && ts.LocalID[cid] == 1 && row.Temp[cid] == 61:
+				found61 = true
+			}
+		}
+	}
+	if !found56 || !found61 {
+		t.Errorf("node/card mapping wrong: %+v (56=%v 61=%v)", ts.NodeOf, found56, found61)
+	}
+}
+
+func TestParseKPIDirCardFilter(t *testing.T) {
+	dir := t.TempDir()
+	// CSV has cards 0-7; config uses only 0-3.
+	writeFlatCSV(t, filepath.Join(dir, "node1.csv"), "1000",
+		`{"0":55,"1":56,"2":57,"3":58,"4":59,"5":60,"6":61,"7":62}`)
+	writeNodeConfig(t, dir, `{"node1.csv": {"node": "node-1", "cards": [0,1,2,3]}}`)
+
+	ts, err := ParseKPIDir(dir)
+	if err != nil {
+		t.Fatalf("ParseKPIDir: %v", err)
+	}
+	if len(ts.CardIDs) != 4 {
+		t.Fatalf("expected 4 cards after filter, got %v", ts.CardIDs)
+	}
+	for _, row := range ts.Rows {
+		for g := range row.Temp {
+			if ts.LocalID[g] >= 4 {
+				t.Errorf("card %d should have been filtered out", ts.LocalID[g])
+			}
+		}
+	}
+}
+
+func TestParseKPIDirValidation(t *testing.T) {
+	// CSV present but no config entry → error.
+	dir := t.TempDir()
+	writeFlatCSV(t, filepath.Join(dir, "node1.csv"), "1000", `{"0":55}`)
+	writeNodeConfig(t, dir, `{}`)
+	if _, err := ParseKPIDir(dir); err == nil {
+		t.Fatal("expected error when a CSV has no config entry")
+	}
+
+	// Config references a missing CSV → error.
+	dir2 := t.TempDir()
+	writeNodeConfig(t, dir2, `{"node1.csv": {"node": "n", "cards": [0]}, "ghost.csv": {"node": "g", "cards": [0]}}`)
+	if _, err := ParseKPIDir(dir2); err == nil {
+		t.Fatal("expected error when config references a missing CSV")
+	}
+
+	// No CSV files at all → error.
+	dir3 := t.TempDir()
+	writeNodeConfig(t, dir3, `{"none.csv": {"node": "n", "cards": [0]}}`)
+	if _, err := ParseKPIDir(dir3); err == nil {
+		t.Fatal("expected error when the directory has no CSV files")
 	}
 }
