@@ -5,7 +5,7 @@ import (
 )
 
 // =============================================================================
-// detectSpaceAnomalies — MethodDirect (aicore_freq) peer-min regression tests
+// detectSpaceAnomalies — MethodCluster (aicore_freq) kmeans ratio tests
 // =============================================================================
 
 // freqRows builds one detection row with the given per-card aicore_freq.
@@ -23,22 +23,21 @@ func freqCardIDs(n int) []int {
 	return ids
 }
 
-// Single downclocked card must be flagged: 1000MHz vs peers at 1800MHz.
-// Regression: the peer min used to include the card itself, so the lowest
-// card (which IS the global min) could never satisfy "below min of others".
+// Severe single downclock must be flagged: 800MHz vs 1800MHz peers → ratio
+// 1800/800 = 2.25 > SpaceRatioThreshold (2.0). aicore_freq now uses the same
+// kmeans ratio detection as the other cluster metrics.
 func TestSpaceFreqSingleDownclock(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := freqCardIDs(8)
-	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 1800, 7: 1000}
+	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 1800, 7: 800}
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
-	z := res.Scores[7][MetricAICoreFreq][0]
-	if z != 999 {
-		t.Fatalf("downclocked card 7 → space z = %v, want 999", z)
+	if got := res.Scores[7][MetricAICoreFreq][0]; got < 2.24 || got > 2.26 {
+		t.Fatalf("downclocked card 7 → space score = %v, want ≈2.25", got)
 	}
 	for cid := 0; cid < 7; cid++ {
 		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
-			t.Errorf("normal card %d → space z = %v, want 0", cid, z)
+			t.Errorf("normal card %d → space score = %v, want 0", cid, z)
 		}
 	}
 
@@ -60,22 +59,29 @@ func TestSpaceFreqAllNormal(t *testing.T) {
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	for _, cid := range cardIDs {
 		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
-			t.Errorf("card %d at common clock → z = %v, want 0", cid, z)
+			t.Errorf("card %d at common clock → score = %v, want 0", cid, z)
 		}
 	}
 }
 
-// Two cards downclocked to the SAME value are not uniquely slower than each
-// other → neither is flagged in space. The time dimension catches this.
-func TestSpaceFreqTiedDownclock(t *testing.T) {
+// Two cards downclocked to the SAME value (800 vs 1800 peers, ratio 2.25) are
+// BOTH flagged — the multi-card case the old peer-min direct method missed.
+func TestSpaceFreqMultiDownclock(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := freqCardIDs(8)
-	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 1000, 7: 1000}
+	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 800, 7: 800}
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
+	details := aggregateSpaceScores(res, cardIDs, cfg)
 	for _, cid := range []int{6, 7} {
-		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
-			t.Errorf("tied-downclocked card %d → z = %v, want 0", cid, z)
+		if !details[cid][MetricAICoreFreq].SpaceAbnormal {
+			t.Errorf("downclocked card %d should be space-abnormal (score=%v)",
+				cid, details[cid][MetricAICoreFreq].SpaceScore)
+		}
+	}
+	for cid := 0; cid < 6; cid++ {
+		if details[cid][MetricAICoreFreq].SpaceAbnormal {
+			t.Errorf("normal card %d should not be space-abnormal", cid)
 		}
 	}
 }
@@ -88,19 +94,23 @@ func TestSpaceFreqAbsentCardNotFlagged(t *testing.T) {
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	if z := res.Scores[3][MetricAICoreFreq][0]; z != 0 {
-		t.Errorf("absent card 3 → z = %v, want 0", z)
+		t.Errorf("absent card 3 → score = %v, want 0", z)
 	}
 }
 
-// Downclock within the FreqDownclockGap tolerance is natural spread, not anomaly.
-func TestSpaceFreqWithinGapTolerance(t *testing.T) {
-	cfg := DefaultDetectionConfig() // FreqDownclockGap = 200
+// A mild downclock (1500 vs 1800, ratio 1.2 < 2.0) is NOT space-flagged: the
+// global ratio threshold keeps space for severe (>2×) drops, while the time
+// dimension (freq MAD Z-score vs own history) owns the mild ones.
+func TestSpaceFreqMildDownclock(t *testing.T) {
+	cfg := DefaultDetectionConfig()
 	cardIDs := freqCardIDs(4)
-	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1700}
+	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1500}
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
-	if z := res.Scores[3][MetricAICoreFreq][0]; z != 0 {
-		t.Errorf("card 3 within gap tolerance → z = %v, want 0", z)
+	details := aggregateSpaceScores(res, cardIDs, cfg)
+	if details[3][MetricAICoreFreq].SpaceAbnormal {
+		t.Errorf("mild downclock card 3 should not be space-abnormal (score=%v)",
+			details[3][MetricAICoreFreq].SpaceScore)
 	}
 }
 

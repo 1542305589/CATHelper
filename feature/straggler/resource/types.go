@@ -143,7 +143,7 @@ type DetectionMethod string
 const (
 	MethodZScore   DetectionMethod = "zscore"
 	MethodIQR      DetectionMethod = "iqr"
-	MethodDirect   DetectionMethod = "direct"   // direct comparison (e.g. freq)
+	MethodDirect   DetectionMethod = "direct"   // direct comparison (no metric currently uses it)
 	MethodAbsolute DetectionMethod = "absolute" // > threshold → anomaly
 	MethodMAD      DetectionMethod = "mad"      // robust median/MAD Z-score
 	MethodCluster  DetectionMethod = "cluster"  // majority-mode clustering
@@ -163,7 +163,7 @@ type MetricMeta struct {
 var MetricMetaRegistry = map[MetricName]MetricMeta{
 	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
 	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
-	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodDirect, TimeMethod: MethodMAD},
+	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
 	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
 	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
 	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodZScore},
@@ -448,8 +448,7 @@ type DetectionConfig struct {
 	TrendMinRSquared float64 // default 0.6
 
 	// Special thresholds
-	FreqDownclockGap float64 // freq downclock detection gap in MHz, default 200
-	NetErrMinThresh  float64 // min threshold for network error metrics, default 0
+	NetErrMinThresh float64 // min threshold for network error metrics, default 0
 
 	// Profiling integration
 	FallbackToProfiling bool
@@ -480,7 +479,6 @@ func DefaultDetectionConfig() DetectionConfig {
 		EnableTrend:      true,
 		TrendMinRSquared: 0.6,
 
-		FreqDownclockGap: 200,
 		NetErrMinThresh:  0,
 
 		FallbackToProfiling: true,

@@ -306,7 +306,7 @@ IQR = Q3 - Q1
 **方法 C：均质化聚类**（Profiler 复用共享 `clustering` 包，即上方法 A 的 kmeans 比例检测）
 
 **特殊处理**：
-- **AICORE_FREQ**：频率为固定档位值。某卡值 < 其他卡的最小值即直接判定（不依赖统计）
+- **AICORE_FREQ**：频率为固定档位值（离散）。并入方法 A 的 kmeans 比例检测（DirLow），`基线均值/簇均值 > SpaceRatioThreshold(2.0)` 判定——只标记 >2× 的严重降频，轻度降频交给时间维度（MAD Z-score 与自身历史比）；多卡同档降频一起标记
 - **网络错误类**（ERR_PKT, RETRY, OUT_OF_ORDER, PFC_PKT）：正常值恒为 0，> 0 即异常
 - **CPU_average**：机器粒度，不与卡级混合，独立检测
 
@@ -819,7 +819,6 @@ type DetectionConfig struct {
     TrendMinRSquared float64 // 默认 0.6
 
     // 特殊阈值
-    FreqDownclockGap float64 // 频率降频判定差值(MHz), 默认 200
     NetErrMinThresh  float64 // 网络错误最小阈值, 默认 0
 
     // 与 Profiling 联动

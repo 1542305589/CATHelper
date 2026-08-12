@@ -82,39 +82,6 @@ func detectSpaceAnomalies(
 					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
 				}
 
-			case MethodDirect:
-				// Direct comparison (for freq): a card is downclocked when it
-				// runs at least FreqDownclockGap below its peers' minimum.
-				// The peer minimum EXCLUDES the card itself — a single
-				// downclocked card (the global min) is compared against the
-				// second-smallest value. Cards absent at this time point are
-				// never flagged.
-				sorted := make([]float64, len(presentVals))
-				copy(sorted, presentVals)
-				sort.Float64s(sorted)
-				globalMin := sorted[0]
-				secondMin := sorted[1] // len(presentVals) >= 2 enforced above
-				for _, cid := range nodeCardIDs {
-					v, ok := dict[cid]
-					if !ok {
-						result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
-						continue
-					}
-					peerMin := globalMin
-					if v <= globalMin {
-						// Card is (tied for) the minimum → its lowest peer
-						// is the second-smallest present value. A tie with
-						// another card at the same low value is not a unique
-						// downclock (secondMin equals globalMin then).
-						peerMin = secondMin
-					}
-					z := 0.0
-					if v < peerMin-cfg.FreqDownclockGap {
-						z = 999
-					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
-				}
-
 			case MethodIQR:
 				sorted := make([]float64, len(presentVals))
 				copy(sorted, presentVals)
@@ -245,10 +212,10 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 				continue
 			}
 
-			// For absolute/direct methods, consider "abnormal" if any point had
+			// For absolute methods, consider "abnormal" if any point had a
 			// sentinel value.
 			meta := MetricMetaRegistry[metric]
-			isSentinel := meta.SpaceMethod == MethodAbsolute || meta.SpaceMethod == MethodDirect
+			isSentinel := meta.SpaceMethod == MethodAbsolute
 			isCluster := meta.SpaceMethod == MethodCluster
 
 			var sum float64

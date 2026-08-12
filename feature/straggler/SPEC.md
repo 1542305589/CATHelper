@@ -200,8 +200,7 @@ CPU 取桶内最后一个值。
 
 | SpaceMethod | 适用指标 | 机制 | 异常判定 |
 |-------------|---------|------|---------|
-| `cluster` | temp/power/util/hbm_bandwidth_util/hbm_util/tx_bw | 递归 kmeans 比例检测（共享 `clustering` 包） | **space_score（簇比例）> 比例阈值**（`SpaceRatioThreshold`，默认 2.0）|
-| `direct` | aicore_freq | 低于 peer 时钟上限 `FreqDownclockGap` | sentinel 999 |
+| `cluster` | temp/power/freq/util/hbm_bandwidth_util/hbm_util/tx_bw | 递归 kmeans 比例检测（共享 `clustering` 包） | **space_score（簇比例）> 比例阈值**（`SpaceRatioThreshold`，默认 2.0）|
 | `absolute` | 4× error counters | > 0 | sentinel 999 |
 
 **cluster（kmeans 比例）机制**（共享 `feature/straggler/clustering/kmeans.go`，与 Profiler 均质化聚类同一算法）：
@@ -216,7 +215,7 @@ CPU 取桶内最后一个值。
 
 > 方向极值簇作基线：即使异常方是多数（整片偏离），基线仍取正常方向极值簇，不会把"谁都高"误判为正常；比例阈值（2.0）则保证自然散布（如 54..60°C）不会被当作异常。
 
-`aggregateSpaceScores()` 汇总：cluster 方法 `space_score = 簇比例`，`> SpaceRatioThreshold` 判空间异常；absolute/direct 方法取异常占比。kmeans 无历史基线均值/噪声尺度，`space_baseline_mean` 与 `space_scale` 恒为 0。
+`aggregateSpaceScores()` 汇总：cluster 方法 `space_score = 簇比例`，`> SpaceRatioThreshold` 判空间异常；absolute 方法取异常占比。kmeans 无历史基线均值/噪声尺度，`space_baseline_mean` 与 `space_scale` 恒为 0。
 
 #### Step 6: 时间维度检测（Self Comparison）
 
@@ -351,7 +350,7 @@ Time异常    early_degradation  confirmed_anomaly
 |--------|------|---------|-------------|------------|------|
 | `temp` | 计算 | ↑ 偏高 | cluster | **MAD Zscore** | NPU 温度 (°C)，对称连续 |
 | `power` | 计算 | ↑ 偏高 | cluster | **MAD Zscore** | NPU 功耗 (W)，对称连续 |
-| `aicore_freq` | 计算 | ↓ 偏低 | direct | **MAD Zscore** | AI Core 频率 (MHz)，单点/对称 |
+| `aicore_freq` | 计算 | ↓ 偏低 | cluster | **MAD Zscore** | AI Core 频率 (MHz)，离散档位，>2× 降频空间判定，轻度交给时间维度 |
 | `aicore_util` | 计算 | ↓ 偏低 | cluster | **MAD Zscore** | AI Core 利用率 (%)，双峰（80%+ 工作态） |
 | `hbm_bandwidth_util` | 计算 | ↓ 偏低 | cluster | **MAD Zscore** | HBM 带宽使用率 (%)，双峰 |
 | `hbm_util` | 计算 | ↓ 偏低 | cluster | Mean/std Zscore | HBM 内存使用率 (%)，仅跟踪不参与规则 |
