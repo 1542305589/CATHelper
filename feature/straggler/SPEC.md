@@ -160,9 +160,9 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 
 `ParseCSV()` 按列名映射解析 CSV，每行输出一个 `CSVRow`（各指标以 `map[全局卡ID]float64` 存储）。通过 `cardIndexer` 把 `(node, cardID)` 映射为全局整数卡 ID，并记录 `NodeOf`（全局ID→节点名）和 `LocalID`（全局ID→节点内卡ID）；平铺输入全局 ID 等于原始卡 ID。自动发现所有卡。
 
-#### Step 2: 1 分钟聚合
+#### Step 2: 10 秒聚合
 
-`AggregateByMinute()` 将原始行按分钟分桶（`AggregationWindowSec=60`），每桶产出 1 个聚合行：
+`AggregateByMinute()` 将原始行按 10 秒分桶（`AggregationWindowSec=10`），每桶产出 1 个聚合行：
 
 | 指标类型 | 聚合方式 | 说明 |
 |---------|---------|------|
@@ -194,7 +194,7 @@ CPU 取桶内最后一个值。
 
 #### Step 5: 空间维度检测（Peer Comparison）
 
-`detectSpaceAnomalies()` **只取检测窗口最后一个分钟级聚合点**判定。**peer 组 = 同一节点内的在场卡**（跨节点不互比）；平铺输入（单节点 "none"）时与之前一致，peer 组 = 全体在场卡。每卡每指标的 score 数组只含 1 个元素（最后一点）。
+`detectSpaceAnomalies()` **只取检测窗口最后一个聚合点**判定。**peer 组 = 同一节点内的在场卡**（跨节点不互比）；平铺输入（单节点 "none"）时与之前一致，peer 组 = 全体在场卡。每卡每指标的 score 数组只含 1 个元素（最后一点）。
 
 **对最后一个点、每个节点**，按 `SpaceMethod` 判定：
 
@@ -365,7 +365,7 @@ Time异常    early_degradation  confirmed_anomaly
 
 | 场景 | 处理 |
 |------|------|
-| 基线数据不足（N<2） | 时间维度 Z=0，不判定异常 |
+| 基线数据不足（N < `MinBaselineSamples`=30，即 10 秒聚合下不足 5 分钟） | 时间维度 Z=0，不判定异常 |
 | 检测窗口无数据 | `RunDetection` 返回错误 |
 | 空间维度同行点 < 2 卡 | Z=0（无法做 peer comparison） |
 | 某节点在场卡 < 2 | 该节点 Z=0（节点内无法做 peer comparison），其他节点不受影响 |
@@ -379,9 +379,10 @@ Time异常    early_degradation  confirmed_anomaly
 ### 1.7 配置默认值
 
 ```go
-AggregationWindowSec: 60      // 1 分钟聚合
+AggregationWindowSec: 10      // 10 秒聚合
 TrimRatio:            0.25    // 裁剪比例（每端 25%，中间 50%）
 MinSamplesForTrim:    4       // 低于此样本数降级为普通均值
+MinBaselineSamples:   30      // 基线样本下限：不足则时间维度 Z=0（10 秒聚合下 ≈ 5 分钟）
 BaselineHours:        360     // 基线窗口（可通过 CLI 覆盖）
 DetectionHours:       1       // 检测窗口（可通过 CLI 覆盖）
 SpaceRatioThreshold:  2.0                     // 空间 kmeans 簇比例阈值（独立旋钮，--space-ratio-threshold 覆盖，默认 2.0）

@@ -266,7 +266,7 @@ if 增量 > 0: 聚合值 = 增量
 
 ### 5.1 空间维度检测（Peer Comparison）
 
-**只取检测窗口最后一个分钟级聚合点**判定（`detectSpaceAnomalies`），peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为 kmeans 比例检测（MethodCluster）**，与 Profiler 均质化聚类共享 `clustering` 包：空间维度问"谁偏离同伴"，同伴的标准是**方向极值簇**（DirHigh → 最小均值簇，DirLow → 最大均值簇）。
+**只取检测窗口最后一个聚合点**判定（`detectSpaceAnomalies`），peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为 kmeans 比例检测（MethodCluster）**，与 Profiler 均质化聚类共享 `clustering` 包：空间维度问"谁偏离同伴"，同伴的标准是**方向极值簇**（DirHigh → 最小均值簇，DirLow → 最大均值簇）。
 
 **方法 A：kmeans 比例检测（MethodCluster，默认）**
 
@@ -327,6 +327,7 @@ IQR = Q3 - Q1
 
   if baseline_std == 0 → 跳过（历史无波动）
   if 时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
+  if N < MinBaselineSamples (默认 30，10 秒聚合下 ≈ 5 分钟) → 时间 Z=0，不判定异常
 ```
 
 **鲁棒 MAD 变体（temp / power / aicore_freq / aicore_util / hbm_bandwidth_util）**：
@@ -793,7 +794,7 @@ type Confidence string // "high" | "medium" | "low"
 
 type DetectionConfig struct {
     // 预处理
-    AggregationWindowSec int     // 聚合窗口（秒），默认 60（1分钟）
+    AggregationWindowSec int     // 聚合窗口（秒），默认 10（10秒）
     TrimRatio            float64 // 截尾比例，默认 0.25（去前后各25%）
     MinSamplesForTrim    int     // 截尾最少样本数，默认 4
 

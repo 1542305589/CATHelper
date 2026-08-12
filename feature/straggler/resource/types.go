@@ -421,9 +421,10 @@ const (
 // DetectionConfig holds all tunable parameters for KPI anomaly detection.
 type DetectionConfig struct {
 	// Preprocessing
-	AggregationWindowSec int     // aggregation window in seconds, default 60
+	AggregationWindowSec int     // aggregation window in seconds, default 10
 	TrimRatio            float64 // trimming ratio, default 0.25 (25% each side)
 	MinSamplesForTrim    int     // minimum samples to apply trimming, default 4
+	MinBaselineSamples   int     // min baseline samples for time detection; below this → time Z=0 (default 30 ≈ 5 min @ 10s)
 
 	// Windows
 	BaselineHours  float64 // historical baseline window in hours, default 360 (15 days)
@@ -458,9 +459,10 @@ type DetectionConfig struct {
 // DefaultDetectionConfig returns a DetectionConfig with sensible defaults.
 func DefaultDetectionConfig() DetectionConfig {
 	return DetectionConfig{
-		AggregationWindowSec: 60,
+		AggregationWindowSec: 10,
 		TrimRatio:            0.25,
 		MinSamplesForTrim:    4,
+		MinBaselineSamples:   30,
 
 		BaselineHours:  360, // 15 days
 		DetectionHours: 1,

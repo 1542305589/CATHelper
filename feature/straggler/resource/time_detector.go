@@ -27,7 +27,9 @@ func detectTimeAnomalies(
 		result.Scores[cid] = make(map[MetricName]float64)
 		for _, metric := range AllMetrics {
 			baseline := baselines[cid][metric]
-			if baseline == nil || baseline.N < 2 {
+			// Baseline too small (< MinBaselineSamples, e.g. < 5 min of 10s
+			// points) → no reliable self baseline → time Z=0, not judged.
+			if baseline == nil || baseline.N < cfg.MinBaselineSamples {
 				result.Scores[cid][metric] = 0
 				continue
 			}
