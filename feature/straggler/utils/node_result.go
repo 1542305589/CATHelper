@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 )
@@ -139,7 +140,7 @@ func WriteNodeResult(finalResult map[string]map[string]float64, parallels map[st
 	if err := os.WriteFile(outPath, data, 0644); err != nil {
 		return fmt.Errorf("write result file: %w", err)
 	}
-	printNodeSummary(nodeResults, commDomains)
+	printNodeSummary(finalResult)
 	fmt.Printf("[SLOWNODE ALGO] Result written to %s\n", outPath)
 	return nil
 }
@@ -242,36 +243,75 @@ func sortedNpuIDs(npus map[int]*NpuResult) []int {
 // Print helpers
 // ---------------------------------------------------------------------------
 
-func printNodeSummary(nodeResults []NodeResult, commDomains map[string]map[string]float64) {
-	if len(nodeResults) == 0 {
-		fmt.Printf("慢节点 (node): 无异常\n")
-	} else {
-		fmt.Printf("慢节点 (node): 发现 %d 个异常节点\n", len(nodeResults))
-		for _, nr := range nodeResults {
-			fmt.Printf("  %s\n", nr.Hostname)
-			for _, npu := range nr.Npu {
-				fmt.Printf("    NPU %d\n", npu.ID)
-				if npu.Cal != nil {
-					fmt.Printf("      cal        %.2f\n", npu.Cal.Score)
-				}
-				if npu.NPUBubble != nil {
-					fmt.Printf("      npu_bubble %.2f\n", npu.NPUBubble.Score)
-				}
+func printNodeSummary(finalResult map[string]map[string]float64) {
+	// Slow-CPU needs ≥2 physical nodes to be meaningful: hostUid-based trimming
+	// collapses a single node's ranks to identical values, so no straggler can
+	// be found. Skip its line entirely in that case.
+	cpuDetectable := physicalNodeCount() >= 2
+
+	categories := []struct {
+		key, label string
+		skip       bool
+	}{
+		{"cal", "慢计算 (cal)", false},
+		{"comm", "慢通信 (comm)", false},
+		{"cpu", "慢CPU (cpu)", !cpuDetectable},
+		{"npu_bubble", "Bubble (npu_bubble)", false},
+	}
+
+	for _, cat := range categories {
+		if cat.skip {
+			continue
+		}
+		data := finalResult[cat.key]
+		if len(data) == 0 {
+			fmt.Printf("%s: 无异常\n", cat.label)
+			continue
+		}
+		keys := make([]string, 0, len(data))
+		for k := range data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var parts []string
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s: %.2fx", k, data[k]))
+		}
+		fmt.Printf("%s: 异常 (%d) %s\n", cat.label, len(data), strings.Join(parts, "; "))
+	}
+}
+
+// physicalNodeCount returns the number of distinct physical nodes, read from
+// op_metric/host_info_{N}.json (hostName, falling back to hostUid). It scans
+// ALL rank metadata files, not just anomalous ones, so slow-CPU detectability
+// (needs ≥2 nodes) is judged on the whole system.
+func physicalNodeCount() int {
+	metricDir := filepath.Join(config.FilePath, "op_metric")
+	entries, err := os.ReadDir(metricDir)
+	if err != nil {
+		return 0
+	}
+	hosts := make(map[string]bool)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "host_info_") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if raw, err := os.ReadFile(filepath.Join(metricDir, name)); err == nil {
+			var hi struct {
+				HostUid  string `json:"hostUid"`
+				HostName string `json:"hostName"`
 			}
-			if nr.CPU != nil {
-				fmt.Printf("    cpu         %.2f\n", nr.CPU.Score)
+			if json.Unmarshal(raw, &hi) == nil {
+				h := hi.HostName
+				if h == "" {
+					h = hi.HostUid
+				}
+				if h != "" {
+					hosts[h] = true
+				}
 			}
 		}
 	}
-	if len(commDomains) == 0 {
-		fmt.Printf("慢通信 (comm): 无异常\n")
-	} else {
-		fmt.Printf("慢通信 (comm): 发现 %d 个异常域\n", len(commDomains))
-		for domain, groups := range commDomains {
-			fmt.Printf("  %s\n", domain)
-			for groupKey, score := range groups {
-				fmt.Printf("    %s %.2f\n", groupKey, score)
-			}
-		}
-	}
+	return len(hosts)
 }
