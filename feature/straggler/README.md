@@ -114,8 +114,8 @@ go run . --kpi-csv=/data/kpi.csv
 ```
 
 输出：
-- `./npu_resource_detection_result.json` — JSON 格式详细结果
-- `./analysis_result/npu_resource_detection_report.log` — 文本报告
+- `./straggler_output.json` — 合并 JSON（`{"kpi": ..., "profiler": ...}`，只跑了哪个维度就只含哪个键）
+- `./analysis_result/npu_resource_detection_report.log` — KPI 文本报告
 
 #### 3b. KPI + Profiling 联合检测
 

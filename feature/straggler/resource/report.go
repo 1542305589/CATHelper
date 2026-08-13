@@ -1,7 +1,6 @@
 package resource
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -199,23 +198,6 @@ func applyNodeIdentity(
 		rootCauses[i].CardID = localID[g]
 	}
 	return summaries, rootCauses
-}
-
-// =============================================================================
-// JSON Export
-// =============================================================================
-
-// ExportJSON writes the detection result as JSON.
-func ExportJSON(result *DetectionResult, outputPath string) error {
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal JSON: %w", err)
-	}
-	if err := os.WriteFile(outputPath, data, 0644); err != nil {
-		return fmt.Errorf("write JSON: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI result JSON written to %s\n", outputPath)
-	return nil
 }
 
 // =============================================================================

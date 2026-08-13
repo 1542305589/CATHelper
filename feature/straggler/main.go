@@ -13,6 +13,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -28,6 +29,28 @@ import (
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/resource"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
 )
+
+// combinedOutput is the single output JSON: the KPI resource result and the
+// Profiler result under two keys. Either section is omitted when that dimension
+// did not run (e.g. KPI-only → only "kpi"; Profiler-only → only "profiler").
+type combinedOutput struct {
+	KPI      *resource.DetectionResult `json:"kpi,omitempty"`
+	Profiler *utils.NodeOutput         `json:"profiler,omitempty"`
+}
+
+// writeCombinedJSON marshals the combined KPI+Profiler result into one JSON
+// file at path (the current working directory).
+func writeCombinedJSON(kpi *resource.DetectionResult, profiler *utils.NodeOutput, path string) error {
+	out := combinedOutput{KPI: kpi, Profiler: profiler}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal combined output: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write combined output: %w", err)
+	}
+	return nil
+}
 
 func main() {
 	// 1. Parse CLI arguments.
@@ -94,6 +117,17 @@ func main() {
 	if kpiJSONLDir != "" {
 		kpiInput = kpiJSONLDir
 	}
+
+	// No input at all → usage error before anything runs.
+	if inputPath == "" && kpiInput == "" {
+		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [degradation=0.3] [--kpi-csv=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--space-ratio-threshold=2.0]\n")
+		fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
+		os.Exit(1)
+	}
+
+	var kpiResult *resource.DetectionResult
+	var profilerOut *utils.NodeOutput
+
 	if kpiInput != "" {
 		kpiCfg := resource.DefaultDetectionConfig()
 		kpiCfg.BaselineHours = baselineHours
@@ -107,7 +141,6 @@ func main() {
 		}
 
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === KPI Resource Detection ===\n")
-		var kpiResult *resource.DetectionResult
 		var err error
 		if kpiJSONLDir != "" {
 			// Read CATMonitor straggler_kpi_{date}.jsonl over [now-baseline, now].
@@ -125,23 +158,15 @@ func main() {
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Falling through to Profiler detection...\n")
+			if inputPath != "" {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Falling through to Profiler detection...\n")
+			}
 		} else {
-			// Write KPI results.
-			kpiOutputDir := ""
+			// Text report (KPI output dir: inputPath when profiling too, else cwd).
+			kpiOutputDir := "."
 			if inputPath != "" {
 				kpiOutputDir = inputPath
-			} else {
-				kpiOutputDir = "."
 			}
-
-			// JSON output.
-			jsonPath := kpiOutputDir + "/npu_resource_detection_result.json"
-			if err := resource.ExportJSON(kpiResult, jsonPath); err != nil {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write KPI JSON: %v\n", err)
-			}
-
-			// Text report.
 			reportDir := kpiOutputDir + "/analysis_result"
 			reportContent, err := resource.WriteReport(kpiResult, reportDir)
 			if err != nil {
@@ -155,19 +180,15 @@ func main() {
 				resource.EmitToFaultSub(kpiResult, resource.EmitConfig{URL: faultsubURL})
 			}
 
-			// If confirmed anomalies found and we have no Profiler path, exit.
-			if resource.HasConfirmedAnomaly(kpiResult.Results) && inputPath == "" {
+			// Cross-validation decision messages (the combined JSON is written at
+			// the end of main, after the Profiler step, when this is the only
+			// KPI result it still gets emitted under the "kpi" key).
+			switch {
+			case resource.HasConfirmedAnomaly(kpiResult.Results) && inputPath == "":
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection found confirmed anomalies. Done.\n")
-				return
-			}
-
-			// If confirmed anomalies found with Profiler path, cross-validate.
-			if resource.HasConfirmedAnomaly(kpiResult.Results) && inputPath != "" {
+			case resource.HasConfirmedAnomaly(kpiResult.Results):
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI found anomalies, proceeding to Profiler for cross-validation...\n")
-			}
-
-			// If no KPI anomalies and inputPath is set, fall through to Profiler.
-			if !resource.HasConfirmedAnomaly(kpiResult.Results) && inputPath != "" {
+			case inputPath != "":
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI found no confirmed anomalies, falling back to Profiler...\n")
 			}
 		}
@@ -176,67 +197,78 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────
 	// Second line of defense: Profiler slow-node detection (deep analysis)
 	// ─────────────────────────────────────────────────────────────────
-	if inputPath == "" {
-		if kpiCSVPath == "" && kpiJSONLDir == "" {
-			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [degradation=0.3] [--kpi-csv=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--space-ratio-threshold=2.0]\n")
-			fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
+	if inputPath != "" {
+		// Validate required path.
+		if info, err := os.Stat(inputPath); err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "ERROR: Invalid directory: %s (err: %v)\n", inputPath, err)
 			os.Exit(1)
 		}
-		// KPI-only mode: already done above.
-		return
+
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Input path: %s\n", inputPath)
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Degradation: %.2f\n", degradation)
+
+		// 2. Initialize global configuration.
+		config.FilePath = inputPath
+		config.CalThreshold = 1 + degradation
+		config.CommThreshold = 1 + degradation*5
+
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] CalThreshold: %.2f, CommThreshold: %.2f\n",
+			config.CalThreshold, config.CommThreshold)
+
+		// 3. Data parsing: SQLite → CSV + JSON intermediates.
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Starting data parsing...\n")
+		dataparse.DataParsing(inputPath)
+
+		// 4. Get parallel topology from group_info JSON files.
+		parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
+		if len(parallels) == 0 || len(validRanks) == 0 {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Failed to get parallel domain info or valid ranks\n")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Valid ranks: %d, Parallel domains: %d\n",
+			len(validRanks), len(parallels))
+
+		// 5. Get single-snapshot step data from CSV files.
+		stepData := detector.GetCurJobLastStepData(validRanks)
+		if len(stepData) == 0 {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: No valid step data\n")
+			os.Exit(1)
+		}
+
+		// 6. Run detection pipeline.
+		result := detector.DelimitDetection(stepData, parallels, validRanks)
+		if result == nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Detection returned no results\n")
+			os.Exit(1)
+		}
+
+		// 7. Build node-aggregated result (stdout summary; the JSON goes into the
+		//    combined output written at the end of main).
+		var buildErr error
+		profilerOut, buildErr = utils.BuildNodeResult(result, parallels)
+		if buildErr != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to build node result: %v\n", buildErr)
+		}
+
+		// 8. Generate text report.
+		report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath, degradation)
 	}
 
-	// Validate required path.
-	if info, err := os.Stat(inputPath); err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "ERROR: Invalid directory: %s (err: %v)\n", inputPath, err)
-		os.Exit(1)
+	// ─────────────────────────────────────────────────────────────────
+	// Combined JSON output: one file in the running directory holding both the
+	// KPI and Profiler results under the "kpi"/"profiler" keys. A section is
+	// absent when that dimension did not run (e.g. KPI-only → only "kpi").
+	// ─────────────────────────────────────────────────────────────────
+	if kpiResult != nil || profilerOut != nil {
+		const combinedPath = "straggler_output.json"
+		if err := writeCombinedJSON(kpiResult, profilerOut, combinedPath); err != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write combined output: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Result written to %s\n", combinedPath)
+		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Input path: %s\n", inputPath)
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Degradation: %.2f\n", degradation)
-
-	// 2. Initialize global configuration.
-	config.FilePath = inputPath
-	config.CalThreshold = 1 + degradation
-	config.CommThreshold = 1 + degradation*5
-
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] CalThreshold: %.2f, CommThreshold: %.2f\n",
-		config.CalThreshold, config.CommThreshold)
-
-	// 3. Data parsing: SQLite → CSV + JSON intermediates.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Starting data parsing...\n")
-	dataparse.DataParsing(inputPath)
-
-	// 4. Get parallel topology from group_info JSON files.
-	parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
-	if len(parallels) == 0 || len(validRanks) == 0 {
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Failed to get parallel domain info or valid ranks\n")
-		os.Exit(1)
+	if inputPath != "" {
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Detection complete.\n")
 	}
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Valid ranks: %d, Parallel domains: %d\n",
-		len(validRanks), len(parallels))
-
-	// 5. Get single-snapshot step data from CSV files.
-	stepData := detector.GetCurJobLastStepData(validRanks)
-	if len(stepData) == 0 {
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: No valid step data\n")
-		os.Exit(1)
-	}
-
-	// 6. Run detection pipeline.
-	result := detector.DelimitDetection(stepData, parallels, validRanks)
-	if result == nil {
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Detection returned no results\n")
-		os.Exit(1)
-	}
-
-	// 7. Write results (node-aggregated JSON).
-	if err := utils.WriteNodeResult(result, parallels); err != nil {
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write node result: %v\n", err)
-	}
-
-	// 8. Generate text report.
-	report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath, degradation)
-
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Detection complete.\n")
 }

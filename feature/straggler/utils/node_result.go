@@ -39,14 +39,16 @@ type NodeResult struct {
 	CPU      *ScoreResult `json:"cpu,omitempty"`
 }
 
-// NodeOutput is the new straggler_detection_result.json structure.
+// NodeOutput is the profiler result structure: node-aggregated anomalies plus
+// communication-domain results. It is emitted as the "profiler" section of the
+// combined output JSON.
 type NodeOutput struct {
 	NodeResult       []NodeResult                  `json:"node_result"`
 	CommDomainResult map[string]map[string]float64 `json:"comm_domain_result"`
 }
 
 // ---------------------------------------------------------------------------
-// WriteNodeResult — node-aggregated JSON output
+// BuildNodeResult — node-aggregated profiler output
 // ---------------------------------------------------------------------------
 
 // nodeAccumulator builds up one node's entries while scanning results.
@@ -57,11 +59,14 @@ type nodeAccumulator struct {
 	hasCPU   bool
 }
 
-// WriteNodeResult writes straggler_detection_result.json in the node-aggregated
-// format: results are grouped by physical node (hostname from HOST_INFO.hostName,
-// NPU id from NPU_INFO.id), and communication results by domain name. Only
-// anomalous nodes/NPUs are included.
-func WriteNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) error {
+// BuildNodeResult aggregates the profiler result into the node-based structure:
+// per-NPU anomalies (cal/npu_bubble) and node-level cpu are grouped by physical
+// node (hostname from HOST_INFO.hostName, NPU id from NPU_INFO.id), and
+// communication results are grouped by domain name. Only anomalous nodes/NPUs
+// are included. It prints the per-category stdout summary and returns the
+// NodeOutput for the caller to embed into the combined output; it does NOT write
+// any file itself.
+func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) (*NodeOutput, error) {
 	meta := loadRankMeta(finalResult)
 	nodes := make(map[string]*nodeAccumulator)
 
@@ -131,18 +136,8 @@ func WriteNodeResult(finalResult map[string]map[string]float64, parallels map[st
 		nodeResults = append(nodeResults, nr)
 	}
 
-	out := NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal node result: %w", err)
-	}
-	outPath := filepath.Join(config.FilePath, "straggler_detection_result.json")
-	if err := os.WriteFile(outPath, data, 0644); err != nil {
-		return fmt.Errorf("write result file: %w", err)
-	}
 	printNodeSummary(finalResult)
-	fmt.Printf("[SLOWNODE ALGO] Result written to %s\n", outPath)
-	return nil
+	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}, nil
 }
 
 // ---------------------------------------------------------------------------

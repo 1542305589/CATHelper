@@ -21,7 +21,11 @@
              │                                     │
              ▼                                     ▼
    NPU 资源 KPI 异常报告                慢计算/慢通信/慢CPU/Bubble
-   (npu_resource_detection_*.json)     (straggler_detection_result.json)
+        │                                       │
+        └──────────────────┬────────────────────┘
+                           ▼
+            合并输出 straggler_output.json
+            {"kpi": ..., "profiler": ...}（运行目录，缺哪个维度就无哪个键）
 ```
 
 - **KPI 模式**：基于 11 个 NPU 资源指标的时序数据，时间+空间双维度交叉验证，轻量快速，适合常态化初筛。有异常时可选触发 Profiler 模式做交叉验证。
@@ -106,8 +110,9 @@ detectSpaceAnomalies  detectTimeAnomalies  detectTrends
                    ▼
     ┌──────────────┼──────────────┐
     ▼              ▼              ▼
-ExportJSON    WriteReport    EmitToFaultSub
- (JSON)        (text report)   (callback)
+合并输出JSON   WriteReport    EmitToFaultSub
+ (straggler_    (text report)   (callback)
+  output.json)
 ```
 
 ### 1.2 输入格式
@@ -299,12 +304,13 @@ Time异常    early_degradation  confirmed_anomaly
 
 | 文件 | 位置 | 内容 |
 |------|------|------|
-| `npu_resource_detection_result.json` | `path/` 或当前目录 | JSON 检测结果 |
-| `npu_resource_detection_report.log` | `path/analysis_result/` | 文本报告 |
-| stdout | — | 文本报告内容 |
+| `straggler_output.json` | 运行目录（当前目录） | **合并输出**：`{"kpi": <KPI 结果>, "profiler": <Profiler 结果>}`；只跑了哪个维度就只含哪个键 |
+| `npu_resource_detection_report.log` | `path/analysis_result/`（仅 KPI 时 `./analysis_result/`） | KPI 文本报告 |
+| `detection_report.log` | `path/analysis_result/` | Profiler 文本报告 |
+| stdout | — | KPI 文本报告内容 + Profiler 逐类摘要 |
 | FaultSub | `--faultsub-url` | 异常卡事件回传 |
 
-**JSON 输出结构**（`npu_resource_detection_result.json`）：
+**JSON 输出结构**（`straggler_output.json` 的 `kpi` 段，即 `{"kpi": {...}}`）：
 
 ```json
 {
@@ -416,7 +422,7 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
   └── DelimitDetection()       → 执行 4 类检测
   │
   ▼
-[utils]  WriteNodeResult()    → stdout + straggler_detection_result.json（节点聚合）
+[utils]  BuildNodeResult()    → stdout 逐类摘要 + 返回节点聚合结果（并入 straggler_output.json 的 "profiler" 段）
 [report] WriteReport()        → analysis_result/detection_report.log
 ```
 
@@ -473,28 +479,30 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 
 ### 2.6 输出
 
-#### straggler_detection_result.json
+#### straggler_output.json 的 "profiler" 段
 
-节点聚合结构：结果按**物理节点**（hostname，来自 HOST_INFO.hostName）+ **NPU**（id，来自 NPU_INFO.id）分组；通信结果按**并行域**分组。只含有异常的节点/NPU。
+Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"profiler": {...}}`），结构为节点聚合：结果按**物理节点**（hostname，来自 HOST_INFO.hostName）+ **NPU**（id，来自 NPU_INFO.id）分组；通信结果按**并行域**分组。只含有异常的节点/NPU。
 
 ```json
 {
-  "node_result": [
-    {
-      "hostname": "<hostName>",
-      "npu": [
-        {
-          "id": 0,
-          "cal":        { "score": 1.5 },
-          "npu_bubble": { "score": 3200.0 }
-        }
-      ],
-      "cpu": { "score": 1.4 }
-    }
-  ],
-  "comm_domain_result": {
-    "tp": {
-      "0,1,2,3": 3.2
+  "profiler": {
+    "node_result": [
+      {
+        "hostname": "<hostName>",
+        "npu": [
+          {
+            "id": 0,
+            "cal":        { "score": 1.5 },
+            "npu_bubble": { "score": 3200.0 }
+          }
+        ],
+        "cpu": { "score": 1.4 }
+      }
+    ],
+    "comm_domain_result": {
+      "tp": {
+        "0,1,2,3": 3.2
+      }
     }
   }
 }
@@ -502,6 +510,7 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 
 - `node_result[]`：每个异常节点一条，含 `hostname`（HOST_INFO.hostName，缺失回退 hostUid）、`npu[]`（只含异常的 NPU，`id` 来自 NPU_INFO.id，`cal`/`npu_bubble` score 仅在异常时出现）、`cpu`（节点级，慢节点的共享值）
 - `comm_domain_result`：key = 通信域名字（可读域名，如 tp），value = 组内 rank 集（逗号连接）→ score
+- 顶层 `straggler_output.json`：KPI 结果在 `kpi` 键，Profiler 结果在 `profiler` 键；只跑 KPI 则只有 `kpi`，只跑 Profiler 则只有 `profiler`
 
 #### detection_report.log
 

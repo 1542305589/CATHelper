@@ -932,7 +932,7 @@ KPI 检测专用选项:
 
 ## 10. 输出格式
 
-### 10.1 JSON (`npu_resource_detection_result.json`)
+### 10.1 JSON（`straggler_output.json` 的 `kpi` 段）
 
 ```json
 {

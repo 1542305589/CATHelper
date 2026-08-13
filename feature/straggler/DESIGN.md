@@ -170,19 +170,19 @@ func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
 
 ### utils
 ```go
-func WriteNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) error
+func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) (*NodeOutput, error)
 func CheckFileOrDirectoryReadMode(path string) bool
 func CheckFileOrDirectoryIsSoftLink(path string) bool
 func TransferFloatArrayToInt(ids []interface{}) []int
 func ReadFile(filePath string) ([]byte, error)
 ```
 
-**WriteNodeResult 逻辑**（节点聚合输出）：
+**BuildNodeResult 逻辑**（节点聚合输出，不写文件，返回 `NodeOutput` 供 main 合并进 `straggler_output.json` 的 `profiler` 段）：
 1. 读 `op_metric/host_info_{N}.json`（hostName）+ `npu_info_{N}.json`（NPU id）作为每 rank 元数据
 2. cal / npu_bubble（逐 rank）→ 按 hostname 分组、按 NPU id 聚合 → `node_result[].npu[]`，只含有异常的节点/NPU
 3. cpu（逐 rank，节点级）→ `node_result[].cpu`（节点内 rank 值相同，取共享值）
 4. comm → 用 `findDomainForRanks` 解析域名 → `comm_domain_result[域名][组key] = score`
-5. 写入 `config.FilePath/straggler_detection_result.json` + stdout 摘要
+5. stdout 逐类摘要（慢计算/慢通信/慢CPU/Bubble，单节点跳过慢CPU）；JSON 由 main.go 合并写入运行目录 `straggler_output.json`（`{"kpi": ..., "profiler": ...}`）
 
 ### report
 ```go
