@@ -9,7 +9,7 @@
 //
 // Usage:
 //
-//	go run . path=/data/dir [degradation=0.3] [--kpi-csv=/path/to/kpi.csv]
+//	go run . path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs]
 package main
 
 import (
@@ -55,7 +55,7 @@ func writeCombinedJSON(kpi *resource.DetectionResult, profiler *utils.NodeOutput
 func main() {
 	// 1. Parse CLI arguments.
 	var inputPath string
-	var kpiCSVPath string
+	var kpiPath string
 	var kpiJSONLDir string
 	var faultsubURL string
 	baselineHours := 360.0
@@ -85,8 +85,8 @@ func main() {
 			} else {
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid degradation value, using default 0.3\n")
 			}
-		case "--kpi-csv":
-			kpiCSVPath = val
+		case "--kpi-path":
+			kpiPath = val
 		case "--kpi-jsonl-dir":
 			kpiJSONLDir = val
 		case "--faultsub-url":
@@ -112,15 +112,15 @@ func main() {
 	// First line of defense: KPI resource anomaly detection (lightweight)
 	// ─────────────────────────────────────────────────────────────────
 	// KPI input: --kpi-jsonl-dir (CATMonitor straggler_output JSONL) takes
-	// precedence over --kpi-csv (legacy kpi_collect.sh CSV). Either is optional.
-	kpiInput := kpiCSVPath
+	// precedence over --kpi-path (legacy kpi_collect.sh CSV directory). Either is optional.
+	kpiInput := kpiPath
 	if kpiJSONLDir != "" {
 		kpiInput = kpiJSONLDir
 	}
 
 	// No input at all → usage error before anything runs.
 	if inputPath == "" && kpiInput == "" {
-		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [degradation=0.3] [--kpi-csv=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--space-ratio-threshold=2.0]\n")
+		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--space-ratio-threshold=2.0]\n")
 		fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
 		os.Exit(1)
 	}
@@ -153,8 +153,8 @@ func main() {
 				kpiResult, err = resource.RunDetectionFromData(ts, kpiJSONLDir, kpiCfg)
 			}
 		} else {
-			// --kpi-csv is a directory of per-node CSV files + node_config.json.
-			kpiResult, err = resource.RunDetectionFromDir(kpiCSVPath, kpiCfg)
+			// --kpi-path is a directory of per-node CSV files + node_config.json.
+			kpiResult, err = resource.RunDetectionFromDir(kpiPath, kpiCfg)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection failed: %v\n", err)

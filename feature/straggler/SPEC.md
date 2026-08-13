@@ -15,7 +15,7 @@
               ▼                                       ▼
    ┌─────────────────────┐               ┌─────────────────────┐
    │  KPI 资源检测（轻量）│               │ Profiler 深查（重量）│
-   │  --kpi-csv 或        │               │  path=/data/dir      │
+   │  --kpi-path 或        │               │  path=/data/dir      │
    │  --kpi-jsonl-dir     │               │  (每卡一个 .db)       │
    └─────────┬───────────┘               └─────────┬───────────┘
              │                                     │
@@ -38,7 +38,7 @@
 ## CLI
 
 ```
-slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-csv=/path/to/kpi.csv | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--baseline-hours=360] [--detection-hours=1] [--space-ratio-threshold=2.0]
+slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/path/to/kpi.csv | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--baseline-hours=360] [--detection-hours=1] [--space-ratio-threshold=2.0]
 ```
 
 ### 参数
@@ -47,8 +47,8 @@ slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-csv=/path/to/kpi.csv |
 |------|------|------|------|------|
 | `path` | string | 否* | — | Profiler `.db` 文件目录（*KPI 模式或 Profiler 至少提供一个） |
 | `degradation` | float64 | 否 | 0.3 | 灵敏度系数，< 0 重置为 0.3，> 1 允许但警告 |
-| `--kpi-csv` | string | 否 | — | KPI 模式：包含多个每节点 CSV + `node_config.json` 的目录 |
-| `--kpi-jsonl-dir` | string | 否 | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-csv`） |
+| `--kpi-path` | string | 否 | — | KPI 模式：包含多个每节点 CSV + `node_config.json` 的目录 |
+| `--kpi-jsonl-dir` | string | 否 | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
 | `--faultsub-url` | string | 否 | — | FaultSub 回调 URL，KPI 发现异常时回传检测结果 |
 | `--baseline-hours` | float64 | 否 | 360 | 基线窗口（小时） |
 | `--detection-hours` | float64 | 否 | 1 | 检测窗口（小时） |
@@ -68,7 +68,7 @@ Profiler 模式:
 
 ---
 
-## 一、KPI 资源检测模式（`--kpi-csv` / `--kpi-jsonl-dir`）
+## 一、KPI 资源检测模式（`--kpi-path` / `--kpi-jsonl-dir`）
 
 ### 1.1 数据流
 
@@ -119,9 +119,9 @@ detectSpaceAnomalies  detectTimeAnomalies  detectTrends
 
 card ID 在**每个节点内从 0 开始**编号，身份 = (node, cardID)。节点信息由**目录 + `node_config.json`** 指定。
 
-#### CSV 格式（`--kpi-csv` = 目录）
+#### CSV 格式（`--kpi-path` = 目录）
 
-`--kpi-csv` 传一个**目录**，内含多个每节点 CSV（平铺 `{cardID: value}`）+ 固定的 `node_config.json`：
+`--kpi-path` 传一个**目录**，内含多个每节点 CSV（平铺 `{cardID: value}`）+ 固定的 `node_config.json`：
 
 ```
 /dir/
@@ -379,7 +379,7 @@ Time异常    early_degradation  confirmed_anomaly
 | 计数器回绕 | 自动加 `MaxUint64` 修正 |
 | JSONL 某天文件不存在 | 跳过该天（非错误） |
 | CSV 列不完整 | 缺失列 warn 但不阻断，对应 metric dict 为空 |
-| 仅 `--kpi-csv` 无 `path` | 仅输出 KPI 结果，不执行 Profiler |
+| 仅 `--kpi-path` 无 `path` | 仅输出 KPI 结果，不执行 Profiler |
 
 ### 1.7 配置默认值
 

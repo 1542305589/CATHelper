@@ -554,7 +554,7 @@ func BoundRootCause(cardID, anomalyMatrix, trends) RootCauseResult:
 ```go
 // main.go 改造示意
 func main() {
-    inputPath, kpiCSVPath, degradation := parseCLI()
+    inputPath, kpiPath, degradation := parseCLI()
 
     config.FilePath = inputPath
     config.CalThreshold = 1 + degradation
@@ -562,8 +562,8 @@ func main() {
 
     // ────── 第一道防线：KPI 资源指标检测 ──────
     var kpiResult *nupresource.DetectionResult
-    if kpiCSVPath != "" {
-        kpiResult = runKpiDetection(kpiCSVPath, degradation)
+    if kpiPath != "" {
+        kpiResult = runKpiDetection(kpiPath, degradation)
         // runKpiDetection 内部按顺序执行：
         //   1. ParseCSV → 2. AggregateByMinute → 3. SplitWindows
         //   4. BuildBaselines
@@ -907,16 +907,16 @@ func ExportResourceJSON(result *DetectionResult, outputPath string) error
 
 ```
 # 仅 KPI 检测
-slowNodeDetection --kpi-csv=/path/to/kpi.csv [options]
+slowNodeDetection --kpi-path=/path/to/kpi.csv [options]
 
 # KPI + Profiling 联合（KPI 优先，无异常则 fallback Profiling）
-slowNodeDetection path=/data/dir --kpi-csv=/path/to/kpi.csv [options]
+slowNodeDetection path=/data/dir --kpi-path=/path/to/kpi.csv [options]
 
 # 仅 Profiling（已有，不变）
 slowNodeDetection path=/data/dir [degradation=0.3]
 
 KPI 检测专用选项:
-  --kpi-csv=<path>              KPI CSV 文件路径
+  --kpi-path=<path>              KPI CSV 文件路径
   --baseline-hours=<int>        历史基线窗口（小时），默认 360 (15天)
   --detection-hours=<int>       检测窗口（小时），默认 1
   --space-method=<zscore|iqr>   空间检测方法，默认 zscore

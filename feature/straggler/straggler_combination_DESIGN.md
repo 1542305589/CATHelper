@@ -349,7 +349,7 @@ Storage 链：`Scheduler → StragglerStorage(若启用) → FaultStorage(若启
 //   → CSVRow（11 项 dict + CPUAvg），合并、按 ts 排序、收集 cardIDs
 ```
 
-`main.go` 入口参数：`--kpi-jsonl-dir=DIR`（新）与 `--kpi-csv=FILE`（保留兼容）二选一；若用 JSONL 模式按 `--baseline-hours`(默认 360) + `--detection-hours`(默认 1) 自动算窗口读文件。
+`main.go` 入口参数：`--kpi-jsonl-dir=DIR` 与 `--kpi-path=DIR`（遗留 kpi_collect.sh CSV 目录）二选一；若用 JSONL 模式按 `--baseline-hours`(默认 360) + `--detection-hours`(默认 1) 自动算窗口读文件。
 
 ### 5.3 检测命中回注 faultsub
 

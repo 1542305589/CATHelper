@@ -110,7 +110,7 @@ go run . --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
 
 遗留模式（读 CSV）：
 ```bash
-go run . --kpi-csv=/data/kpi.csv
+go run . --kpi-path=/data/kpi.csv
 ```
 
 输出：
@@ -120,7 +120,7 @@ go run . --kpi-csv=/data/kpi.csv
 #### 3b. KPI + Profiling 联合检测
 
 ```bash
-go run . path=/data/profiler_output --kpi-csv=/data/kpi.csv degradation=0.3
+go run . path=/data/profiler_output --kpi-path=/data/kpi.csv degradation=0.3
 ```
 
 检测顺序：
@@ -212,7 +212,7 @@ go run . path=/data/profiler_output degradation=0.3
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--kpi-csv` | (二选一) | KPI CSV 文件路径（遗留模式） |
+| `--kpi-path` | (二选一) | KPI CSV 文件路径（遗留模式） |
 | `--kpi-jsonl-dir` | (二选一) | CATMonitor `straggler_kpi_{date}.jsonl` 目录（整合模式，优先于 csv） |
 | `--faultsub-url` | (空) | CATMonitor faultsub REST 地址（如 `http://host:9101`），非空则把命中卡回注 faultsub |
 | `--baseline-hours` | 360 | 历史基线窗口（小时，默认 15 天） |
