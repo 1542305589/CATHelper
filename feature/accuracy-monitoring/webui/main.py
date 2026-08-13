@@ -1,6 +1,5 @@
 """WebUI 服务入口：FastAPI app + REST API + 静态托管 + 生命周期管理。
 
-设计见 docs/2026-08-11-anomaly-monitoring-webui-design.md §8 / §10。
 - 查询端点：/api/summary /api/instances /api/events /api/alerts /api/trends（短轮询）。
 - 实例管理：POST/DELETE /api/instances...（先校验 → 原子写盘 → 统一重载应用）。
 - 认证：除 /api/login 与静态页面外，均需 `Authorization: Bearer <token>`。
