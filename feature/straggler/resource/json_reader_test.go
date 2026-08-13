@@ -111,6 +111,87 @@ func TestReadKPIFilesSkipsMalformedLine(t *testing.T) {
 	}
 }
 
+func TestReadKPIFilesMultiNode(t *testing.T) {
+	// Multi-node layout: each node has its own subdirectory; node_config.json
+	// maps folder → {node, cards}. Node identity comes from the config, and each
+	// node's file uses per-node card numbers (0-based).
+	dir := t.TempDir()
+	date := time.Unix(1784547926, 0).Local().Format("2006-01-02")
+
+	for _, folder := range []string{"node-a", "node-b"} {
+		if err := os.MkdirAll(filepath.Join(dir, folder), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeKPIFile(t, filepath.Join(dir, "node-a"), date,
+		`{"ts":1784547926,"vals":{"0":{"temp":55,"power":1628},"1":{"temp":56,"power":1630}}}`+"\n")
+	writeKPIFile(t, filepath.Join(dir, "node-b"), date,
+		`{"ts":1784547926,"vals":{"0":{"temp":60,"power":1700},"1":{"temp":61,"power":1710}}}`+"\n")
+	if err := os.WriteFile(filepath.Join(dir, "node_config.json"),
+		[]byte(`{"node-a":{"node":"node-1","cards":[0,1]},"node-b":{"node":"node-2","cards":[0,1]}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := ReadKPIFiles(dir, time.Unix(1784547926, 0), time.Unix(1784547926, 0).Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ReadKPIFiles: %v", err)
+	}
+	if len(ts.CardIDs) != 4 {
+		t.Fatalf("expected 4 global cards, got %v", ts.CardIDs)
+	}
+	nodes := map[string]bool{}
+	for _, n := range ts.NodeOf {
+		nodes[n] = true
+	}
+	if len(nodes) != 2 || !nodes["node-1"] || !nodes["node-2"] {
+		t.Fatalf("expected nodes node-1/node-2, got %v", nodes)
+	}
+	// Each JSONL sample becomes its own row (the pipeline's AggregateByMinute
+	// merges same-timestamp rows), so scan every row for the node/card values.
+	var found56, found61 bool
+	for _, row := range ts.Rows {
+		for _, cid := range ts.CardIDs {
+			switch {
+			case ts.NodeOf[cid] == "node-1" && ts.LocalID[cid] == 1 && row.Temp[cid] == 56:
+				found56 = true
+			case ts.NodeOf[cid] == "node-2" && ts.LocalID[cid] == 1 && row.Temp[cid] == 61:
+				found61 = true
+			}
+		}
+	}
+	if !found56 || !found61 {
+		t.Errorf("node/card mapping wrong: %v (56=%v 61=%v)", ts.NodeOf, found56, found61)
+	}
+}
+
+func TestReadKPIFilesMultiNodeCardFilter(t *testing.T) {
+	// node_config.json "cards" restricts which per-node cards are used; cards in
+	// the data outside the configured set are dropped.
+	dir := t.TempDir()
+	date := time.Unix(1000, 0).Local().Format("2006-01-02")
+	if err := os.MkdirAll(filepath.Join(dir, "node-a"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeKPIFile(t, filepath.Join(dir, "node-a"), date,
+		`{"ts":1000,"vals":{"0":{"temp":55},"1":{"temp":56},"2":{"temp":57}}}`+"\n")
+	if err := os.WriteFile(filepath.Join(dir, "node_config.json"),
+		[]byte(`{"node-a":{"node":"node-1","cards":[0,1]}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := ReadKPIFiles(dir, time.Unix(1000, 0), time.Unix(1000, 0).Add(time.Second))
+	if err != nil {
+		t.Fatalf("ReadKPIFiles: %v", err)
+	}
+	if len(ts.CardIDs) != 2 {
+		t.Fatalf("expected 2 cards (filtered), got %v", ts.CardIDs)
+	}
+	row := ts.Rows[0]
+	if row.Temp[ts.CardIDs[0]] == 57 || row.Temp[ts.CardIDs[1]] == 57 {
+		t.Errorf("card 2 should have been filtered out by node_config cards")
+	}
+}
+
 func TestReadKPIFilesEquivalentToCSVPipeline(t *testing.T) {
 	// Build the same underlying data as a CSV and as JSONL, run both
 	// parsers, and verify the TimeSeriesData matches (rows, cardIDs, values).

@@ -39,14 +39,47 @@ func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 	idx := newCardIndexer()
 	var rows []CSVRow
 
-	for _, date := range dates {
-		path := filepath.Join(dir, "straggler_kpi_"+date+".jsonl")
-		fileRows, err := readKPIFile(path, idx)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, fileRows...)
+	// Optional node_config.json switches the layout to multi-node: each node has
+	// its own subdirectory (folder name → {node, cards used}), mirroring the
+	// --kpi-path node_config.json. Without it, files are read directly from dir
+	// (single node "none", or nested multi-node inside each sample).
+	cfg, hasCfg, err := readJSONLNodeConfig(dir)
+	if err != nil {
+		return nil, err
 	}
+
+	if hasCfg {
+		for folder, nc := range cfg {
+			if nc.Node == "" {
+				return nil, fmt.Errorf("node_config.json: folder %q missing node name", folder)
+			}
+			if info, serr := os.Stat(filepath.Join(dir, folder)); serr != nil || !info.IsDir() {
+				return nil, fmt.Errorf("node_config.json folder %q missing in %s", folder, dir)
+			}
+			allowed := make(map[int]bool, len(nc.Cards))
+			for _, c := range nc.Cards {
+				allowed[c] = true
+			}
+			for _, date := range dates {
+				path := filepath.Join(dir, folder, "straggler_kpi_"+date+".jsonl")
+				fileRows, rerr := readKPIFile(path, idx, nc.Node, allowed)
+				if rerr != nil {
+					return nil, rerr
+				}
+				rows = append(rows, fileRows...)
+			}
+		}
+	} else {
+		for _, date := range dates {
+			path := filepath.Join(dir, "straggler_kpi_"+date+".jsonl")
+			fileRows, rerr := readKPIFile(path, idx, "", nil)
+			if rerr != nil {
+				return nil, rerr
+			}
+			rows = append(rows, fileRows...)
+		}
+	}
+
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("no KPI samples in %s for range [%s, %s]", dir, since.Format("2006-01-02"), until.Format("2006-01-02"))
 	}
@@ -62,8 +95,30 @@ func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 	}, nil
 }
 
+// readJSONLNodeConfig reads the optional node_config.json in a JSONL directory:
+// folder (subdirectory) name → {node, cards used}. Returns (nil, false) when the
+// file is absent, so callers keep the legacy single-directory behavior.
+func readJSONLNodeConfig(dir string) (map[string]NodeCSVConfig, bool, error) {
+	path := filepath.Join(dir, "node_config.json")
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read node_config.json: %w", err)
+	}
+	var cfg map[string]NodeCSVConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, false, fmt.Errorf("parse node_config.json: %w", err)
+	}
+	return cfg, true, nil
+}
+
 // readKPIFile decodes one straggler_kpi_{date}.jsonl file into CSVRows.
-func readKPIFile(path string, idx *cardIndexer) ([]CSVRow, error) {
+// node is the explicit node name when reading a per-node subdirectory layout
+// (node_config.json); empty means legacy sniffing. allowed filters per-node
+// cards when non-nil.
+func readKPIFile(path string, idx *cardIndexer, node string, allowed map[int]bool) ([]CSVRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -88,7 +143,7 @@ func readKPIFile(path string, idx *cardIndexer) ([]CSVRow, error) {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] skipping bad kpi line in %s: %v\n", path, err)
 			continue
 		}
-		rows = append(rows, sampleToRow(s, idx))
+		rows = append(rows, sampleToRow(s, idx, node, allowed))
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -98,9 +153,38 @@ func readKPIFile(path string, idx *cardIndexer) ([]CSVRow, error) {
 
 // sampleToRow converts one KPISample to a CSVRow, mapping the straggler KPI
 // field names back onto the CSVRow metric dicts (global card ID → value).
-// Vals may be flat {cardID: {field: value}} or nested {node: {cardID: {field: value}}}.
-func sampleToRow(s KPISample, idx *cardIndexer) CSVRow {
+//
+// With an explicit node (multi-node node_config layout) the whole sample belongs
+// to one node: card keys are per-node and filtered to `allowed`; without it,
+// Vals may be flat {cardID: {field: value}} (node "none") or nested
+// {node: {cardID: {field: value}}} (multi-node) and are sniffed.
+func sampleToRow(s KPISample, idx *cardIndexer, node string, allowed map[int]bool) CSVRow {
 	row := CSVRow{Timestamp: s.Timestamp, CPUAvg: s.CPUAvg}
+
+	// Explicit node: per-node subdirectory layout, card keys are per-node.
+	if node != "" {
+		for cStr, rawCard := range s.Vals {
+			c, err := strconv.Atoi(cStr)
+			if err != nil {
+				continue
+			}
+			if allowed != nil && !allowed[c] {
+				continue
+			}
+			var cardFields map[string]json.RawMessage
+			if err := json.Unmarshal(rawCard, &cardFields); err != nil {
+				continue
+			}
+			g := idx.globalID(node, c)
+			for field, fv := range cardFields {
+				if v, ok := parseJSONNumber(fv); ok {
+					assignMetricField(&row, g, field, v)
+				}
+			}
+		}
+		return row
+	}
+
 	for key, rawInner := range s.Vals {
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(rawInner, &fields); err != nil {

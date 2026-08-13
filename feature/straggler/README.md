@@ -129,7 +129,43 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 
 #### `--kpi-jsonl-dir`：CATMonitor straggler_output JSONL（整合模式）
 
-传 CATMonitor 底座写出的 `straggler_kpi_{date}.jsonl` 目录，按 `--baseline-hours` 自动回溯读取窗口内各天文件（某天文件缺失则跳过该天）。**优先于 `--kpi-path`**。
+传一个**目录**，按 `--baseline-hours` 自动回溯读取窗口内各天文件（某天文件缺失则跳过该天）。**优先于 `--kpi-path`**。
+
+**单节点布局（向后兼容）**——文件直接放目录下：
+```
+{dir}/
+├── straggler_kpi_2026-08-13.jsonl
+└── straggler_kpi_2026-08-12.jsonl
+```
+
+**多节点布局（推荐）**——每节点一个子目录 + `node_config.json` 声明每个子目录对应的节点和实际使用的卡号：
+```
+{dir}/
+├── node-a/
+│   └── straggler_kpi_2026-08-13.jsonl
+├── node-b/
+│   └── straggler_kpi_2026-08-13.jsonl
+└── node_config.json
+```
+
+`node_config.json` 格式（key = **子目录名**；`node` = 节点名；`cards` = 该节点**实际使用的卡号**，节点内 0 起始）：
+```json
+{
+  "node-a": { "node": "node-1", "cards": [0, 1] },
+  "node-b": { "node": "node-2", "cards": [0, 1] }
+}
+```
+- 有 `node_config.json` → 按多节点子目录读取；无 → 按单节点（`"none"`）读取（兼容旧布局）。
+- 子目录名只是文件系统 key，`node` 才是参与 peer 对比的节点名（可与子目录名不同）。
+- `cards` 之外的数据会被过滤；配置引用的子目录缺失 → 报错。
+- 每个节点的样本为平铺形态 `{card: {field: value}}`，卡号节点内 0 起始（与 `--kpi-path` 的每节点 CSV 一致）。
+
+**JSONL 单行记录格式**（每行一个 JSON）：
+```json
+{ "ts": 1784547926, "vals": { "0": { "temp": 55, "power": 1628 } }, "cpu_avg": { "cpu1": "4.26" } }
+```
+- `ts`：Unix 秒；`vals`：平铺 `{cardID: {字段: 值}}`（多节点时每个文件里仍是平铺，节点由子目录名/配置决定）；`cpu_avg` 可选。
+- 字段名用小写下划线（`temp`/`power`/`aicore_freq`/`aicore_util`/`hbm_bandwidth_util`/`hbm_util`/`tx_bandwidth`/`rx_pfc_pkt`/`roce_tx_err_pkt`/`roce_out_of_order`/`roce_new_pkt_rty`/`nic_rx_all_pkg`），与 CSV 的 `NPU_CARD_*` 列名不同。
 
 ### 3.2 Profiler 输入
 
