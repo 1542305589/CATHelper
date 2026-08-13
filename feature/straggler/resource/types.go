@@ -447,6 +447,9 @@ type DetectionConfig struct {
 	EnableTrend      bool
 	TrendMinRSquared float64 // default 0.6
 
+	// Debug
+	EnableDebug bool // --debug-output: include all cards × all metrics in the result
+
 	// Special thresholds
 	NetErrMinThresh float64 // min threshold for network error metrics, default 0
 

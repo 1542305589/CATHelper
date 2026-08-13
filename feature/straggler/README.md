@@ -60,36 +60,45 @@ go run . path=/data/profiler_output --kpi-path=/data/kpi_csv_dir degradation=0.3
 straggler/
 ├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON 输出
 ├── README.md               # 本文件
+├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
 ├── clustering/             # 共享 kmeans 比例检测算法（空间检测与 Profiler 均质化聚类共用）
-│   ├── kmeans.go
-│   └── kmeans_test.go
+│   └── kmeans.go
 ├── resource/               # 第一道防线：资源指标检测（KPI）
 │   ├── types.go            #   数据结构 & 指标注册表 & 配置
 │   ├── parser.go           #   CSV / KPI 目录解析（node 感知全局卡号）
+│   ├── json_reader.go      #   CATMonitor straggler_kpi JSONL 读取（含多节点子目录布局）
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── baseline.go         #   历史基线构建
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
 │   ├── time_detector.go    #   时间维度检测（自对比）+ 趋势
 │   ├── fusion.go           #   二维交叉验证 + 先计算后通信
 │   ├── rootcause.go        #   根因定界推理
-│   ├── json_reader.go      #   CATMonitor straggler_kpi JSONL 读取
-│   └── report.go           #   管线编排 + 文本报告
+│   ├── report.go           #   管线编排 + 文本报告
+│   └── emit.go             #   faultsub 闭环回传
 ├── profiling/              # 第二道防线：Profiling 检测
 │   ├── dataparse/          #   数据清洗（SQLite → CSV/JSON 中间件）
+│   │   ├── data_process.go
+│   │   ├── scenario_segregate.go
+│   │   └── utils.go
 │   └── detector/           #   检测算法
+│       ├── constants.go    #   并行域 / 列名常量
+│       ├── data_parser.go  #   并行域拓扑 + 单步快照
 │       ├── detection.go    #   主流水线（4 类检测编排）
 │       ├── data_handler.go #   慢计算/慢通信/慢CPU/Bubble 实现
 │       └── clustering.go   #   HomogenizationComparisonFunc 包装（kmeans）
 ├── config/                 # Profiler 共享配置
 │   └── config.go
 ├── utils/                  # 结果聚合（节点级）+ 工具
-│   └── node_result.go
+│   ├── node_result.go
+│   └── tools.go
 ├── report/                 # Profiler 文本报告生成
 │   └── report.go
 ├── DESIGN.md               # Profiling 检测设计
 ├── DESIGN_NPU_RESOURCE.md  # KPI 资源检测设计
-└── SPEC.md                 # 检测技术规范
+├── SPEC.md                 # 检测技术规范
+└── straggler_combination_DESIGN.md  # 与 CATMonitor 底座的整合设计
 ```
+> 各包的测试文件（`*_test.go`）未在树中列出。
 
 ---
 
@@ -165,7 +174,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 { "ts": 1784547926, "vals": { "0": { "temp": 55, "power": 1628 } }, "cpu_avg": { "cpu1": "4.26" } }
 ```
 - `ts`：Unix 秒；`vals`：平铺 `{cardID: {字段: 值}}`（多节点时每个文件里仍是平铺，节点由子目录名/配置决定）；`cpu_avg` 可选。
-- 字段名用小写下划线（`temp`/`power`/`aicore_freq`/`aicore_util`/`hbm_bandwidth_util`/`hbm_util`/`tx_bandwidth`/`rx_pfc_pkt`/`roce_tx_err_pkt`/`roce_out_of_order`/`roce_new_pkt_rty`/`nic_rx_all_pkg`），与 CSV 的 `NPU_CARD_*` 列名不同。
+- 字段名用小写下划线（`temp`/`power`/`aicore_freq`/`aicore_util`/`hbm_bandwidth_util`/`hbm_util`/`tx_bandwidth`/`rx_pfc_pkt`/`roce_tx_err_pkt`/`roce_out_of_order`/`roce_new_pkt_rty`/`nic_rx_all_pkg`），与 CSV 的 `NPU_CARD_*` 列名不同。其中 `nic_rx_all_pkg`（以及 CSV 的 `NPU_NIC_RX_ALL_PKG` 列）会被解析，但**不在 11 个检测指标内，只采集不参与判定**。
 
 ### 3.2 Profiler 输入
 
@@ -194,6 +203,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `--baseline-hours` | float64 | 否 | 360 | 历史基线窗口（小时，默认 15 天） |
 | `--detection-hours` | float64 | 否 | 1 | 检测窗口（小时） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮，不随 degradation 变化） |
+| `--debug-output` | bool | 否 | 假 | 输出全量数据排查未检出（仍在 `straggler_output.json`，不额外生成文件、不加额外键）：KPI 每卡 `anomaly_details` 列出全部指标（含正常 score/quadrant）；Profiler `node_result` 包含所有节点（含正常节点及其诊断 score） |
 
 \* `path` 与 KPI 输入（`--kpi-path` / `--kpi-jsonl-dir`）至少提供一个；都没有则打印用法并退出。
 
@@ -274,7 +284,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取截尾均值消除节点内差异 |
 | Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
 
-> 四类检测统一走共享 `clustering` 包（kmeans 比例检测），与 KPI 空间 cluster 同一算法。
+> cal / comm / cpu 三类检测统一走共享 `clustering` 包（kmeans 比例检测），与 KPI 空间 cluster 同一算法；Bubble 走固定阈值直接判定。
 
 ---
 
@@ -288,7 +298,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 {
   "kpi": {
     "summary": { "total_cards": 8, "total_nodes": 2, "confirmed_anomalies": 1, "...": "..." },
-    "results": [ { "card_id": 0, "node": "node-1", "quadrant": 2, "anomaly_details": [ "..."] } ],
+    "results": [ { "card_id": 0, "node": "node-1", "quadrant": 3, "anomaly_details": [ "..."] } ],
     "root_causes": [ { "node": "node-1", "card_id": 0, "category": "thermal_throttle", "evidence": [ "..."] } ],
     "correlations": [ "..."]
   },
@@ -304,6 +314,14 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 - **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键；KPI 失败且无 Profiler → 不写文件。
 - `kpi` 段 = KPI 检测结果（summary / results / root_causes / correlations）。
 - `profiler` 段 = 节点聚合结果：`node_result[]` 按物理节点（hostname）分组，`npu[]` 只含异常 NPU（cal/npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
+
+**`--debug-output` 调试输出**（不加额外键，直接在现有结果里展示所有数据，仍在 `straggler_output.json`）：
+- **KPI**：每张卡的 `anomaly_details` 列出**全部 11 个指标**（含正常的）的完整明细——`space_score`/`time_score`/`fusion_score`/`quadrant`/`space_abnormal`/`time_abnormal`/当前值/基线值/方法等；正常指标的 `quadrant` 为 `0`、异常标志为 `false`，但 score 照常给出，可对照看"为什么某指标没标"。
+- **Profiler**：`node_result[]` 包含**所有节点**（异常+正常），正常节点的 `npu[]` 也列出其 `cal`/`npu_bubble`/`cpu` 的诊断 score（比值，正常 rank 约 1.0；无数据/被 ≤0 过滤的 rank 不出现该键）；`comm_domain_result` 也包含**所有通信组**（异常+正常），每组的 score 为代表卡比值（正常组约 1.0）：
+  ```json
+  { "hostname": "node-1", "npu": [ { "id": 0, "cal": { "score": 1.02 }, "npu_bubble": { "score": 8000 } } ], "cpu": { "score": 1.05 } }
+  ```
+  对照阈值即可看出"为什么某 rank/组 值不低却没被标"（比如 ratio 1.02 < CalThreshold 1.3）。
 
 ### 6.2 文本报告
 
@@ -327,9 +345,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 | 字段 | 含义 |
 |------|------|
-| `quadrant=confirmed_anomaly` | 时间+空间双维确认异常（高置信度） |
-| `quadrant=early_degradation` | 仅时间维异常，卡偏离自身历史（关注） |
-| `quadrant=individual_variance` | 仅空间维异常，卡一贯如此（非故障） |
+| `quadrant`（整数 0-3） | JSON 中输出为整数：`0`=normal（正常）、`1`=early_degradation（仅时间维，关注）、`2`=individual_variance（仅空间维，卡一贯如此）、`3`=confirmed_anomaly（时间+空间双维确认，高置信度） |
 | `space_score` | 空间簇比例（cluster 方法）；异常条件 `> SpaceRatioThreshold` |
 | `time_score` | 时间 Z 值；异常条件 `> TimeZThreshold` 或 sentinel 999 |
 | `anomaly_category` | `compute` / `communication` |
@@ -343,11 +359,16 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | `thermal_throttle` | 检查风扇转速、风道堵塞、机房温度 |
 | `cooling_insufficient` | 检查散热器接触、硅脂老化 |
 | `forced_downclock` | 检查驱动/固件频率策略 |
+| `temp_sensor_fault` | 检查温度传感器，交叉验证功率/频率数据确认是否漂移 |
 | `straggler` | 触发 Profiling 精查，确认计算慢/通信慢根因 |
+| `load_imbalance` | 检查数据分发策略、模型并行切分均衡性 |
+| `memory_bottleneck` | 检查 HBM 访问模式、cache miss、显存分配 |
 | `network_link_issue` | 检查光模块、光纤、交换机端口 CRC |
 | `network_congestion` | 检查 PFC 配置、队列 buffer、ECN |
 | `network_packet_loss` | 检查 RoCE ECN/DCQCN 参数 |
+| `bandwidth_limited` | 检查网卡协商速率、PCIe 带宽、光模块型号 |
 | `hardware_fault` | 隔离该卡，安排硬件诊断 |
+| `unknown` | 无法精确定界，建议人工分析原始数据 |
 
 ---
 

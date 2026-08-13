@@ -41,7 +41,8 @@ type NodeResult struct {
 
 // NodeOutput is the profiler result structure: node-aggregated anomalies plus
 // communication-domain results. It is emitted as the "profiler" section of the
-// combined output JSON.
+// combined output JSON. With --debug-output, node_result includes every node
+// (even normal ones) with their diagnostic scores.
 type NodeOutput struct {
 	NodeResult       []NodeResult                  `json:"node_result"`
 	CommDomainResult map[string]map[string]float64 `json:"comm_domain_result"`
@@ -50,6 +51,14 @@ type NodeOutput struct {
 // ---------------------------------------------------------------------------
 // BuildNodeResult — node-aggregated profiler output
 // ---------------------------------------------------------------------------
+
+// DebugInfo carries the --debug-output diagnostic scores so BuildNodeResult can
+// include every node/communication group (normal ones too).
+type DebugInfo struct {
+	ValidRanks []int
+	RankScores map[int]map[string]float64 // rank → {cal, cpu, npu_bubble}
+	CommScores map[string]map[string]float64 // domain → {groupKey: ratio}
+}
 
 // nodeAccumulator builds up one node's entries while scanning results.
 type nodeAccumulator struct {
@@ -62,12 +71,31 @@ type nodeAccumulator struct {
 // BuildNodeResult aggregates the profiler result into the node-based structure:
 // per-NPU anomalies (cal/npu_bubble) and node-level cpu are grouped by physical
 // node (hostname from HOST_INFO.hostName, NPU id from NPU_INFO.id), and
-// communication results are grouped by domain name. Only anomalous nodes/NPUs
-// are included. It prints the per-category stdout summary and returns the
-// NodeOutput for the caller to embed into the combined output; it does NOT write
-// any file itself.
-func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) (*NodeOutput, error) {
-	meta := loadRankMeta(finalResult)
+// communication results are grouped by domain name. It prints the per-category
+// stdout summary and returns the NodeOutput for the caller to embed into the
+// combined output; it does NOT write any file itself.
+//
+// With debug != nil (--debug-output), every valid rank's node is included and
+// each NPU's cal / npu_bubble / cpu scores (plus all comm groups) are filled
+// from the diagnostic scores even when not flagged — normal data shows its
+// diagnostic scores too.
+func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error) {
+	includeAll := debug != nil
+	var metaRanks []int
+	if includeAll {
+		metaRanks = debug.ValidRanks
+	} else {
+		seen := make(map[int]bool)
+		for _, cat := range []string{"cal", "cpu", "npu_bubble"} {
+			for rankStr := range finalResult[cat] {
+				if r, err := strconv.Atoi(rankStr); err == nil && !seen[r] {
+					seen[r] = true
+					metaRanks = append(metaRanks, r)
+				}
+			}
+		}
+	}
+	meta := loadRankMeta(metaRanks)
 	nodes := make(map[string]*nodeAccumulator)
 
 	// cal / npu_bubble: per rank → node.npu[id].
@@ -78,7 +106,7 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 				continue
 			}
 			m, ok := meta[rank]
-			if !ok {
+			if !ok || m.hostname == "" {
 				continue
 			}
 			acc := ensureNodeAcc(nodes, m.hostname)
@@ -99,12 +127,39 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			continue
 		}
 		m, ok := meta[rank]
-		if !ok {
+		if !ok || m.hostname == "" {
 			continue
 		}
 		acc := ensureNodeAcc(nodes, m.hostname)
 		acc.cpu = score
 		acc.hasCPU = true
+	}
+
+	// Debug: include every valid rank's node and fill normal ranks' scores from
+	// the diagnostic ratios (anomalous scores above take precedence).
+	if includeAll {
+		for _, rank := range debug.ValidRanks {
+			m, ok := meta[rank]
+			if !ok || m.hostname == "" {
+				continue
+			}
+			acc := ensureNodeAcc(nodes, m.hostname)
+			npu := ensureNpuAcc(acc, m.npuID)
+			sc, ok := debug.RankScores[rank]
+			if !ok {
+				continue
+			}
+			if npu.Cal == nil && sc["cal"] > 0 {
+				npu.Cal = &ScoreResult{Score: sc["cal"]}
+			}
+			if npu.NPUBubble == nil && sc["npu_bubble"] > 0 {
+				npu.NPUBubble = &ScoreResult{Score: sc["npu_bubble"]}
+			}
+			if !acc.hasCPU && sc["cpu"] > acc.cpu {
+				acc.cpu = sc["cpu"]
+				acc.hasCPU = true
+			}
+		}
 	}
 
 	// comm_domain_result: group slow communication groups by domain name.
@@ -119,6 +174,21 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			commDomains[domain] = make(map[string]float64)
 		}
 		commDomains[domain][groupKey] = score
+	}
+
+	// Debug: merge all communication groups' ratios (anomalous scores above take
+	// precedence) so normal groups show their score too.
+	if includeAll && debug.CommScores != nil {
+		for domain, groups := range debug.CommScores {
+			if commDomains[domain] == nil {
+				commDomains[domain] = make(map[string]float64)
+			}
+			for groupKey, score := range groups {
+				if _, exists := commDomains[domain][groupKey]; !exists {
+					commDomains[domain][groupKey] = score
+				}
+			}
+		}
 	}
 
 	// Build node_result (sorted by hostname, npu by id for determinism).
@@ -150,19 +220,16 @@ type rankMeta struct {
 }
 
 // loadRankMeta reads host_info_{N}.json (hostName) and npu_info_{N}.json (id)
-// for every anomalous rank referenced by the result.
-func loadRankMeta(finalResult map[string]map[string]float64) map[int]rankMeta {
+// for the given ranks.
+func loadRankMeta(ranks []int) map[int]rankMeta {
 	meta := make(map[int]rankMeta)
 	seen := make(map[int]bool)
-	for _, cat := range []string{"cal", "cpu", "npu_bubble"} {
-		for rankStr := range finalResult[cat] {
-			rank, err := strconv.Atoi(rankStr)
-			if err != nil || seen[rank] {
-				continue
-			}
-			seen[rank] = true
-			meta[rank] = readRankMeta(rank)
+	for _, rank := range ranks {
+		if seen[rank] {
+			continue
 		}
+		seen[rank] = true
+		meta[rank] = readRankMeta(rank)
 	}
 	return meta
 }

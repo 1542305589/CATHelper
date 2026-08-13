@@ -54,6 +54,69 @@ func Detect(values []float64, ratioThreshold float64, highIsAnomaly bool) []Resu
 	return detectRec(vals, idx, ratioThreshold, highIsAnomaly, 0)
 }
 
+// DiagnoseEntry is one data point's diagnostic at a single kmeans level.
+type DiagnoseEntry struct {
+	Index   int     // index into the original input values
+	Value   float64 // original value
+	Cluster int     // cluster id at this level (-1 when the value was filtered out)
+	Ratio   float64 // ratio to the baseline cluster mean (0 when not on the anomaly side)
+	Flagged bool    // ratio > ratioThreshold
+}
+
+// Diagnose runs one top-level kmeans level on values and reports EVERY point's
+// cluster, ratio and flag — the debug counterpart of Detect, showing why a
+// point was or wasn't flagged. Values ≤ 0 are filtered (Cluster = -1, Ratio 0).
+// Ratio is computed for every point (normal points sit near 1.0, filtered 0);
+// Flagged is true only when the ratio exceeds the threshold on the anomaly side.
+// It does not recurse, so the flagged set is the first-level decision only.
+func Diagnose(values []float64, ratioThreshold float64, highIsAnomaly bool) []DiagnoseEntry {
+	entries := make([]DiagnoseEntry, len(values))
+	for i, v := range values {
+		entries[i] = DiagnoseEntry{Index: i, Value: v, Cluster: -1}
+	}
+	idx, vals := filterPositive(values)
+	if len(vals) < 2 {
+		return entries
+	}
+
+	z := zscore(vals)
+	k := elbowK(z)
+	clusters := kmeans(z, k)
+	baseIdx := pickBaselineCluster(clusters, vals, highIsAnomaly)
+	baseMean := clusterMean(clusters[baseIdx], vals)
+	if baseMean <= 0 {
+		baseMean = math.SmallestNonzeroFloat64
+	}
+
+	// Cluster id and mean per original index.
+	clusterOf := make(map[int]int, len(vals))
+	clusterMeans := make([]float64, len(clusters))
+	for cid, cl := range clusters {
+		clusterMeans[cid] = clusterMean(cl, vals)
+		for _, li := range cl {
+			clusterOf[idx[li]] = cid
+		}
+	}
+
+	for i := range entries {
+		cid, ok := clusterOf[i]
+		if !ok {
+			continue
+		}
+		entries[i].Cluster = cid
+		m := clusterMeans[cid]
+		var ratio float64
+		if highIsAnomaly {
+			ratio = m / baseMean
+		} else {
+			ratio = baseMean / m
+		}
+		entries[i].Ratio = ratio
+		entries[i].Flagged = ratio > ratioThreshold
+	}
+	return entries
+}
+
 // filterPositive keeps values > 0 and their original indices (NaN excluded).
 func filterPositive(values []float64) (idx []int, vals []float64) {
 	for i, v := range values {

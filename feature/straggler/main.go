@@ -62,14 +62,22 @@ func main() {
 	detectionHours := 1.0
 	degradation := 0.3
 	spaceRatioThreshold := 0.0 // 0 = use the default SpaceRatioThreshold (2.0)
+	debugOutput := false       // --debug-output: include all normal+abnormal data (kpi.debug / profiler.debug) in straggler_output.json
 
 	for _, arg := range os.Args[1:] {
+		// Bare boolean flag (no "=value").
+		if arg == "--debug-output" {
+			debugOutput = true
+			continue
+		}
 		parts := strings.SplitN(arg, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
 		key, val := parts[0], parts[1]
 		switch key {
+		case "--debug-output":
+			debugOutput = val == "true" || val == "1"
 		case "path":
 			inputPath = val
 		case "degradation":
@@ -134,6 +142,7 @@ func main() {
 		kpiCfg.DetectionHours = detectionHours
 		kpiCfg.SpaceZThreshold = 1 + degradation  // tie to degradation param
 		kpiCfg.TimeZThreshold = 1 + degradation*0.8
+		kpiCfg.EnableDebug = debugOutput // --debug-output: kpi result includes all cards × metrics
 		if spaceRatioThreshold > 0 {
 			// Space ratio threshold is an independent knob; only override
 			// the default (2.0) when --space-ratio-threshold is provided.
@@ -243,9 +252,19 @@ func main() {
 		}
 
 		// 7. Build node-aggregated result (stdout summary; the JSON goes into the
-		//    combined output written at the end of main).
+		//    combined output written at the end of main). With --debug-output, all
+		//    nodes (even normal) are included with their diagnostic scores.
 		var buildErr error
-		profilerOut, buildErr = utils.BuildNodeResult(result, parallels)
+		if debugOutput {
+			debug := &utils.DebugInfo{
+				ValidRanks: validRanks,
+				RankScores: detector.DebugRankScores(stepData, validRanks),
+				CommScores: detector.DebugCommScores(stepData, parallels),
+			}
+			profilerOut, buildErr = utils.BuildNodeResult(result, parallels, debug)
+		} else {
+			profilerOut, buildErr = utils.BuildNodeResult(result, parallels, nil)
+		}
 		if buildErr != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to build node result: %v\n", buildErr)
 		}

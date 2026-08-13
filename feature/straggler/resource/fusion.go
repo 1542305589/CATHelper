@@ -88,6 +88,34 @@ func fuseOneCard(
 	summary.CardID = cid
 	summary.TrendFindings = trends
 
+	// Debug (--debug-output): show every metric's full space/time detail, even
+	// normal ones (space_abnormal/time_abnormal/quadrant false/0), so undetected
+	// metrics can be inspected alongside the flags.
+	if cfg.EnableDebug {
+		summary.AnomalyDetails = make([]MetricAnomalyDetail, 0, len(AllMetrics))
+		for _, metric := range AllMetrics {
+			d := merged[metric]
+			d.determineQuadrant()
+			summary.AnomalyDetails = append(summary.AnomalyDetails, *d)
+		}
+		if hasComputeAnomaly {
+			summary.AnomalyCategory = CatCompute
+		} else {
+			for _, d := range summary.AnomalyDetails {
+				if IsCommunicationMetric(d.Metric) && (d.SpaceAbnormal || d.TimeAbnormal) {
+					summary.AnomalyCategory = CatCommunication
+					break
+				}
+			}
+		}
+		summary.Quadrant = worstQuadrant(summary.AnomalyDetails)
+		summary.CompositeScore = compositeScore(summary.AnomalyDetails, cfg)
+		summary.Severity = determineSeverity(summary.Quadrant, summary.CompositeScore)
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Card %d: category=%s quadrant=%s score=%.2f anomalies=%d\n",
+			cid, summary.AnomalyCategory, summary.Quadrant, summary.CompositeScore, len(summary.AnomalyDetails))
+		return summary
+	}
+
 	if hasComputeAnomaly {
 		// Compute anomaly: category=compute.
 		// Check communication metrics but flag as secondary.

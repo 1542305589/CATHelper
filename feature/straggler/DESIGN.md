@@ -170,7 +170,7 @@ func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
 
 ### utils
 ```go
-func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int) (*NodeOutput, error)
+func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error)
 func CheckFileOrDirectoryReadMode(path string) bool
 func CheckFileOrDirectoryIsSoftLink(path string) bool
 func TransferFloatArrayToInt(ids []interface{}) []int
