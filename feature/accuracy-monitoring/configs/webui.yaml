@@ -1,9 +1,4 @@
 # 推理精度异常监控 Web 界面配置文件
-# 设计见 docs/2026-08-11-anomaly-monitoring-webui-design.md §7.2
-# 运行中可直接编辑本文件，1s 内自动热重载（instances / auth 动态生效；其余段 requires restart）。
-#
-# 监听 host/port 由 uvicorn 启动命令配置（yaml 中的 server 段已移除，原配置从未生效）：
-#   uvicorn webui.main:app --host 0.0.0.0 --port 9090
 
 auth:
   username: admin
