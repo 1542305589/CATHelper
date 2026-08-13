@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>推理精度异常监控</title>
+  <link rel="stylesheet" href="/css/style.css?v=2">
+</head>
+<body>
+  <!-- ============ 登录页 ============ -->
+  <div id="login-page" class="page hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <h1 class="login-title">推理精度异常监控</h1>
+      <p class="login-sub">多 vLLM 实例推理异常实时看板</p>
+      <input id="login-username" class="login-input" placeholder="用户名" autocomplete="username" required>
+      <input id="login-password" class="login-input" type="password" placeholder="密码" autocomplete="current-password" required>
+      <div id="login-error" class="login-error"></div>
+      <button id="login-btn" class="btn btn-primary btn-block" type="submit">登 录</button>
+    </form>
+  </div>
+
+  <!-- ============ 主看板 ============ -->
+  <div id="dashboard" class="page hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand">推理精度异常监控</span>
+      </div>
+      <div class="topbar-right">
+        <span id="instance-status" class="instance-status" title="在线/离线/暂停实例数"></span>
+        <button id="bell" class="bell" title="告警通知">
+          <span class="bell-icon">&#128276;</span>
+          <span id="alert-badge" class="alert-badge badge hidden">0</span>
+        </button>
+        <span id="current-user" class="user"></span>
+        <button id="logout-btn" class="btn btn-ghost">退出</button>
+      </div>
+    </header>
+
+    <div class="container">
+      <!-- KPI 卡片（累计口径） -->
+      <section class="kpis">
+        <div class="kpi-card accent-red">
+          <div class="kpi-label">总异常检出</div>
+          <div id="kpi-anomalies" class="kpi-value">0</div>
+          <div class="kpi-sub">累计</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">生僻字检测数量</div>
+          <div id="kpi-rare_character" class="kpi-value">0</div>
+          <div class="kpi-sub">累计</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">乱码检出数量</div>
+          <div id="kpi-garbled" class="kpi-value">0</div>
+          <div class="kpi-sub">累计</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">重复检出数量</div>
+          <div id="kpi-repetition" class="kpi-value">0</div>
+          <div class="kpi-sub">累计</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">NaN 检出数量</div>
+          <div id="kpi-nan_value" class="kpi-value">0</div>
+          <div class="kpi-sub">累计</div>
+        </div>
+      </section>
+
+      <!-- 异常检出趋势 -->
+      <section class="card">
+        <div class="card-header">
+          <h2>异常检出趋势</h2>
+          <div class="seg" id="window-seg">
+            <button data-window="1h" class="seg-btn active">1h</button>
+            <button data-window="4h" class="seg-btn">4h</button>
+            <button data-window="8h" class="seg-btn">8h</button>
+            <button data-window="16h" class="seg-btn">16h</button>
+            <button data-window="24h" class="seg-btn">24h</button>
+          </div>
+        </div>
+        <div id="trend-chart" class="chart chart-lg"></div>
+        <div id="trend-empty" class="chart-placeholder hidden">暂无趋势数据</div>
+      </section>
+
+      <!-- 异常类型分布 / 按模型累计异常 -->
+      <section class="grid-2">
+        <div class="card">
+          <div class="card-header"><h2>异常类型分布</h2></div>
+          <div id="type-chart" class="chart chart-sm"></div>
+          <div id="type-empty" class="chart-placeholder hidden">无异常数据</div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h2>按模型累计异常</h2></div>
+          <div id="model-chart" class="chart chart-sm"></div>
+          <div id="model-empty" class="chart-placeholder hidden">无异常数据</div>
+        </div>
+      </section>
+
+      <!-- 实例状态（表格） -->
+      <section class="card">
+        <div class="card-header"><h2>实例状态</h2></div>
+        <div class="table-wrap">
+          <table id="instances-table">
+            <thead>
+              <tr>
+                <th>实例名</th>
+                <th>模型名</th>
+                <th>异常数</th>
+                <th>检测失败数</th>
+                <th>最近一次异常详情</th>
+                <th>状态</th>
+                <th>选项</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="add-instance">
+          <input id="inst-name" class="input" placeholder="实例名，如 vllm-prod-1" autocomplete="off">
+          <input id="inst-url" class="input input-url" placeholder="URL，如 http://10.0.0.1:8000" autocomplete="off">
+          <button id="add-instance-btn" class="btn btn-primary">+ 添加实例</button>
+          <span id="add-instance-msg" class="add-msg"></span>
+        </div>
+      </section>
+    </div>
+
+    <footer class="footer">推理精度异常监控 · 前端 3s 短轮询 · 数据为内存缓冲（进程重启即清空）</footer>
+  </div>
+
+  <!-- ============ 实例详情页 ============ -->
+  <div id="instance-detail" class="page hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand">实例详情</span>
+        <nav class="nav">
+          <button id="detail-back-btn" class="nav-item" title="返回看板">&#8592; 返回看板</button>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <button id="detail-bell" class="bell" title="告警通知">
+          <span class="bell-icon">&#128276;</span>
+          <span id="detail-alert-badge" class="alert-badge badge hidden">0</span>
+        </button>
+        <span id="detail-current-user" class="user"></span>
+        <button id="detail-logout-btn" class="btn btn-ghost">退出</button>
+      </div>
+    </header>
+
+    <div class="container">
+      <section class="detail-title">
+        <span id="detail-instance-name" class="detail-name"></span>
+        <span id="detail-instance-state" class="inst-status-inline"></span>
+      </section>
+
+      <!-- KPI（实例口径） -->
+      <section class="kpis" id="detail-kpis"></section>
+
+      <!-- 异常检出趋势 -->
+      <section class="card">
+        <div class="card-header">
+          <h2>异常检出趋势</h2>
+          <div class="seg" id="detail-window-seg">
+            <button data-window="1h" class="seg-btn active">1h</button>
+            <button data-window="4h" class="seg-btn">4h</button>
+            <button data-window="8h" class="seg-btn">8h</button>
+            <button data-window="16h" class="seg-btn">16h</button>
+            <button data-window="24h" class="seg-btn">24h</button>
+          </div>
+        </div>
+        <div id="detail-trend-chart" class="chart chart-lg"></div>
+        <div id="detail-trend-empty" class="chart-placeholder hidden">暂无趋势数据</div>
+      </section>
+
+      <!-- 异常类型分布 -->
+      <section class="card">
+        <div class="card-header"><h2>异常类型分布</h2></div>
+        <div id="detail-type-chart" class="chart chart-sm"></div>
+        <div id="detail-type-empty" class="chart-placeholder hidden">无异常数据</div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 告警下拉面板（全局唯一，顶栏铃铛点击展开） -->
+  <div id="alert-panel" class="alert-panel hidden">
+    <div class="alert-panel-header">
+      <span>告警通知</span>
+      <button id="alert-clear-btn" class="btn btn-xs btn-ghost">全部已读</button>
+    </div>
+    <div id="alert-panel-list" class="alert-panel-list"></div>
+    <div id="alert-panel-empty" class="alert-panel-empty hidden">暂无告警</div>
+  </div>
+
+  <div id="alert-banner" class="banner hidden"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <script src="/js/app.js?v=2"></script>
+</body>
+</html>

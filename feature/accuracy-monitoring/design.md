@@ -53,6 +53,7 @@ project_root/
 ├── configs/
 │   └── detector.yaml        # 检测器算法默认参数
 ├── tests/                   # 单元测试 + 端到端测试
+├── webui/                   # Web 精度可视化监控
 ├── docs/                    # 设计文档 + 规格 + README
 └── anomaly_middleware/          # Python 包
     ├── __init__.py            # 重导出 AnomalyMiddleware / ResponseInterceptor / RequestContext

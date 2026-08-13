@@ -53,6 +53,9 @@ curl http://localhost:8000/v1/chat/completions -d '{"model":"...","messages":[..
 curl http://localhost:8000/anomaly/metrics
 ```
 
+### 2.5 推理精度异常监控 Web 界面
+[ Web 推理精度异常监控 ](./webui_README.md)，独立的 Web 服务，支持多 vLLM 实例聚合可视化推理精度异常检测现象，并支持可配置的阈值告警和多渠道告警（界面告警 + Webhook(钉钉、飞书、企业微信) + 邮箱通知）。
+
 
 ## 3 可选环境变量
 

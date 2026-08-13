@@ -1,0 +1,60 @@
+# 推理精度异常监控 Web 界面配置文件
+# 设计见 docs/2026-08-11-anomaly-monitoring-webui-design.md §7.2
+# 运行中可直接编辑本文件，1s 内自动热重载（instances / auth 动态生效；其余段 requires restart）。
+#
+# 监听 host/port 由 uvicorn 启动命令配置（yaml 中的 server 段已移除，原配置从未生效）：
+#   uvicorn webui.main:app --host 0.0.0.0 --port 9090
+
+auth:
+  username: admin
+  # 默认密码 admin@123（sha256 hex，运行前请务必修改）
+  password_hash: "7676aaafb027c825bd9abab78b234070e702752f625b752e55e55b48e607e358"
+  token_ttl_hours: 24
+
+poll:
+  interval_seconds: 3      # 2-5s
+  http_timeout_seconds: 2
+
+instances:
+  - name: Qwen3-0.6B
+    url: http://51.62.10.124:8008
+  # - name: vllm-prod-2
+  #   url: http://10.0.0.2:8000
+  #   paused: false
+
+store:
+  event_capacity: 10000      # 异常事件环形缓冲容量
+  alert_capacity: 500        # 告警环形缓冲容量
+  raw_trend_window_seconds: 3600    # 趋势原始点保留时长（轮询粒度 ≈1h）
+  trend_bucket_seconds: 60          # 趋势分钟聚合桶粒度
+  trend_horizon_seconds: 86400      # 趋势总保留时长（24h）
+
+webhooks:
+  # 全局默认 Webhook URL（可空）。自动识别渠道并转换消息格式：
+  #   - 飞书（Lark）机器人:   https://open.feishu.cn/open-apis/bot/v2/hook/<token>
+  #   - 钉钉自定义机器人:     https://oapi.dingtalk.com/robot/send?access_token=<token>
+  #   - 企业微信群机器人:     https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>
+  #   - 其它地址: 发送通用 JSON（rule_name/instance/model/ill_type/count/ts）
+  default: ""
+
+email:
+  # 邮件告警（可选；enabled=false 时不发送）
+  enabled: false
+  smtp_host: "smtp.example.com"
+  smtp_port: 465            # 465=SSL；若用 587 请设 use_ssl: false（SMTP+STARTTLS）
+  smtp_user: "alert@example.com"
+  smtp_password: "xxx"
+  use_ssl: true
+  from_addr: "alert@example.com"          # 发件人（缺省用 smtp_user）
+  to_addrs:                                # 收件人，可多组
+    - "ops@example.com"
+
+alerts:
+  - name: garbled_frequent
+    instance: "*"
+    model: "*"
+    ill_type: garbled
+    window_seconds: 300
+    threshold: 3
+    # webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=<替换为你的钉钉机器人token>"
+    enabled: true
