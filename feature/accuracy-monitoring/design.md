@@ -52,6 +52,7 @@ project_root/
 ├── conftest.py              # pytest 根配置（sys.path 设置）
 ├── configs/
 │   └── detector.yaml        # 检测器算法默认参数
+│   └── webui.yaml           # Web 信息配置
 ├── tests/                   # 单元测试 + 端到端测试
 ├── webui/                   # Web 精度可视化监控
 ├── docs/                    # 设计文档 + 规格 + README
