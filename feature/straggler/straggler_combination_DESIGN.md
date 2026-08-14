@@ -19,7 +19,7 @@ straggler 是 AI 智算集群中识别性能劣化 NPU 卡的**两道防线**检
 
 | 防线 | 包 | 输入 | 方法 | 输出 |
 |------|----|------|------|------|
-| 第一道（KPI 资源检测） | `resource/` | KPI 时序 CSV/JSONL（`kpi_collect.sh`/CATMonitor 采集，10 秒聚合，15 天基线） | 时间×空间双维检测（kmeans 比例 + MAD/经典 Z-score）+ 二维交叉验证 + 根因定界 | JSON + 文本报告 |
+| 第一道（KPI 资源检测） | `resource/` | KPI 时序 CSV/JSONL（`kpi_collect.sh`/CATMonitor 采集，10 秒聚合） | 空间 peer 对比（kmeans 簇比例 / 绝对阈值）+ 根因定界 | JSON + 文本报告 |
 | 第二道（Profiler 检测） | `profiling/` | Ascend PyTorch Profiler `.db` SQLite（应用级、按需触发） | 均质化聚类：慢计算/慢通信/慢CPU/Bubble | JSON + 文本报告 |
 
 ### 1.2 核心问题
@@ -286,7 +286,7 @@ CATMonitor 的 hccn_tool 统计暂无 `roce_new_pkt_rty`（RoCE 重传计数器�
 straggler_output:
   enabled: false                # opt-in，默认不输出 KPI 文件
   data_dir: /var/lib/catmonitor/straggler   # KPI 文件目录
-  retention: 360h              # 保留期（默认 15 天，匹配基线窗口）
+  retention: 360h              # 保留期（默认 15 天）
   flush_interval: 60s          # 内存缓冲 flush 周期
   metrics:                     # 输出哪些指标（默认全 11 项）
     - temp
@@ -345,11 +345,11 @@ Storage 链：`Scheduler → StragglerStorage(若启用) → FaultStorage(若启
 
 ```go
 // ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error)
-//   遍历 [since,until] 范围的 straggler_kpi_{date}.jsonl，逐行反序列化 KPISample
+//   遍历目录内全部 straggler_kpi_{date}.jsonl，逐行反序列化 KPISample
 //   → CSVRow（11 项 dict + CPUAvg），合并、按 ts 排序、收集 cardIDs
 ```
 
-`main.go` 入口参数：`--kpi-jsonl-dir=DIR` 与 `--kpi-path=DIR`（遗留 kpi_collect.sh CSV 目录）二选一；若用 JSONL 模式按 `--baseline-hours`(默认 360) + `--detection-hours`(默认 1) 自动算窗口读文件。
+`main.go` 入口参数：`--kpi-jsonl-dir=DIR` 与 `--kpi-path=DIR`（遗留 kpi_collect.sh CSV 目录）二选一；JSONL 模式读取目录内全部 `straggler_kpi_{date}.jsonl` 文件（无基线/检测窗口）。
 
 ### 5.3 检测命中回注 faultsub
 
@@ -378,9 +378,8 @@ type FaultEvent struct {  // 与 CATMonitor faultsub 契约一致（JSON）
 
 ```bash
 go run . --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
-         --faultsub-url=http://localhost:9101 \
-         --baseline-hours=360 --detection-hours=1
-# 读最近 15 天 KPI → 第一道检测 → 报告 + 回注 faultsub
+         --faultsub-url=http://localhost:9101
+# 读全部 KPI JSONL → 第一道检测（空间 peer） → 报告 + 回注 faultsub
 ```
 
 第二道（Profiler）保留不变：`go run . path=/data/profiler_output ...`。
@@ -393,7 +392,7 @@ go run . --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
 | 全部 `.go` import | 路径重构为 `.../CATHelper/feature/straggler/...` |
 | `resource/json_reader.go`（新） | JSONL reader → TimeSeriesData |
 | `resource/emit.go`（新） | 检测命中 → faultsub 事件回注 |
-| `main.go` | 新增 `--kpi-jsonl-dir`/`--faultsub-url`/`--baseline-hours`/`--detection-hours` 参数；JSONL 模式入口 |
+| `main.go` | 新增 `--kpi-jsonl-dir`/`--faultsub-url`/`--space-ratio-threshold`/`--debug-output` 参数；JSONL 模式入口 |
 | `README.md`/`SPEC.md` | 同步新参数与整合用法 |
 
 ---

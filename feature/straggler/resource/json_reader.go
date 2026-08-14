@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"time"
+	"strings"
 )
 
 // KPISample mirrors the JSONL record CATMonitor's stragglerout module writes
@@ -25,17 +25,15 @@ type KPISample struct {
 	CPUAvg    map[string]string             `json:"cpu_avg,omitempty"` // cpuName -> util%
 }
 
-// ReadKPIFiles reads all straggler_kpi_{date}.jsonl files in dir whose date
-// falls in [since, until] (inclusive, by local date) and reconstructs the
-// same *TimeSeriesData ParseCSV would produce. Rows are sorted by timestamp;
-// CardIDs/NodeOf/LocalID come from one indexer spanning all date files.
+// ReadKPIFiles reads every straggler_kpi_{date}.jsonl file in dir and
+// reconstructs the same *TimeSeriesData ParseCSV would produce. Rows are sorted
+// by timestamp; CardIDs/NodeOf/LocalID come from one indexer spanning all files.
 //
 // Field names in the JSONL are the straggler KPI field names (temp, power,
 // aicore_freq, aicore_util, hbm_bandwidth_util, hbm_util, tx_bandwidth,
 // rx_pfc_pkt, roce_tx_err_pkt, roce_out_of_order, roce_new_pkt_rty), mapped
 // back onto the CSVRow metric dicts.
-func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
-	dates := dateRange(since, until)
+func ReadKPIFiles(dir string) (*TimeSeriesData, error) {
 	idx := newCardIndexer()
 	var rows []CSVRow
 
@@ -60,8 +58,7 @@ func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 			for _, c := range nc.Cards {
 				allowed[c] = true
 			}
-			for _, date := range dates {
-				path := filepath.Join(dir, folder, "straggler_kpi_"+date+".jsonl")
+			for _, path := range listJSONLFiles(filepath.Join(dir, folder)) {
 				fileRows, rerr := readKPIFile(path, idx, nc.Node, allowed)
 				if rerr != nil {
 					return nil, rerr
@@ -70,8 +67,7 @@ func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 			}
 		}
 	} else {
-		for _, date := range dates {
-			path := filepath.Join(dir, "straggler_kpi_"+date+".jsonl")
+		for _, path := range listJSONLFiles(dir) {
 			fileRows, rerr := readKPIFile(path, idx, "", nil)
 			if rerr != nil {
 				return nil, rerr
@@ -81,7 +77,7 @@ func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
 	}
 
 	if len(rows) == 0 {
-		return nil, fmt.Errorf("no KPI samples in %s for range [%s, %s]", dir, since.Format("2006-01-02"), until.Format("2006-01-02"))
+		return nil, fmt.Errorf("no KPI samples in %s", dir)
 	}
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Timestamp < rows[j].Timestamp })
@@ -272,17 +268,21 @@ func setOnce(m *map[int]float64, cid int, val float64) {
 	(*m)[cid] = val
 }
 
-// dateRange returns the list of "YYYY-MM-DD" strings from since to until
-// (inclusive), by local date. Tolerates until < since by swapping.
-func dateRange(since, until time.Time) []string {
-	if since.After(until) {
-		since, until = until, since
+// listJSONLFiles returns the sorted paths of all straggler_kpi_*.jsonl files
+// directly inside dir. The whole history is read (there is no time-range window).
+func listJSONLFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
-	var out []string
-	d := since
-	for !d.After(until) {
-		out = append(out, d.Local().Format("2006-01-02"))
-		d = d.AddDate(0, 0, 1)
+	var paths []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "straggler_kpi_") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, name))
 	}
-	return out
+	sort.Strings(paths)
+	return paths
 }

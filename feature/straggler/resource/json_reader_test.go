@@ -17,14 +17,12 @@ func writeKPIFile(t *testing.T, dir, date, content string) {
 func TestReadKPIFilesBasic(t *testing.T) {
 	dir := t.TempDir()
 	// Two timestamps, two cards, 3 metrics each. File date is derived from the
-	// sample timestamp so it matches the date-range logic.
+	// sample timestamp for the filename.
 	date := time.Unix(1784547926, 0).Local().Format("2006-01-02")
 	writeKPIFile(t, dir, date,
 		`{"ts":1784547926,"vals":{"0":{"temp":47,"power":1628,"aicore_freq":1800},"1":{"temp":50,"power":1700,"aicore_freq":1800}}}`+"\n"+
 			`{"ts":1784547927,"vals":{"0":{"temp":48,"power":1620,"aicore_freq":1800},"1":{"temp":51,"power":1700,"aicore_freq":1800}}}`+"\n")
-	since := time.Unix(1784547926, 0)
-	until := since.Add(time.Minute)
-	ts, err := ReadKPIFiles(dir, since, until)
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
 		t.Fatalf("ReadKPIFiles: %v", err)
 	}
@@ -55,7 +53,7 @@ func TestReadKPIFilesAllFieldsAndCPU(t *testing.T) {
 	date := time.Unix(1000, 0).Local().Format("2006-01-02")
 	writeKPIFile(t, dir, date,
 		`{"ts":1000,"vals":{"3":{"temp":47,"power":1628,"aicore_freq":1800,"aicore_util":45,"hbm_bandwidth_util":50,"hbm_util":48,"tx_bandwidth":1250,"rx_pfc_pkt":1,"roce_tx_err_pkt":2,"roce_out_of_order":3,"roce_new_pkt_rty":4,"nic_rx_all_pkg":5}},"cpu_avg":{"cpu1":"4.26"}}`+"\n")
-	ts, err := ReadKPIFiles(dir, time.Unix(1000, 0), time.Unix(1000, 0).Add(time.Second))
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
 		t.Fatalf("ReadKPIFiles: %v", err)
 	}
@@ -72,15 +70,13 @@ func TestReadKPIFilesAllFieldsAndCPU(t *testing.T) {
 }
 
 func TestReadKPIFilesMissingDateFile(t *testing.T) {
-	// A date with no file should be silently skipped.
+	// A directory with just one date file yields that file's rows.
 	dir := t.TempDir()
 	date := time.Unix(1000, 0).Local().Format("2006-01-02")
 	writeKPIFile(t, dir, date, `{"ts":1000,"vals":{"0":{"temp":1}}}`+"\n")
-	since := time.Unix(1000, 0).AddDate(0, 0, -1) // includes a prior day (no file)
-	until := time.Unix(1000, 0).AddDate(0, 0, 1) // and a following day (no file)
-	ts, err := ReadKPIFiles(dir, since, until)
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
-		t.Fatalf("missing dates should not error: %v", err)
+		t.Fatalf("ReadKPIFiles should not error: %v", err)
 	}
 	if len(ts.Rows) != 1 {
 		t.Fatalf("expected 1 row from the one existing date, got %d", len(ts.Rows))
@@ -89,9 +85,9 @@ func TestReadKPIFilesMissingDateFile(t *testing.T) {
 
 func TestReadKPIFilesNoDataErrors(t *testing.T) {
 	dir := t.TempDir()
-	_, err := ReadKPIFiles(dir, time.Unix(1000, 0), time.Unix(2000, 0))
+	_, err := ReadKPIFiles(dir)
 	if err == nil {
-		t.Fatal("expected error when no KPI data in range")
+		t.Fatal("expected error when no KPI data present")
 	}
 }
 
@@ -102,7 +98,7 @@ func TestReadKPIFilesSkipsMalformedLine(t *testing.T) {
 		`{"ts":1000,"vals":{"0":{"temp":1}}}`+"\n"+
 			`not json`+"\n"+
 			`{"ts":1001,"vals":{"0":{"temp":2}}}`+"\n")
-	ts, err := ReadKPIFiles(dir, time.Unix(1000, 0), time.Unix(1001, 0))
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
 		t.Fatalf("malformed line should not abort: %v", err)
 	}
@@ -132,7 +128,7 @@ func TestReadKPIFilesMultiNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := ReadKPIFiles(dir, time.Unix(1784547926, 0), time.Unix(1784547926, 0).Add(time.Minute))
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
 		t.Fatalf("ReadKPIFiles: %v", err)
 	}
@@ -179,7 +175,7 @@ func TestReadKPIFilesMultiNodeCardFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := ReadKPIFiles(dir, time.Unix(1000, 0), time.Unix(1000, 0).Add(time.Second))
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
 		t.Fatalf("ReadKPIFiles: %v", err)
 	}
@@ -199,7 +195,7 @@ func TestReadKPIFilesEquivalentToCSVPipeline(t *testing.T) {
 	date := time.Unix(1784547926, 0).Local().Format("2006-01-02")
 	writeKPIFile(t, dir, date,
 		`{"ts":1784547926,"vals":{"0":{"temp":47,"power":1628},"1":{"temp":50,"power":1700}}}`+"\n")
-	ts, err := ReadKPIFiles(dir, time.Unix(1784547926, 0), time.Unix(1784547926, 0).Add(time.Second))
+	ts, err := ReadKPIFiles(dir)
 	if err != nil {
 		t.Fatalf("ReadKPIFiles: %v", err)
 	}

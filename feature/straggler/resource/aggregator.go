@@ -181,36 +181,3 @@ func counterDelta(vals []float64) float64 {
 	}
 	return delta
 }
-
-// =============================================================================
-// Window Split
-// =============================================================================
-
-// SplitWindows divides aggregated rows into baseline and detection windows.
-//
-// Returns (baselineRows, detectionRows).
-// Detection window = last DetectionHours of data.
-// Baseline window = everything before that.
-func SplitWindows(rows []CSVRow, cfg DetectionConfig) (baseline, detection []CSVRow) {
-	if len(rows) == 0 {
-		return nil, nil
-	}
-
-	detectionSec := int64(cfg.DetectionHours * 3600)
-	if detectionSec <= 0 {
-		detectionSec = 3600 // default 1 hour
-	}
-
-	lastTS := rows[len(rows)-1].Timestamp
-	cutoffTS := lastTS - detectionSec
-
-	for _, row := range rows {
-		if row.Timestamp >= cutoffTS {
-			detection = append(detection, row)
-		} else {
-			baseline = append(baseline, row)
-		}
-	}
-
-	return baseline, detection
-}

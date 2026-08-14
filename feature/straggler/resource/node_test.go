@@ -134,81 +134,43 @@ func TestSpaceClusterPerNode(t *testing.T) {
 // =============================================================================
 
 func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
-	// MAD time + cluster space → current_median/baseline_median/baseline_mad/cluster_mean.
-	mad := MetricAnomalyDetail{
+	// Space-only detail → metric/space_score/space_abnormal/quadrant/space_method.
+	d := MetricAnomalyDetail{
 		Metric:        MetricTemp,
 		SpaceScore:    16.9,
-		TimeScore:     3.37,
-		FusionScore:   8.8,
 		SpaceAbnormal: true,
-		TimeAbnormal:  false,
-		Quadrant:      QuadIndividualVariance,
-		CurrentMean:   80,
-		BaselineMean:  55,
-		BaselineStd:   1.4826,
+		Quadrant:      QuadConfirmedAnomaly,
 		SpaceMethod:   MethodCluster,
-		TimeMethod:    MethodMAD,
-		SpaceRef:      55,
 	}
-	b, err := json.Marshal(mad)
+	b, err := json.Marshal(d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var m map[string]interface{}
 	json.Unmarshal(b, &m)
-	for _, k := range []string{"current_median", "time_baseline_median", "time_baseline_mad", "space_baseline_mean", "space_scale", "space_method", "time_method"} {
+	for _, k := range []string{"metric", "space_score", "space_abnormal", "quadrant", "space_method"} {
 		if _, ok := m[k]; !ok {
-			t.Errorf("MAD/cluster detail missing key %q in %s", k, b)
+			t.Errorf("detail missing key %q in %s", k, b)
 		}
 	}
-	for _, k := range []string{"current_mean", "time_baseline_std", "peer_mean"} {
+	// Time-dimension and fusion fields must not appear anymore.
+	for _, k := range []string{
+		"time_score", "time_abnormal", "time_method", "fusion_score",
+		"current_median", "current_mean", "time_baseline_median", "time_baseline_mean",
+		"time_baseline_mad", "time_baseline_std", "peer_mean",
+		"space_baseline_mean", "space_scale",
+	} {
 		if _, ok := m[k]; ok {
-			t.Errorf("MAD/cluster detail should NOT have %q in %s", k, b)
+			t.Errorf("detail should NOT have %q in %s", k, b)
 		}
 	}
-	// Key order must be preserved (not alphabetized): metric first, then the
-	// method-aware fields in declaration order.
+	// Key order must be preserved (struct field order): metric first.
 	got := string(b)
 	if len(got) < 1 || !strings.HasPrefix(got, `{"metric":`) {
 		t.Errorf("detail JSON should start with {\"metric\":..., got %s", got)
 	}
 	if idxMetric := strings.Index(got, `"metric"`); idxMetric < 0 || strings.Index(got, `"space_score"`) < idxMetric {
 		t.Errorf("metric must come before space_score in %s", got)
-	}
-	idxSpace := strings.Index(got, `"space_baseline_mean"`)
-	if idxSpace < 0 {
-		t.Errorf("space_baseline_mean missing in %s", got)
-	}
-	idxBaseline := strings.Index(got, `"time_baseline_mad"`)
-	if idxBaseline < 0 || idxBaseline > idxSpace {
-		t.Errorf("time_baseline_mad must come before space_baseline_mean in %s", got)
-	}
-
-	// Mean/std time + direct space → current_mean/baseline_mean/baseline_std/peer_mean.
-	zs := MetricAnomalyDetail{
-		Metric:       MetricTXBandwidth,
-		CurrentMean:  100,
-		BaselineMean: 110,
-		BaselineStd:  5,
-		PeerMean:     105,
-		SpaceMethod:  MethodDirect,
-		TimeMethod:   MethodZScore,
-	}
-	b2, err := json.Marshal(zs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m2 map[string]interface{}
-	json.Unmarshal(b2, &m2)
-	for _, k := range []string{"current_mean", "time_baseline_mean", "time_baseline_std", "peer_mean"} {
-		if _, ok := m2[k]; !ok {
-			t.Errorf("zscore/direct detail missing key %q in %s", k, b2)
-		}
-	}
-	for _, k := range []string{"current_median", "space_baseline_mean", "space_scale"} {
-		if _, ok := m2[k]; ok {
-			t.Errorf("zscore/direct detail should NOT have %q in %s", k, b2)
-		}
 	}
 }
 

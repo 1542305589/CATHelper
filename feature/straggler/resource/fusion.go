@@ -7,12 +7,11 @@ import (
 )
 
 // =============================================================================
-// Fusion: 2D Cross-Validation + Compute-First Ordering
+// Fusion: Space-Only Fusion + Compute-First Ordering
 // =============================================================================
 
-// FuseAndSummarize merges space and time detection results, applies 2D cross-
-// validation to assign each card a quadrant, and enforces the "compute first,
-// communication second" detection order.
+// FuseAndSummarize aggregates the space detection details and enforces the
+// "compute first, communication second" detection order.
 //
 // For each card:
 //  1. Check compute metrics first.
@@ -22,15 +21,13 @@ import (
 //     category=communication (independent network issue).
 func FuseAndSummarize(
 	spaceDetails map[int]map[MetricName]*MetricAnomalyDetail,
-	timeDetails map[int]map[MetricName]*MetricAnomalyDetail,
-	trends map[int][]TrendFinding,
 	cardIDs []int,
 	cfg DetectionConfig,
 ) []CardDetectionSummary {
 	var summaries []CardDetectionSummary
 
 	for _, cid := range cardIDs {
-		summary := fuseOneCard(cid, spaceDetails[cid], timeDetails[cid], trends[cid], cardIDs, cfg)
+		summary := fuseOneCard(cid, spaceDetails[cid], cfg)
 		summaries = append(summaries, summary)
 	}
 
@@ -62,23 +59,18 @@ func quadrantOrder(q Quadrant) int {
 	}
 }
 
-// fuseOneCard fuses space+time for a single card with compute-first logic.
+// fuseOneCard fuses the space detection details for a single card with
+// compute-first logic. Anomaly is decided purely by the space dimension.
 func fuseOneCard(
 	cid int,
 	spaceM map[MetricName]*MetricAnomalyDetail,
-	timeM map[MetricName]*MetricAnomalyDetail,
-	trends []TrendFinding,
-	cardIDs []int,
 	cfg DetectionConfig,
 ) CardDetectionSummary {
-	// Merge space and time details.
-	merged := mergeDetails(spaceM, timeM, cfg)
-
 	// Step 1: Check compute metrics.
 	hasComputeAnomaly := false
 	for _, metric := range AllMetrics {
 		if IsComputeMetric(metric) {
-			if d, ok := merged[metric]; ok && (d.SpaceAbnormal || d.TimeAbnormal) {
+			if d, ok := spaceM[metric]; ok && d.SpaceAbnormal {
 				hasComputeAnomaly = true
 			}
 		}
@@ -86,15 +78,14 @@ func fuseOneCard(
 
 	var summary CardDetectionSummary
 	summary.CardID = cid
-	summary.TrendFindings = trends
 
-	// Debug (--debug-output): show every metric's full space/time detail, even
-	// normal ones (space_abnormal/time_abnormal/quadrant false/0), so undetected
-	// metrics can be inspected alongside the flags.
+	// Debug (--debug-output): show every metric's full space detail, even
+	// normal ones (space_abnormal/quadrant false/0), so undetected metrics can
+	// be inspected alongside the flags.
 	if cfg.EnableDebug {
 		summary.AnomalyDetails = make([]MetricAnomalyDetail, 0, len(AllMetrics))
 		for _, metric := range AllMetrics {
-			d := merged[metric]
+			d := spaceM[metric]
 			d.determineQuadrant()
 			summary.AnomalyDetails = append(summary.AnomalyDetails, *d)
 		}
@@ -102,14 +93,14 @@ func fuseOneCard(
 			summary.AnomalyCategory = CatCompute
 		} else {
 			for _, d := range summary.AnomalyDetails {
-				if IsCommunicationMetric(d.Metric) && (d.SpaceAbnormal || d.TimeAbnormal) {
+				if IsCommunicationMetric(d.Metric) && d.SpaceAbnormal {
 					summary.AnomalyCategory = CatCommunication
 					break
 				}
 			}
 		}
 		summary.Quadrant = worstQuadrant(summary.AnomalyDetails)
-		summary.CompositeScore = compositeScore(summary.AnomalyDetails, cfg)
+		summary.CompositeScore = compositeScore(summary.AnomalyDetails)
 		summary.Severity = determineSeverity(summary.Quadrant, summary.CompositeScore)
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Card %d: category=%s quadrant=%s score=%.2f anomalies=%d\n",
 			cid, summary.AnomalyCategory, summary.Quadrant, summary.CompositeScore, len(summary.AnomalyDetails))
@@ -122,14 +113,14 @@ func fuseOneCard(
 		summary.AnomalyCategory = CatCompute
 
 		for _, metric := range AllMetrics {
-			d := merged[metric]
+			d := spaceM[metric]
 			d.determineQuadrant()
 			if IsComputeMetric(metric) {
-				if d.SpaceAbnormal || d.TimeAbnormal {
+				if d.SpaceAbnormal {
 					summary.AnomalyDetails = append(summary.AnomalyDetails, *d)
 				}
 			} else if IsCommunicationMetric(metric) {
-				if d.SpaceAbnormal || d.TimeAbnormal {
+				if d.SpaceAbnormal {
 					// Communication anomaly on a compute-anomalous card:
 					// likely secondary — flag separately.
 					summary.SecondaryCommAnomalies = append(summary.SecondaryCommAnomalies, *d)
@@ -139,7 +130,7 @@ func fuseOneCard(
 
 		// Determine overall quadrant from compute metrics only.
 		summary.Quadrant = worstQuadrant(summary.AnomalyDetails)
-		summary.CompositeScore = compositeScore(summary.AnomalyDetails, cfg)
+		summary.CompositeScore = compositeScore(summary.AnomalyDetails)
 		summary.Severity = determineSeverity(summary.Quadrant, summary.CompositeScore)
 
 	} else {
@@ -148,9 +139,9 @@ func fuseOneCard(
 
 		// Check all metrics.
 		for _, metric := range AllMetrics {
-			d := merged[metric]
+			d := spaceM[metric]
 			d.determineQuadrant()
-			if d.SpaceAbnormal || d.TimeAbnormal {
+			if d.SpaceAbnormal {
 				summary.AnomalyDetails = append(summary.AnomalyDetails, *d)
 			}
 		}
@@ -167,14 +158,14 @@ func fuseOneCard(
 		}
 
 		summary.Quadrant = worstQuadrant(summary.AnomalyDetails)
-		summary.CompositeScore = compositeScore(summary.AnomalyDetails, cfg)
+		summary.CompositeScore = compositeScore(summary.AnomalyDetails)
 		summary.Severity = determineSeverity(summary.Quadrant, summary.CompositeScore)
 	}
 
 	if len(summary.AnomalyDetails) == 0 && len(summary.SecondaryCommAnomalies) > 0 {
 		// Only secondary comm anomalies: still flag as compute-related.
 		summary.Quadrant = QuadConfirmedAnomaly
-		summary.CompositeScore = compositeScore(summary.SecondaryCommAnomalies, cfg)
+		summary.CompositeScore = compositeScore(summary.SecondaryCommAnomalies)
 		summary.Severity = SevWarning
 	}
 
@@ -189,61 +180,12 @@ func fuseOneCard(
 // Detail Helpers
 // =============================================================================
 
-// mergeDetails combines space and time detection details into one.
-func mergeDetails(
-	spaceM map[MetricName]*MetricAnomalyDetail,
-	timeM map[MetricName]*MetricAnomalyDetail,
-	cfg DetectionConfig,
-) map[MetricName]*MetricAnomalyDetail {
-	merged := make(map[MetricName]*MetricAnomalyDetail)
-
-	for _, metric := range AllMetrics {
-		sd := spaceM[metric]
-		td := timeM[metric]
-
-		d := &MetricAnomalyDetail{
-			Metric:      metric,
-			SpaceMethod: MetricMetaRegistry[metric].SpaceMethod,
-			TimeMethod:  MetricMetaRegistry[metric].TimeMethod,
-		}
-		if sd != nil {
-			d.SpaceScore = sd.SpaceScore
-			d.SpaceAbnormal = sd.SpaceAbnormal
-			d.SpaceRef = sd.SpaceRef    // cluster baseline-cluster mean reference
-			d.SpaceScale = sd.SpaceScale // cluster noise scale
-		}
-		if td != nil {
-			d.TimeScore = td.TimeScore
-			d.TimeAbnormal = td.TimeAbnormal
-			d.CurrentMean = td.CurrentMean
-			d.BaselineMean = td.BaselineMean
-			d.BaselineStd = td.BaselineStd
-			d.PeerMean = td.PeerMean
-		}
-		// For non-cluster space methods, the reported peer reference is the
-		// peer arithmetic mean from the time dimension.
-		if d.SpaceMethod != MethodCluster {
-			d.SpaceRef = d.PeerMean
-		}
-
-		// Compute fusion score.
-		d.FusionScore = cfg.TimeWeight*d.TimeScore + cfg.SpaceWeight*d.SpaceScore
-		merged[metric] = d
-	}
-
-	return merged
-}
-
-// determineQuadrant classifies the metric into the 2×2 quadrant.
+// determineQuadrant decides the anomaly state purely by the space dimension:
+// space-abnormal → confirmed_anomaly, else normal.
 func (d *MetricAnomalyDetail) determineQuadrant() {
-	switch {
-	case d.SpaceAbnormal && d.TimeAbnormal:
+	if d.SpaceAbnormal {
 		d.Quadrant = QuadConfirmedAnomaly
-	case d.SpaceAbnormal && !d.TimeAbnormal:
-		d.Quadrant = QuadIndividualVariance
-	case !d.SpaceAbnormal && d.TimeAbnormal:
-		d.Quadrant = QuadEarlyDegradation
-	default:
+	} else {
 		d.Quadrant = QuadNormal
 	}
 }
@@ -259,14 +201,14 @@ func worstQuadrant(details []MetricAnomalyDetail) Quadrant {
 	return worst
 }
 
-// compositeScore computes the weighted anomaly score across all provided details.
-func compositeScore(details []MetricAnomalyDetail, cfg DetectionConfig) float64 {
+// compositeScore computes the mean space score across all provided details.
+func compositeScore(details []MetricAnomalyDetail) float64 {
 	if len(details) == 0 {
 		return 0
 	}
 	var sum float64
 	for _, d := range details {
-		sum += d.FusionScore
+		sum += d.SpaceScore
 	}
 	return sum / float64(len(details))
 }

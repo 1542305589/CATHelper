@@ -17,7 +17,7 @@ func RunDetection(csvPath string, cfg DetectionConfig) (*DetectionResult, error)
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection starting: %s\n", csvPath)
 
 	// 1. Parse CSV.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/9: Parsing CSV...\n")
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/6: Parsing CSV...\n")
 	rawData, err := ParseCSV(csvPath)
 	if err != nil {
 		return nil, fmt.Errorf("parse CSV: %w", err)
@@ -35,7 +35,7 @@ func RunDetectionFromDir(dir string, cfg DetectionConfig) (*DetectionResult, err
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection starting: %s\n", dir)
 
 	// 1. Parse the directory (multi-node CSVs + node_config.json).
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/9: Parsing KPI directory...\n")
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/6: Parsing KPI directory...\n")
 	ts, err := ParseKPIDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("parse KPI dir: %w", err)
@@ -55,20 +55,17 @@ func RunDetectionFromData(ts *TimeSeriesData, source string, cfg DetectionConfig
 	return runDetection(ts, source, cfg)
 }
 
-// runDetection executes steps 2-9 on already-parsed TimeSeriesData.
+// runDetection executes steps 2-6 on already-parsed TimeSeriesData.
 //
 // Pipeline:
 //  2. AggregateByMinute
-//  3. SplitWindows
-//  4. BuildBaselines
-//  5. Space detection (peer comparison) on detection window
-//  6. Time detection (self comparison) against baselines
-//  7. FuseAndSummarize (compute-first 2D cross-validation)
-//  8. BoundRootCause
-//  9. CrossCardCorrelation
+//  3. Space detection (peer comparison) on the last aggregated point
+//  4. FuseAndSummarize (compute-first ordering)
+//  5. BoundRootCause
+//  6. CrossCardCorrelation
 func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (*DetectionResult, error) {
 	// 2. Aggregate by the aggregation window (AggregationWindowSec, default 10s).
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 2/9: Aggregating (trimmed mean, window=%ds)...\n", cfg.AggregationWindowSec)
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 2/6: Aggregating (trimmed mean, window=%ds)...\n", cfg.AggregationWindowSec)
 	aggregated, err := AggregateByMinute(rawData.RawRows, rawData.CardIDs, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate: %w", err)
@@ -77,48 +74,28 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 
 	rawData.Rows = aggregated
 
-	// 3. Split windows.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 3/9: Splitting windows (baseline=%.0fh, detection=%.0fh)...\n",
-		cfg.BaselineHours, cfg.DetectionHours)
-	baselineRows, detectionRows := SplitWindows(aggregated, cfg)
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Baseline: %d rows, Detection: %d rows\n",
-		len(baselineRows), len(detectionRows))
-
-	if len(detectionRows) == 0 {
-		return nil, fmt.Errorf("no data in detection window (need at least one aggregated point in the last %.0fh)", cfg.DetectionHours)
-	}
-
-	// 4. Build baselines.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 4/9: Building historical baselines...\n")
-	baselines := BuildBaselines(baselineRows, rawData.CardIDs)
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Built baselines for %d cards\n", len(baselines))
-
-	// 5. Space detection (peer comparison within each node, last point only).
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 5/9: Space (peer) detection...\n")
-	spaceResult := detectSpaceAnomalies(detectionRows, rawData.CardIDs, cfg, rawData.NodeOf)
+	// 3. Space detection (peer comparison within each node, last point only).
+	//    With the time dimension and baseline/detection windows removed, the
+	//    judgment is purely the peer comparison on the most recent reading.
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 3/6: Space (peer) detection...\n")
+	spaceResult := detectSpaceAnomalies(aggregated, rawData.CardIDs, cfg, rawData.NodeOf)
 	spaceDetails := aggregateSpaceScores(spaceResult, rawData.CardIDs, cfg)
 
-	// 6. Time detection.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 6/9: Time (self) detection...\n")
-	timeResult := detectTimeAnomalies(detectionRows, baselines, rawData.CardIDs, cfg)
-	timeDetails := aggregateTimeScores(timeResult, detectionRows, baselines, rawData.CardIDs, cfg, rawData.NodeOf)
+	// 4. Fuse + compute-first ordering.
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 4/6: Fusion (compute-first)...\n")
+	summaries := FuseAndSummarize(spaceDetails, rawData.CardIDs, cfg)
 
-	// 7. Fuse + compute-first ordering.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 7/9: 2D cross-validation (compute-first)...\n")
-	trends := detectTrends(aggregated, rawData.CardIDs, cfg)
-	summaries := FuseAndSummarize(spaceDetails, timeDetails, trends, rawData.CardIDs, cfg)
-
-	// 8. Root cause.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 8/9: Root-cause bounding...\n")
+	// 5. Root cause.
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 5/6: Root-cause bounding...\n")
 	rootCauses := BoundRootCause(summaries)
 
-	// 9. Cross-card correlation.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 9/9: Cross-card correlation...\n")
+	// 6. Cross-card correlation.
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 6/6: Cross-card correlation...\n")
 	correlations := CrossCardCorrelation(rootCauses, summaries)
 
-	// 9.5 Node identity at the output boundary: convert global card IDs to
-	// per-node IDs and attach the node name. Runs after root cause/correlation
-	// so those stages keep using global IDs.
+	// Node identity at the output boundary: convert global card IDs to per-node
+	// IDs and attach the node name. Runs after root cause/correlation so those
+	// stages keep using global IDs.
 	summaries, rootCauses = applyNodeIdentity(summaries, rootCauses, rawData.NodeOf, rawData.LocalID)
 
 	// Build result.
@@ -158,8 +135,6 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 			Normal:             normal,
 			KPICSV:             source,
 			TotalTimePoints:    len(aggregated),
-			BaselineWindow:     fmt.Sprintf("%.0fh", cfg.BaselineHours),
-			DetectionWindow:    fmt.Sprintf("%.0fh", cfg.DetectionHours),
 		},
 		Results:      summaries,
 		RootCauses:   rootCauses,
@@ -215,9 +190,7 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 	// Summary.
 	b.WriteString("[SUMMARY]\n")
 	fmt.Fprintf(&b, "  CSV:        %s\n", result.Summary.KPICSV)
-	fmt.Fprintf(&b, "  数据点:     %d (分钟级)\n", result.Summary.TotalTimePoints)
-	fmt.Fprintf(&b, "  基线窗口:   %s\n", result.Summary.BaselineWindow)
-	fmt.Fprintf(&b, "  检测窗口:   %s\n", result.Summary.DetectionWindow)
+	fmt.Fprintf(&b, "  数据点:     %d\n", result.Summary.TotalTimePoints)
 	fmt.Fprintf(&b, "  总卡数:     %d\n", result.Summary.TotalCards)
 	fmt.Fprintf(&b, "  ✓ 正常:     %d\n", result.Summary.Normal)
 	fmt.Fprintf(&b, "  ✗ 确认异常: %d\n", result.Summary.ConfirmedAnomalies)
@@ -237,34 +210,8 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 			if len(rc.Evidence) > 0 {
 				b.WriteString("  异常指标:\n")
 				for _, e := range rc.Evidence {
-					fmt.Fprintf(&b, "    %-20s space=%.1f time=%.1f quadrant=%s %s=%.1f %s=%.1f\n",
-						e.Metric, e.SpaceScore, e.TimeScore, e.Quadrant,
-						currentLabel(e.TimeMethod), e.CurrentMean, baselineLabel(e.TimeMethod), e.BaselineMean)
-				}
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	// Early degradation (watch list).
-	earlyCards := filterByQuadrant(result.Results, QuadEarlyDegradation)
-	if len(earlyCards) > 0 {
-		b.WriteString("================================================================================\n")
-		b.WriteString("  早期劣化（关注列表）\n")
-		b.WriteString("================================================================================\n\n")
-		for _, s := range earlyCards {
-			fmt.Fprintf(&b, "  Node %s Card %d | score=%.2f\n", s.Node, s.CardID, s.CompositeScore)
-			for _, d := range s.AnomalyDetails {
-				if d.TimeAbnormal {
-					fmt.Fprintf(&b, "    %-20s time_z=%.1f %s=%.1f %s=%.1f±%.1f\n",
-						d.Metric, d.TimeScore,
-						currentLabel(d.TimeMethod), d.CurrentMean,
-						baselineLabel(d.TimeMethod), d.BaselineMean, d.BaselineStd)
-				}
-			}
-			if len(s.TrendFindings) > 0 {
-				for _, t := range s.TrendFindings {
-					fmt.Fprintf(&b, "    [趋势] %s (R²=%.2f)\n", t.Desc, t.RSquared)
+					fmt.Fprintf(&b, "    %-20s space=%.1f quadrant=%s\n",
+						e.Metric, e.SpaceScore, e.Quadrant)
 				}
 			}
 			b.WriteString("\n")
@@ -305,8 +252,6 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 // Helpers
 // =============================================================================
 
-// currentLabel / baselineLabel return the method-aware field label for the
-// text report (median/MAD metrics vs mean/std metrics).
 // uniqueNodes counts the distinct node names in a nodeOf mapping.
 func uniqueNodes(nodeOf map[int]string) int {
 	seen := make(map[string]bool)
@@ -314,28 +259,4 @@ func uniqueNodes(nodeOf map[int]string) int {
 		seen[n] = true
 	}
 	return len(seen)
-}
-
-func currentLabel(m DetectionMethod) string {
-	if m == MethodMAD {
-		return "current_median"
-	}
-	return "current_mean"
-}
-
-func baselineLabel(m DetectionMethod) string {
-	if m == MethodMAD {
-		return "time_baseline_median"
-	}
-	return "time_baseline_mean"
-}
-
-func filterByQuadrant(summaries []CardDetectionSummary, q Quadrant) []CardDetectionSummary {
-	var result []CardDetectionSummary
-	for _, s := range summaries {
-		if s.Quadrant == q {
-			result = append(result, s)
-		}
-	}
-	return result
 }

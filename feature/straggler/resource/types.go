@@ -1,17 +1,14 @@
 // Package resource implements NPU resource KPI anomaly detection using
-// time+space dual-dimension peer comparison with 15-day historical baselines.
+// space-dimension peer comparison.
 //
 // Detection pipeline:
 //   CSV/JSONL parse → aggregation-window (10s) trimmed-mean aggregation →
-//   window split → time baseline + space detection → compute-first 2D
-//   cross-validation → root-cause bounding → JSON + text report
+//   space detection (peer comparison, last aggregated point) → compute-first
+//   fusion → root-cause bounding → JSON + text report
 package resource
 
 import (
-	"bytes"
-	"encoding/json"
 	"math"
-	"sort"
 )
 
 // =============================================================================
@@ -145,7 +142,6 @@ const (
 	MethodIQR      DetectionMethod = "iqr"
 	MethodDirect   DetectionMethod = "direct"   // direct comparison (no metric currently uses it)
 	MethodAbsolute DetectionMethod = "absolute" // > threshold → anomaly
-	MethodMAD      DetectionMethod = "mad"      // robust median/MAD Z-score
 	MethodCluster  DetectionMethod = "cluster"  // majority-mode clustering
 )
 
@@ -155,41 +151,22 @@ type MetricMeta struct {
 	Category     AnomalyCategory
 	Direction    AnomalyDirection
 	SpaceMethod  DetectionMethod
-	TimeMethod   DetectionMethod
 	AbsThreshold float64 // for MethodAbsolute
 }
 
 // MetricMetaRegistry maps each metric to its meta-information.
 var MetricMetaRegistry = map[MetricName]MetricMeta{
-	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
-	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
-	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
-	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
-	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodMAD},
-	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodZScore},
-	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, SpaceMethod: MethodCluster, TimeMethod: MethodZScore},
-	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-}
-
-// =============================================================================
-// Baseline
-// =============================================================================
-
-// CardBaseline holds a single card's historical distribution for one metric.
-type CardBaseline struct {
-	CardID int
-	Metric MetricName
-	Mean   float64
-	StdDev float64
-	Median float64 // robust center (50th percentile)
-	Mad    float64 // robust scale: median absolute deviation
-	P50    float64
-	P95    float64
-	P99    float64
-	N      int
+	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster},
+	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster},
+	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
+	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
+	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
+	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
+	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, SpaceMethod: MethodCluster},
+	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
+	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
+	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
+	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
 }
 
 // =============================================================================
@@ -205,14 +182,17 @@ const (
 	CatCommunication AnomalyCategory = "communication"
 )
 
-// Quadrant is the 2×2 time×space quadrant.
+// Quadrant is the card-level anomaly state. With the time dimension removed it
+// is decided purely by the space dimension: space-abnormal → confirmed_anomaly,
+// else normal. QuadEarlyDegradation / QuadIndividualVariance are retained for
+// output compatibility but never produced.
 type Quadrant int
 
 const (
-	QuadNormal            Quadrant = iota // both normal
-	QuadEarlyDegradation                 // time abnormal, space normal
-	QuadIndividualVariance               // space abnormal, time normal
-	QuadConfirmedAnomaly                 // both abnormal
+	QuadNormal            Quadrant = iota // no space anomaly
+	QuadEarlyDegradation                 // retained (not produced)
+	QuadIndividualVariance               // retained (not produced)
+	QuadConfirmedAnomaly                 // space-abnormal
 )
 
 func (q Quadrant) String() string {
@@ -230,102 +210,14 @@ func (q Quadrant) String() string {
 	}
 }
 
-// MetricAnomalyDetail records the dual-dimension anomaly scores for one metric on one card.
-//
-// The JSON output is method-aware (see MarshalJSON): the time value fields are
-// named current_median/baseline_median/baseline_mad for MAD metrics vs
-// current_mean/baseline_mean/baseline_std for mean/std; the space reference is
-// cluster_mean for the cluster method vs peer_mean otherwise.
+// MetricAnomalyDetail records the space-dimension anomaly score for one metric
+// on one card.
 type MetricAnomalyDetail struct {
-	Metric        MetricName `json:"metric"`
-	SpaceScore    float64    `json:"space_score"`
-	TimeScore     float64    `json:"time_score"`
-	FusionScore   float64    `json:"fusion_score"`
-	SpaceAbnormal bool       `json:"space_abnormal"`
-	TimeAbnormal  bool       `json:"time_abnormal"`
-	Quadrant      Quadrant   `json:"quadrant"`
-	CurrentMean   float64    `json:"-"` // median (MAD) or mean (zscore)
-	BaselineMean  float64    `json:"-"`
-	BaselineStd   float64    `json:"-"` // 1.4826×MAD (MAD) or std (zscore)
-	PeerMean      float64    `json:"-"` // peer arithmetic mean (non-cluster)
-
-	// unexported: method labels + space reference/scale used by MarshalJSON.
-	SpaceMethod DetectionMethod `json:"-"`
-	TimeMethod  DetectionMethod `json:"-"`
-	SpaceRef    float64         `json:"-"` // space baseline mean (cluster) or 0
-	SpaceScale  float64         `json:"-"` // space noise scale (cluster), 1.4826×Mad median
-}
-
-// MarshalJSON emits method-aware field names in a stable, declaration-ordered
-// sequence. SpaceMethod/TimeMethod/SpaceRef are populated in mergeDetails
-// (fusion.go), after which encoding/json uses this method everywhere the
-// detail is serialized (anomaly_details, secondary_comm_anomalies,
-// root_causes[].evidence). marshalOrderedJSON keeps the key order (Go's
-// json.Marshal sorts map keys alphabetically, which we do not want).
-func (d MetricAnomalyDetail) MarshalJSON() ([]byte, error) {
-	pairs := [][2]interface{}{
-		{"metric", d.Metric},
-		{"space_score", d.SpaceScore},
-		{"time_score", d.TimeScore},
-		{"fusion_score", d.FusionScore},
-		{"space_abnormal", d.SpaceAbnormal},
-		{"time_abnormal", d.TimeAbnormal},
-		{"quadrant", d.Quadrant},
-		{"space_method", d.SpaceMethod},
-		{"time_method", d.TimeMethod},
-	}
-	// Time value fields: robust median/MAD vs classic mean/std. Baseline
-	// fields carry the time_ prefix to mirror the space_* fields.
-	if d.TimeMethod == MethodMAD {
-		pairs = append(pairs,
-			[2]interface{}{"current_median", d.CurrentMean},
-			[2]interface{}{"time_baseline_median", d.BaselineMean},
-			[2]interface{}{"time_baseline_mad", d.BaselineStd},
-		)
-	} else {
-		pairs = append(pairs,
-			[2]interface{}{"current_mean", d.CurrentMean},
-			[2]interface{}{"time_baseline_mean", d.BaselineMean},
-			[2]interface{}{"time_baseline_std", d.BaselineStd},
-		)
-	}
-	// Space reference + scale: cluster method exposes its baseline mean and
-	// noise scale; other methods expose the peer arithmetic mean.
-	if d.SpaceMethod == MethodCluster {
-		pairs = append(pairs,
-			[2]interface{}{"space_baseline_mean", d.SpaceRef},
-			[2]interface{}{"space_scale", d.SpaceScale},
-		)
-	} else {
-		pairs = append(pairs, [2]interface{}{"peer_mean", d.PeerMean})
-	}
-	return marshalOrderedJSON(pairs)
-}
-
-// marshalOrderedJSON marshals key-value pairs as a JSON object preserving the
-// given order (encoding/json sorts map keys alphabetically, which is not the
-// desired output shape).
-func marshalOrderedJSON(pairs [][2]interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteByte('{')
-	for i, kv := range pairs {
-		if i > 0 {
-			buf.WriteByte(',')
-		}
-		kb, err := json.Marshal(kv[0])
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(kb)
-		buf.WriteByte(':')
-		vb, err := json.Marshal(kv[1])
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(vb)
-	}
-	buf.WriteByte('}')
-	return buf.Bytes(), nil
+	Metric        MetricName      `json:"metric"`
+	SpaceScore    float64         `json:"space_score"`
+	SpaceAbnormal bool            `json:"space_abnormal"`
+	Quadrant      Quadrant        `json:"quadrant"`
+	SpaceMethod   DetectionMethod `json:"space_method"`
 }
 
 // CardDetectionSummary is the per-card detection result.
@@ -338,17 +230,8 @@ type CardDetectionSummary struct {
 	Quadrant               Quadrant              `json:"quadrant"`
 	AnomalyDetails         []MetricAnomalyDetail `json:"anomaly_details,omitempty"`
 	SecondaryCommAnomalies []MetricAnomalyDetail `json:"secondary_comm_anomalies,omitempty"`
-	TrendFindings          []TrendFinding        `json:"trend_findings,omitempty"`
 	CompositeScore         float64               `json:"composite_score"`
 	Severity               Severity              `json:"severity"`
-}
-
-// TrendFinding records a linear-trend result for one metric.
-type TrendFinding struct {
-	Metric   MetricName `json:"metric"`
-	Slope    float64    `json:"slope"`
-	RSquared float64    `json:"r_squared"`
-	Desc     string     `json:"desc"`
 }
 
 // =============================================================================
@@ -424,34 +307,14 @@ type DetectionConfig struct {
 	AggregationWindowSec int     // aggregation window in seconds, default 10
 	TrimRatio            float64 // trimming ratio, default 0.25 (25% each side)
 	MinSamplesForTrim    int     // minimum samples to apply trimming, default 4
-	MinBaselineSamples   int     // min baseline samples for time detection; below this → time Z=0 (default 30 ≈ 5 min @ 10s)
-
-	// Windows
-	BaselineHours  float64 // historical baseline window in hours, default 360 (15 days)
-	DetectionHours float64 // detection window in hours, default 1
 
 	// Space dimension
-	SpaceMethod          DetectionMethod
-	SpaceZThreshold      float64 // default 2.5
-	SpaceIQRMult         float64 // default 1.5
-	SpaceRatioThreshold  float64 // kmeans cluster ratio threshold (cluster mean / baseline mean), default 2.0
-
-	// Time dimension
-	TimeZThreshold float64 // default 2.0
-
-	// Fusion weights
-	TimeWeight  float64 // α, default 0.6
-	SpaceWeight float64 // β, default 0.4
-
-	// Trend detection
-	EnableTrend      bool
-	TrendMinRSquared float64 // default 0.6
+	SpaceZThreshold     float64 // default 2.5
+	SpaceIQRMult        float64 // default 1.5
+	SpaceRatioThreshold float64 // kmeans cluster ratio threshold (cluster mean / baseline mean), default 2.0
 
 	// Debug
 	EnableDebug bool // --debug-output: include all cards × all metrics in the result
-
-	// Special thresholds
-	NetErrMinThresh float64 // min threshold for network error metrics, default 0
 
 	// Profiling integration
 	FallbackToProfiling bool
@@ -464,25 +327,10 @@ func DefaultDetectionConfig() DetectionConfig {
 		AggregationWindowSec: 10,
 		TrimRatio:            0.25,
 		MinSamplesForTrim:    4,
-		MinBaselineSamples:   30,
 
-		BaselineHours:  360, // 15 days
-		DetectionHours: 1,
-
-		SpaceMethod:         MethodZScore,
 		SpaceZThreshold:     2.5,
 		SpaceIQRMult:        1.5,
 		SpaceRatioThreshold: 2.0,
-
-		TimeZThreshold: 2.0,
-
-		TimeWeight:  0.6,
-		SpaceWeight: 0.4,
-
-		EnableTrend:      true,
-		TrendMinRSquared: 0.6,
-
-		NetErrMinThresh:  0,
 
 		FallbackToProfiling: true,
 		AlwaysRunProfiling:  false,
@@ -511,18 +359,11 @@ type DetectionSummary struct {
 	Normal             int    `json:"normal"`
 	KPICSV             string `json:"kpi_csv"`
 	TotalTimePoints    int    `json:"total_time_points"`
-	BaselineWindow     string `json:"baseline_window"`
-	DetectionWindow    string `json:"detection_window"`
 }
 
 // SpaceDetectionResult holds per-time-point space anomaly scores.
 type SpaceDetectionResult struct {
 	Scores map[int]map[MetricName][]float64
-}
-
-// TimeDetectionResult holds per-card time anomaly scores.
-type TimeDetectionResult struct {
-	Scores map[int]map[MetricName]float64
 }
 
 // =============================================================================
@@ -589,36 +430,7 @@ func Percentile(sorted []float64, p float64) float64 {
 	return sorted[int(f)]*(c-k) + sorted[int(c)]*(k-f)
 }
 
-// madToStdFactor converts MAD to a standard-deviation-like scale. For normal
-// data, MAD ≈ 0.6745σ, so MAD × 1.4826 ≈ σ. This keeps a robust Z-score on
-// the same scale as the classic Z-score, so thresholds stay comparable.
-const madToStdFactor = 1.4826
-
-// Median returns the 50th percentile (median) of values. Copies and sorts.
-func Median(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	sorted := make([]float64, len(values))
-	copy(sorted, values)
-	sort.Float64s(sorted)
-	return Percentile(sorted, 0.50)
-}
-
-// Mad returns the median absolute deviation of values: median(|v - median(v)|).
-func Mad(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	med := Median(values)
-	devs := make([]float64, len(values))
-	for i, v := range values {
-		devs[i] = math.Abs(v - med)
-	}
-	return Median(devs)
-}
-
-// HasConfirmedAnomaly reports whether any card has confirmed (dual-dimension) anomaly.
+// HasConfirmedAnomaly reports whether any card has a confirmed anomaly.
 func HasConfirmedAnomaly(summaries []CardDetectionSummary) bool {
 	for _, s := range summaries {
 		if s.Quadrant == QuadConfirmedAnomaly {

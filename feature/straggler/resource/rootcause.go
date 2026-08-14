@@ -285,24 +285,21 @@ func detailsToMap(details []MetricAnomalyDetail) map[MetricName]*MetricAnomalyDe
 	return m
 }
 
-// isAbnormal checks if a metric is abnormal (space or time).
-// If 'any' is true, either dimension counts. Otherwise both must be true.
-func isAbnormal(a map[MetricName]*MetricAnomalyDetail, m MetricName, any bool) bool {
+// isAbnormal checks if a metric is space-abnormal. (The trailing bool is a
+// legacy "either dimension" argument kept to avoid touching every rule.)
+func isAbnormal(a map[MetricName]*MetricAnomalyDetail, m MetricName, _ bool) bool {
 	d, ok := a[m]
 	if !ok {
 		return false
 	}
-	if any {
-		return d.SpaceAbnormal || d.TimeAbnormal
-	}
-	return d.SpaceAbnormal && d.TimeAbnormal
+	return d.SpaceAbnormal
 }
 
-// countAbnormalCompute counts how many compute metrics are abnormal.
+// countAbnormalCompute counts how many compute metrics are space-abnormal.
 func countAbnormalCompute(a map[MetricName]*MetricAnomalyDetail) int {
 	count := 0
 	for m, d := range a {
-		if IsComputeMetric(m) && (d.SpaceAbnormal || d.TimeAbnormal) {
+		if IsComputeMetric(m) && d.SpaceAbnormal {
 			count++
 		}
 	}

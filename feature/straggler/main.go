@@ -18,7 +18,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -58,8 +57,6 @@ func main() {
 	var kpiPath string
 	var kpiJSONLDir string
 	var faultsubURL string
-	baselineHours := 360.0
-	detectionHours := 1.0
 	degradation := 0.3
 	spaceRatioThreshold := 0.0 // 0 = use the default SpaceRatioThreshold (2.0)
 	debugOutput := false       // --debug-output: include all normal+abnormal data (kpi.debug / profiler.debug) in straggler_output.json
@@ -99,14 +96,6 @@ func main() {
 			kpiJSONLDir = val
 		case "--faultsub-url":
 			faultsubURL = val
-		case "--baseline-hours":
-			if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
-				baselineHours = parsed
-			}
-		case "--detection-hours":
-			if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
-				detectionHours = parsed
-			}
 		case "--space-ratio-threshold":
 			if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
 				spaceRatioThreshold = parsed
@@ -138,10 +127,7 @@ func main() {
 
 	if kpiInput != "" {
 		kpiCfg := resource.DefaultDetectionConfig()
-		kpiCfg.BaselineHours = baselineHours
-		kpiCfg.DetectionHours = detectionHours
 		kpiCfg.SpaceZThreshold = 1 + degradation  // tie to degradation param
-		kpiCfg.TimeZThreshold = 1 + degradation*0.8
 		kpiCfg.EnableDebug = debugOutput // --debug-output: kpi result includes all cards × metrics
 		if spaceRatioThreshold > 0 {
 			// Space ratio threshold is an independent knob; only override
@@ -152,10 +138,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === KPI Resource Detection ===\n")
 		var err error
 		if kpiJSONLDir != "" {
-			// Read CATMonitor straggler_kpi_{date}.jsonl over [now-baseline, now].
-			now := time.Now()
-			since := now.Add(-time.Duration(baselineHours * float64(time.Hour)))
-			ts, rerr := resource.ReadKPIFiles(kpiJSONLDir, since, now)
+			// Read all CATMonitor straggler_kpi_{date}.jsonl files in the directory.
+			ts, rerr := resource.ReadKPIFiles(kpiJSONLDir)
 			if rerr != nil {
 				err = rerr
 			} else {

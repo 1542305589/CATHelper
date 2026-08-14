@@ -7,11 +7,10 @@
 现有慢节点检测基于 Ascend PyTorch Profiler Level0 数据，做**单次快照**检测。Profiler 存在两个限制：
 
 - **性能开销大**：Profiler API 侵入式采集，产生大量 `.db` 文件，不适合常态化
-- **无时间维度**：仅单次快照，无法利用历史趋势
 
 本方案基于 `kpi_collect.sh` 采集的**NPU 资源 KPI CSV**（保留 **15 天**，聚合窗口 10 秒），以**无侵入、常态化**方式实现：
 
-- **时间维度 + 空间维度 双维检测**：既与同伴比（空间），也与自己的历史基线比（时间）
+- **纯空间 peer 对比**：异常完全由最后一个聚合点的空间维度判定（时间维度与基线/检测窗口已移除）
 - **先计算后通信的因果检测顺序**：计算慢会导致通信慢，先检计算可避免误判
 - **10秒截尾均值抗噪**：排序→去两端 25%→中间 50% 均值，单采样点噪声不污染检测结果
 
@@ -24,7 +23,7 @@
                     │  ┌──────────────────────┐               │
                     │  │ KPI 资源指标检测      │  ← 第一道防线  │
                     │  │ (本方案)              │    轻量、常态化 │
-                    │  │ 时间维度 + 空间维度    │    15天数据    │
+                    │  │ 纯空间 peer 对比      │    15天数据    │
                     │  └─────────┬────────────┘               │
                     │            │                            │
                     │            │ 未发现异常                   │
@@ -82,18 +81,7 @@
 
 ### 2.2 数据分区
 
-15 天数据按用途分为两个窗口：
-
-```
-│←──────────── 历史基线窗口 (baseline) ────────────│← 检测窗口 (detection) ──│
-│                                                    │  最近 N 个时间点         │
-│  用于构建每张卡的历史分布 (mean, std, percentiles)   │  当前待检测数据          │
-│  默认：除检测窗口外的全部历史数据                    │  默认：最近 1 小时       │
-```
-
-- **历史基线窗口**：为该卡的每个指标建立"正常值范围"（自身的统计分布）
-- **检测窗口**：最近一段时间的数据，同时对每行做空间维度检测
-- 窗口大小可通过配置调整
+时间维度与基线/检测窗口已移除：全部数据聚合后，空间检测只取**最后一个聚合点**（最接近当前时刻的读数）做 peer 对比。历史数据仅用于 10 秒聚合，不参与判定。
 
 ---
 
@@ -186,78 +174,50 @@ if 增量 > 0: 聚合值 = 增量
   输出：聚合行 (每 10 秒 1 行)
   │
   ▼
-[窗口划分]  → 基线窗口 + 检测窗口
+[空间检测]  → 只取最后一个聚合点，节点内 peer 对比（kmeans 簇比例 / 绝对阈值）
   │
   ▼
-[双维检测] ...
+[融合]  → 纯空间判定（compute-first）→ 根因定界 → 跨卡关联
 ```
 
 ---
 
-## 4. 双维检测模型
+## 4. 空间检测模型
 
 ### 4.1 核心思想
 
-每张卡在每个指标上有两个异常分数：
+时间维度与基线/检测窗口已移除：是否异常**完全由空间维度判定**——在最后一个聚合点与其他卡 peer 对比，问"这张卡比别人差吗？"。peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。
+
+### 4.2 判定
 
 ```
-                    │  空间维度 (Space)          │  时间维度 (Time)
-────────────────────┼────────────────────────────┼────────────────────────────
-  比较对象           │  同一时间点，与其他卡比      │  同一张卡，与自己的历史比
-  回答的问题         │  "这张卡比别人差吗？"        │  "这张卡比以前差了吗？"
-  数据来源           │  检测窗口内每个时间点        │  历史基线窗口的统计分布
-  检测方法           │  Z-Score / IQR             │  历史 Z-Score / 分位数
-────────────────────┼────────────────────────────┼────────────────────────────
-  典型场景           │  某卡温度比同伴高 10℃        │  某卡温度从 45℃ 爬升到 55℃
-                    │  → 空间异常                 │  → 时间异常（但可能还在同伴范围内）
+空间维度
+  正常 → ✓ 正常
+  异常 → ✗ confirmed_anomaly（空间判定）
 ```
 
-### 4.2 二维交叉判定
+| 状态 | 空间 | 判定 | 含义 |
+|------|------|------|------|
+| 正常 | 正常 | ✓ 正常 | 该卡一切正常 |
+| 确认异常 | 异常 | ✗ 告警 | 最后一个聚合点上该卡偏离同伴群体，直接定界 |
 
-```
-                    时间维度
-                正常         异常
-          ┌─────────────┬─────────────┐
-  空 正常 │   ✓ 正常     │  ⚡ 早期劣化 │
-  间      │             │  (时间漂移)  │
-  维      ├─────────────┼─────────────┤
-  度 异常 │  ◇ 个体差异  │  ✗ 确认异常 │
-          │  (历史如此)  │  (双维确认)  │
-          └─────────────┴─────────────┘
-```
+（`early_degradation` / `individual_variance` 象限为历史遗留枚举，纯空间判定下不再产生。）
 
-| 象限 | 空间 | 时间 | 判定 | 含义 |
-|------|------|------|------|------|
-| 正常 | 正常 | 正常 | ✓ 正常 | 该卡一切正常 |
-| 早期劣化 | 正常 | 异常 | ⚡ 关注 | 卡正在偏离自身历史基线（如温度缓慢爬升），但尚未在同伴中突出。应关注趋势 |
-| 个体差异 | 异常 | 正常 | ◇ 提示 | 卡与同伴不同，但这是该卡的一贯表现（如体质差异导致功耗偏高）。非故障 |
-| 确认异常 | 异常 | 异常 | ✗ 告警 | 既偏离自身历史，又偏离同伴群体。高置信度故障 |
-
-**判定优先级**：
-- **确认异常**（双维异常）→ 高置信度告警，直接定界
-- **早期劣化**（仅时间异常）→ 中度关注，跟踪趋势。若持续恶化进入确认异常
-- **个体差异**（仅空间异常）→ 低优先级提示。可标记为该卡的"个性"纳入基线
-- **正常** → 不告警
-
-### 4.3 双维评分公式
+### 4.3 空间评分
 
 ```
 对指标 m，卡 c：
 
-  空间分 S_space[m][c] = Z-Score(c 的当前值 vs 同一时间点所有卡的分布)
-                         = |v[c] - mean(all_cards_at_t)| / std(all_cards_at_t)
+  空间分 S_space[m][c] = 簇比例（kmeans）：簇均值 / 方向极值簇均值
+                         （absolute 方法：值 > 0 → sentinel 999）
+  被标记卡 space_score = 簇比例（> SpaceRatioThreshold）
+  未标记卡 space_score = 1.0（中性）
 
-  时间分 S_time[m][c]  = Z-Score(c 的当前值 vs c 自身历史分布)
-                         = |v[c] - mean(c_baseline)| / std(c_baseline)
-
-  融合分 S_final[m][c] = α * S_space[m][c] + β * S_time[m][c]
-
-  默认权重 α=0.4, β=0.6（时间维度权重略高，因为自身偏离更有信息量）
+  复合评分 = 异常指标 space_score 的均值
 ```
 
-- 空间分对检测窗口内**每个时间点**分别计算，取均值作为该卡的最终空间分
-- 时间分将检测窗口内的均值与历史基线比较，一次计算
-- 网络错误类指标不适用 Z-Score（正常值恒为 0），改用绝对阈值
+- 只取全部数据的**最后一个聚合点**判定（无窗口切分）
+- 网络错误类指标不适用 kmeans（正常值恒为 0），改用绝对阈值（> 0 即异常）
 
 ---
 
@@ -265,7 +225,7 @@ if 增量 > 0: 聚合值 = 增量
 
 ### 5.1 空间维度检测（Peer Comparison）
 
-**只取检测窗口最后一个聚合点**判定（`detectSpaceAnomalies`），peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为 kmeans 比例检测（MethodCluster）**，与 Profiler 均质化聚类共享 `clustering` 包：空间维度问"谁偏离同伴"，同伴的标准是**方向极值簇**（DirHigh → 最小均值簇，DirLow → 最大均值簇）。
+**只取全部数据的最后一个聚合点**判定（`detectSpaceAnomalies`），peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为 kmeans 比例检测（MethodCluster）**，与 Profiler 均质化聚类共享 `clustering` 包：空间维度问"谁偏离同伴"，同伴的标准是**方向极值簇**（DirHigh → 最小均值簇，DirLow → 最大均值簇）。
 
 **方法 A：kmeans 比例检测（MethodCluster，默认）**
 
@@ -305,67 +265,13 @@ IQR = Q3 - Q1
 **方法 C：均质化聚类**（Profiler 复用共享 `clustering` 包，即上方法 A 的 kmeans 比例检测）
 
 **特殊处理**：
-- **AICORE_FREQ**：频率为固定档位值（离散）。并入方法 A 的 kmeans 比例检测（DirLow），`基线均值/簇均值 > SpaceRatioThreshold(2.0)` 判定——只标记 >2× 的严重降频，轻度降频交给时间维度（MAD Z-score 与自身历史比）；多卡同档降频一起标记
+- **AICORE_FREQ**：频率为固定档位值（离散）。并入 kmeans 比例检测（DirLow），`基线均值/簇均值 > SpaceRatioThreshold(2.0)` 判定——只标记 >2× 的严重降频；多卡同档降频一起标记
 - **网络错误类**（ERR_PKT, RETRY, OUT_OF_ORDER, PFC_PKT）：正常值恒为 0，> 0 即异常
 - **CPU_average**：机器粒度，不与卡级混合，独立检测
 
-### 5.2 时间维度检测（Self Comparison）
+### 5.2 时间维度检测（已移除）
 
-对每张卡，用历史基线窗口的数据建立该卡每个指标的分布：
-
-```
-对卡 c，指标 m：
-  历史基线值 B = [v_t1, v_t2, ..., v_tN]  （基线窗口内该卡所有值）
-  baseline_mean = avg(B)
-  baseline_std  = stdev(B)
-  baseline_median = median(B)
-  baseline_mad    = MAD(B) = median(|B - baseline_median|)
-
-  检测窗口内的均值 current_mean = avg(检测窗口内的值)
-  时间 Z-Score = (current_mean - baseline_mean) / baseline_std   // 仅异常侧：DirHigh 当前>基线，DirLow 当前<基线
-
-  if baseline_std == 0 → 历史无波动：异常侧有偏差 → sentinel 999，否则 Z=0
-  if 时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
-  if N < MinBaselineSamples (默认 30，10 秒聚合下 ≈ 5 分钟) → 时间 Z=0，不判定异常
-```
-
-**鲁棒 MAD 变体（temp / power / aicore_freq / aicore_util / hbm_bandwidth_util）**：
-这五个指标改用 median + MAD 构造鲁棒 Z-Score，防止基线被历史故障数据污染
-（mean 会被异常拖向异常值、std 被平方放大，导致 Z-Score 缩小而漏报）：
-
-```
-  检测窗口内的中位数 current_median = median(检测窗口内的值)
-  鲁棒时间 Z-Score = (current_median - baseline_median) / (1.4826 * baseline_mad)   // 仅异常侧
-
-  if baseline_mad == 0 → 历史无波动：异常侧有偏差 → sentinel 999，否则 Z=0
-  if 鲁棒时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
-```
-
-- `1.4826 = 1/0.6745`：正态分布下 MAD ≈ 0.6745σ，使鲁棒 Z-Score 与经典
-  Z-Score 同尺度，阈值 2.0 的语义不变。
-- median 与 MAD 的崩溃点为 50%：只要基线窗口内正常数据占多数，少量故障
-  时段不会带偏鲁棒统计量（而 mean/StdDev 会被少数极端值拖走）。
-- aicore_util / hbm_bandwidth_util 在工作态占比 ≥50% 时（实际场景几乎 100%），
-  median 和 MAD 同样不会被空闲态（双峰分布的低值尾巴）污染——空闲点只占
-  ≤20% 且落在绝对偏差的上尾，碰不到偏差的中位数。因此这两个指标也采用 MAD。
-- 其余指标（含 4 个网络错误计数器、tx_bandwidth、hbm_util）仍使用经典
-  mean/std Z-Score；每指标方法由 `MetricMetaRegistry.TimeMethod` 决定。
-
-**基线防污染的前提假设**：基线窗口中大部分数据（>50%）是正常的，只有小部分
-（<50%）是异常/故障数据。MAD 的崩溃点为 50%——只要正常数据占比 >50%，median
-和 MAD 就不会被少数异常值污染。如果异常数据过半，则基线本身已失去参考意义，
-此时任何统计方法都无法可靠区分"正常"和"异常"。建议缩短基线窗口或手动剔除
-已知故障时段。
-
-**趋势增强**：对历史基线窗口 + 检测窗口的整体数据做线性回归：
-- `value = slope * timestamp + intercept`
-- 若 `slope > 0` 且 R² > 0.6：该指标在持续恶化
-- 趋势信息作为定界推理的辅助证据
-
-**基线更新策略**：
-- 初始基线：首次运行时用全部历史数据建立
-- 定期更新：每 24 小时用最近 15 天数据重建基线
-- 异常点的值不纳入基线（避免污染）
+时间维度（MAD/经典 Z-Score 自对比、趋势检测）与基线/检测窗口已在本次重构中删除：KPI 异常完全由空间维度（第 5.1 节）判定。`time_detector.go` / `baseline.go` 及相关配置参数（`MinBaselineSamples` / `BaselineHours` / `DetectionHours` / `TimeZThreshold` / `TimeWeight` / `EnableTrend` 等）均已移除。
 
 ### 5.3 指标分类：计算类 vs 通信类
 
@@ -448,7 +354,7 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 | C6 | HBM_BANDWIDTH_UTIL↓ + AICORE_UTIL— | **内存带宽瓶颈** | 低 | 检查 HBM 访问模式/是否有大量 cache miss |
 | C7 | TEMP↑ + POWER— + FREQ— | **温度传感器漂移** | 中 | 交叉验证功率数据（真发热必伴随功率↑） |
 | C8 | 多指标同时异常（≥4个，含计算类） | **板卡综合性硬件故障** | 高 | 建议隔离该卡，安排硬件诊断/更换 |
-| C9 | 单项 TEMP↑ 孤立 | **局部热点/传感器个体差异** | 低 | 持续观察，若升级为双维异常则按 C1 处理 |
+| C9 | 单项 TEMP↑ 孤立 | **局部热点/传感器个体差异** | 低 | 持续观察；若伴随 FREQ↓ 则按 C1 处理 |
 | C10 | 单项 POWER↑ 孤立 | **功耗计量偏差** | 低 | 交叉验证：功率↑应伴随温度↑，否则可能是计量误差 |
 
 **通信类规则**（仅在计算类指标全部正常时生效）：
@@ -511,8 +417,7 @@ func BoundRootCause(cardID, anomalyMatrix, trends) RootCauseResult:
     │ KPI 资源指标检测           │  │ Profiler 慢节点检测│
     │                          │  │ (已有流程)         │
     │ 1. CSV/JSONL解析 + 10秒聚合 │  └──────────────────┘
-    │ 2. 窗口划分              │
-    │ 3. 时间+空间基线建立      │
+    │ 2. 空间检测（最后一点 peer）│
     │                          │
     │ ┌── 先检测计算 ─────────┐ │
     │ │ FREQ/UTIL/HBM/        │ │
@@ -564,11 +469,10 @@ func main() {
     if kpiPath != "" {
         kpiResult = runKpiDetection(kpiPath, degradation)
         // runKpiDetection 内部按顺序执行：
-        //   1. ParseCSV → 2. AggregateByMinute → 3. SplitWindows
-        //   4. BuildBaselines
-        //   5. 先检测计算类指标 (FREQ/UTIL/HBM/TEMP/POWER)
-        //   6. 计算正常 → 再检测通信类指标 (BANDWIDTH/ERR/PFC/RETRY/OOO)
-        //   7. 二维交叉验证 → 8. 根因定界(计算类优先) → 9. 关联分析
+        //   1. 解析 → 2. 聚合 → 3. 空间检测（最后一点 peer）
+        //   4. 先检测计算类指标 (FREQ/UTIL/HBM/TEMP/POWER)
+        //   5. 计算正常 → 再检测通信类指标 (BANDWIDTH/ERR/PFC/RETRY/OOO)
+        //   6. 融合（compute-first）→ 7. 根因定界(计算类优先) → 8. 关联分析
     }
 
     if kpiResult != nil && kpiResult.HasConfirmedAnomaly() {
@@ -622,10 +526,8 @@ features/straggler/
   │   ├── types.go               # 数据结构 + 常量定义
   │   ├── parser.go              # CSV 解析 → 原始行
   │   ├── aggregator.go          # 10秒截尾均值聚合（AggregationWindowSec，排序→截尾→均值）
-  │   ├── baseline.go            # 历史基线构建 + 更新
-  │   ├── space_detector.go      # 空间维度检测（Z-Score/IQR/聚类）
-  │   ├── time_detector.go       # 时间维度检测（自身基线对比 + 趋势）
-  │   ├── fusion.go              # 二维交叉判定 + 融合评分
+  │   ├── space_detector.go      # 空间维度检测（peer 对比，最后一点；kmeans 比例 / 绝对阈值）
+  │   ├── fusion.go              # 纯空间融合 + 先计算后通信排序
   │   ├── rootcause.go           # 根因定界推理 + 关联分析
   │   └── report.go              # 结果输出（JSON + 文本报告）
   └── config/
@@ -657,11 +559,11 @@ type CSVRow struct {
 
 // TimeSeriesData 解析后的完整时间序列。
 type TimeSeriesData struct {
-    Rows           []CSVRow
-    CardIDs        []int
-    TimeRange      [2]int64
-    BaselineRows   []CSVRow // 历史基线窗口
-    DetectionRows  []CSVRow // 检测窗口
+    Rows     []CSVRow // 聚合后的行（1 行/聚合窗口）
+    CardIDs  []int    // 全局卡 ID
+    RawRows  []CSVRow // 聚合前的原始行（计数器增量用）
+    NodeOf   map[int]string // 全局卡 ID → 节点名
+    LocalID  map[int]int    // 全局卡 ID → 节点内卡 ID
 }
 
 // MetricName 指标枚举。
@@ -686,42 +588,26 @@ const ( DirHigh AnomalyDirection = iota; DirLow )
 
 // DetectionMethod 检测方法。
 type DetectionMethod string
-const ( MethodZScore DetectionMethod = "zscore"; MethodIQR = "iqr"; MethodDirect = "direct"; MethodAbsolute = "absolute" )
-
-// ==================== 基线 ====================
-
-// CardBaseline 单张卡单个指标的历史基线。
-type CardBaseline struct {
-    CardID int
-    Metric MetricName
-    Mean   float64
-    StdDev float64
-    P50    float64  // 中位数
-    P95    float64  // 95 分位
-    P99    float64  // 99 分位
-    N      int      // 样本数
-}
+const ( MethodZScore DetectionMethod = "zscore"; MethodIQR = "iqr"; MethodDirect = "direct"; MethodAbsolute = "absolute"; MethodCluster = "cluster" )
 
 // ==================== 检测结果 ====================
 
-// MetricAnomalyDetail 单个指标的异常详情。
+// MetricAnomalyDetail 单个指标的异常详情（仅空间维度）。
 type MetricAnomalyDetail struct {
-    Metric       MetricName
-    SpaceScore   float64 // 空间异常分 (Z-Score)
-    TimeScore    float64 // 时间异常分 (Z-Score)
-    FusionScore  float64 // 融合异常分
-    SpaceAbnormal bool   // 空间维是否异常
-    TimeAbnormal  bool   // 时间维是否异常
-    Quadrant     Quadrant // 所属象限
+    Metric        MetricName
+    SpaceScore    float64 // 空间簇比例
+    SpaceAbnormal bool    // 空间维是否异常
+    Quadrant      Quadrant
+    SpaceMethod   DetectionMethod
 }
 
-// Quadrant 二维象限。
+// Quadrant 异常状态。
 type Quadrant int
 const (
     QuadNormal          Quadrant = iota // 正常
-    QuadEarlyDegradation                // 早期劣化（仅时间异常）
-    QuadIndividualVariance              // 个体差异（仅空间异常）
-    QuadConfirmedAnomaly                // 确认异常（双维异常）
+    QuadEarlyDegradation                // 保留（不再产生）
+    QuadIndividualVariance              // 保留（不再产生）
+    QuadConfirmedAnomaly                // 空间异常
 )
 
 // CardDetectionSummary 单卡检测汇总。
@@ -730,7 +616,6 @@ type CardDetectionSummary struct {
     AnomalyCategory AnomalyCategory // "compute" | "communication" | "none"
     Quadrant        Quadrant
     AnomalyDetails  []MetricAnomalyDetail
-    TrendFindings   []TrendFinding
     CompositeScore  float64
     Severity        Severity
 }
@@ -742,14 +627,6 @@ const (
     CatCompute       AnomalyCategory = "compute"
     CatCommunication AnomalyCategory = "communication"
 )
-
-// TrendFinding 趋势发现。
-type TrendFinding struct {
-    Metric   MetricName
-    Slope    float64
-    RSquared float64
-    Desc     string
-}
 
 // ==================== 定界 ====================
 
@@ -797,28 +674,13 @@ type DetectionConfig struct {
     TrimRatio            float64 // 截尾比例，默认 0.25（去前后各25%）
     MinSamplesForTrim    int     // 截尾最少样本数，默认 4
 
-    // 窗口划分
-    BaselineHours  int  // 历史基线窗口长度（小时），默认 360（15天）
-    DetectionHours int  // 检测窗口长度（小时），默认 1
-
     // 空间维度
-    SpaceMethod      DetectionMethod // 默认 zscore
-    SpaceZThreshold  float64         // 默认 2.5
-    SpaceIQRMult     float64         // 默认 1.5
+    SpaceZThreshold     float64 // 默认 2.5
+    SpaceIQRMult        float64 // 默认 1.5
+    SpaceRatioThreshold float64 // kmeans 簇比例阈值，默认 2.0
 
-    // 时间维度
-    TimeZThreshold   float64 // 默认 2.0
-
-    // 融合
-    TimeWeight       float64 // α (时间维权重), 默认 0.6
-    SpaceWeight      float64 // β (空间维权重), 默认 0.4
-
-    // 趋势检测
-    EnableTrend      bool
-    TrendMinRSquared float64 // 默认 0.6
-
-    // 特殊阈值
-    NetErrMinThresh  float64 // 网络错误最小阈值, 默认 0
+    // 调试
+    EnableDebug bool // --debug-output：全量输出（含正常卡/正常指标）
 
     // 与 Profiling 联动
     FallbackToProfiling bool // KPI 未发现异常时是否自动跑 Profiling，默认 true
@@ -830,11 +692,11 @@ type DetectionConfig struct {
 
 ```go
 // ==================== parser.go ====================
-// ParseCSV 解析 KPI CSV 文件。
+// ParseCSV 解析单文件 KPI CSV（平铺/嵌套单元格，内部/测试用）。
 func ParseCSV(filePath string) (*TimeSeriesData, error)
 
-// SplitWindows 将数据划分为基线窗口和检测窗口。
-func SplitWindows(data *TimeSeriesData, cfg DetectionConfig) error
+// ParseKPIDir 解析 KPI 目录（每节点 CSV + node_config.json）。
+func ParseKPIDir(dir string) (*TimeSeriesData, error)
 
 
 // ==================== aggregator.go ====================
@@ -848,31 +710,16 @@ func AggregateByMinute(rawRows []CSVRow) ([]CSVRow, error)
 func Midmean(values []float64) float64
 
 
-// ==================== baseline.go ====================
-// BuildBaselines 为所有卡的所有指标建立历史基线。
-func BuildBaselines(data *TimeSeriesData, cfg DetectionConfig) map[int]map[MetricName]*CardBaseline
-
-
 // ==================== space_detector.go ====================
-// DetectSpaceAnomalies 对检测窗口执行空间维度检测。
-// 返回每个时间点每张卡每个指标的 Z-Score。
-func DetectSpaceAnomalies(data *TimeSeriesData, cfg DetectionConfig) *SpaceDetectionResult
-
-
-// ==================== time_detector.go ====================
-// DetectTimeAnomalies 对检测窗口执行时间维度检测。
-// 返回每张卡每个指标的时间 Z-Score。
-func DetectTimeAnomalies(data *TimeSeriesData, baselines map[int]map[MetricName]*CardBaseline, cfg DetectionConfig) *TimeDetectionResult
-
-// DetectTrends 对每张卡的指标执行线性趋势检测。
-func DetectTrends(data *TimeSeriesData, cfg DetectionConfig) map[int][]TrendFinding
+// detectSpaceAnomalies 对最后一个聚合点执行空间 peer 对比（节点内互比）。
+func detectSpaceAnomalies(detectionRows []CSVRow, cardIDs []int, cfg DetectionConfig, nodeOf ...map[int]string) *SpaceDetectionResult
 
 
 // ==================== fusion.go ====================
-// CrossValidate 执行二维交叉验证，返回每张卡的象限归属。
-func CrossValidate(space *SpaceDetectionResult, time *TimeDetectionResult, cfg DetectionConfig) []CardDetectionSummary
+// FuseAndSummarize 以纯空间结果融合（compute-first），返回每张卡的象限归属。
+func FuseAndSummarize(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, cfg DetectionConfig) []CardDetectionSummary
 
-// HasConfirmedAnomaly 是否有确认异常（双维异常）的卡。
+// HasConfirmedAnomaly 是否有确认异常的卡。
 func HasConfirmedAnomaly(summaries []CardDetectionSummary) bool
 
 
@@ -918,13 +765,11 @@ KPI 检测专用选项:
   --kpi-path=<dir>                KPI 模式：每节点 CSV + node_config.json 的目录
   --kpi-jsonl-dir=<dir>           KPI 模式：CATMonitor straggler_kpi_{date}.jsonl 目录（优先于 --kpi-path）
   --faultsub-url=<url>            FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环）
-  --baseline-hours=<float>       历史基线窗口（小时），默认 360 (15天)
-  --detection-hours=<float>      检测窗口（小时），默认 1
   --space-ratio-threshold=<float> 空间簇比例阈值，默认 2.0（未传时联动 degradation 取 1+degradation）
   --debug-output                 同时输出所有正常+异常数据（KPI anomaly_details 全指标；Profiler 全节点/全通信组）
 ```
 
-> 注：`--space-method` / `--space-z-threshold` / `--time-z-threshold` / `--time-weight` / `--no-trend` / `--no-fallback` / `--always-profiling` 等旧 flag 已移除（由统一阈值参数与固定融合策略替代）。
+> 注：`--baseline-hours` / `--detection-hours` / `--space-method` / `--space-z-threshold` / `--time-z-threshold` / `--time-weight` / `--no-trend` / `--no-fallback` / `--always-profiling` 等旧 flag 已移除（时间维度与基线/检测窗口已删除，KPI 异常完全由空间维度判定）。
 
 ---
 
@@ -957,10 +802,10 @@ KPI 检测专用选项:
         "category": "thermal_throttle",
         "confidence": "high",
         "evidence": [
-          {"metric": "temp", "space_score": 3.2, "time_score": 4.1, "quadrant": "confirmed_anomaly"},
-          {"metric": "aicore_freq", "space_score": 5.0, "time_score": 6.0, "quadrant": "confirmed_anomaly"}
+          {"metric": "temp", "space_score": 3.2, "quadrant": "confirmed_anomaly"},
+          {"metric": "aicore_freq", "space_score": 5.0, "quadrant": "confirmed_anomaly"}
         ],
-        "suggestion": "Card 3 温度(空间+3.2σ, 时间+4.1σ) + 降频(空间+5.0σ, 时间+6.0σ)。历史基线温度 46℃ → 当前 57℃，频率 800MHz → 400MHz。建议检查风扇/风道/散热器。"
+        "suggestion": "Card 3 温度(空间 3.2x) + 降频(空间 5.0x)。建议检查风扇/风道/散热器。"
       },
       "metric_details": {
         "temp": {
@@ -994,11 +839,10 @@ KPI 检测专用选项:
 ### 10.2 文本报告
 
 类似现有 `detection_report.log` 风格，包含：
-- 双维检测摘要（四个象限的卡数统计）
-- 确认异常卡列表 + 定界结果
-- 早期劣化卡列表（关注列表）
-- 各指标的时间/空间分数柱状图
-- 趋势分析（温度爬升等）
+- 检测摘要（正常 / 确认异常卡数统计）
+- 确认异常卡列表 + 定界结果（含建议）
+- 跨卡关联分析
+- 各指标的 `space_score` / 象限
 
 ---
 
@@ -1008,14 +852,14 @@ KPI 检测专用选项:
 |---|------|------|
 | 1 | **10秒截尾均值预处理** | 单采样点噪声大。窗口内排序→去前后各25%→中间50%取均值，比全量均值稳健（抗尖峰），比中位数有代表性（保留分布信息） |
 | 2 | **先计算后通信的检测顺序** | 计算慢必然导致通信慢（无法按时参与集合通信），反之不成立。先检计算可避免将继发性通信异常误判为网络问题。通信类定界规则仅在计算正常时生效 |
-| 3 | **双维检测（时间+空间）** | 单看空间会把"一直偏热但稳定"的卡误报；单看时间会把"全集群一同升温"误报。双维交叉消除这两类误报 |
+| 3 | **纯空间 peer 对比** | 已移除时间维度与基线/检测窗口。异常完全由最后一个聚合点的空间对比判定（kmeans 簇比例 / 错误计数绝对阈值），简单且无需历史基线 |
 | 4 | **KPI 优先 + Profiling 降级** | KPI 无侵入开销、覆盖硬件层异常，适合常态化；Profiling 开销大、覆盖软件层异常，按需触发 |
-| 5 | **空间维 Z-Score 默认 / 聚类可选** | Z-Score O(n) vs 聚类 O(n²)。聚合后仍有大量数据点（10 秒级 × 15天），计算量差异显著 |
-| 6 | **时间权重(0.6) > 空间权重(0.4)** | 单卡偏离自身历史基线比偏离同伴更有信息量。同伴可能集体变化，但自身趋势是确定性的 |
+| 5 | **空间 kmeans 簇比例为主** | 只取最后一个聚合点（每节点少量卡），kmeans O(n·k·iter) 开销可忽略；方向极值簇作基线 + 比例阈值判异常，免调参 |
+| 6 | **复合评分 = 异常指标 space_score 均值** | 纯空间判定，无权重参数 |
 | 7 | **网络错误用绝对阈值** | ERR_PKT/RETRY 正常值为 0，统计方法失效。>0 即异常 |
 | 8 | **计数型指标累加而非截尾** | ERR_PKT/RETRY/PFC_PKT 是累积计数器，应取增量总和。截尾会抹掉真正的错误尖峰 |
-| 9 | **基线定期滚动 + 异常排除** | 异常点的值不纳入基线，避免污染正常分布 |
-| 10 | **象限分类而非单一分数** | 四个象限对应不同运维动作（告警/关注/提示/忽略），比单一分数更有可操作性 |
+| 9 | **10 秒聚合窗口** | 每个窗口内裁剪均值 / 计数器增量，单采样点噪声不污染检测结果 |
+| 10 | **象限分类（正常 / 确认异常）** | 空间异常 → `confirmed_anomaly`；`early_degradation` / `individual_variance` 为历史遗留，不再产生 |
 
 ---
 
@@ -1027,15 +871,13 @@ KPI 检测专用选项:
 | 聚合窗口内某卡某指标采样数 < 4 | 截尾25%后不足2个点，降级为全量均值 |
 | 窗口边界时间戳不齐 | 按 `timestamp / AggregationWindowSec * AggregationWindowSec` 向下取整分桶 |
 | 计数型指标出现 counter wrap | `增量 < 0` 时 += 2^64 修正，若仍 < 0 标记数据异常跳过该窗口 |
-| 数据不足 2 小时 | 全部作为检测窗口，跳过时间维度检测（无法建立基线） |
 | 所有卡某指标完全一致(std=0) | 空间维跳过该指标 |
-| 某卡某指标历史无波动(std=0) | 时间维跳过该指标（如频率固定在 800MHz）— 但若当前值不同，直接判定时间异常 |
-| 某卡在某些时间点数据缺失 | 该时间点跳过该卡，取其余点的均值 |
+| 某卡在某些时间点数据缺失 | 该时间点跳过该卡 |
 | 网络错误类全为 0 | 跳过该指标检测（无限信息量） |
-| 总卡数 < 3 | 空间维降级为仅用时间维（peer comparison 不可靠） |
-| 全部卡同时异常 | 空间维不会标记（同伴一致），但时间维可能标记。触发任务级关联告警 |
+| 总卡数 < 3 | 空间 peer 不可靠，仅标记极端簇比例（如 >2×） |
+| 全部卡同时异常 | 空间维不会标记（同伴一致）。触发任务级关联告警（job_level） |
 | CPU 字段引用未知 NPU | CPU 不参与卡级检测，仅用于关联分析的物理节点推断 |
-| 检测窗口内出现瞬态尖峰后又恢复 | 窗口均值会稀释尖峰影响，趋势检测可能捕获。若尖峰持续时间 < 检测窗口的 10%，忽略 |
+| 瞬态尖峰后又恢复 | 聚合窗口裁剪均值会稀释瞬态尖峰影响 |
 | 计算异常 + 通信异常同时出现 | 以计算类定界为准，通信异常标记为"可能继发"，不独立告警 |
 | 仅通信异常（计算正常）→ 但 Profiling 发现计算慢 | KPI 指标粒度粗，可能漏检软件层面计算慢。此时 Profiling 作为补充生效 |
 
@@ -1043,8 +885,8 @@ KPI 检测专用选项:
 
 ## 13. 后续扩展方向
 
-1. **在线流式检测**：不等待完整 CSV，逐行消费 + 实时更新滑动窗口
-2. **自适应基线**：用指数加权移动平均（EWMA）持续更新基线，无需定期重建
+1. **在线流式检测**：不等待完整 CSV，逐行消费 + 实时更新
+2. **多快照联合**：跨多个时间点的空间检测结果联合（当前只取最后一个聚合点）
 3. **与告警系统集成**：Prometheus AlertManager / 企业微信 / 邮件通知
 4. **KPI + Profiling 联合报告**：将两次检测结果合并为统一的诊断报告
 5. **多 Job 联合分析**：同集群多个训练任务的 KPI 数据联合分析，发现集群级基础设施问题
