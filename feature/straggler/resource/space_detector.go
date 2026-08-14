@@ -70,7 +70,7 @@ func detectSpaceAnomalies(
 				continue
 			}
 
-			switch meta.SpaceMethod {
+			switch meta.Method {
 			case MethodAbsolute:
 				// Absolute threshold: > threshold → anomaly.
 				for _, cid := range nodeCardIDs {
@@ -182,10 +182,10 @@ func filterPositive(present []int, presentVals []float64) (posPresent []int, pos
 // Space Score Aggregation
 // =============================================================================
 
-// aggregateSpaceScores reduces per-time-point space scores to per-card
+// aggregateScores reduces per-time-point space scores to per-card
 // aggregate space scores. With the last-point-only space detection, the score
 // array holds exactly one element.
-func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg DetectionConfig) map[int]map[MetricName]*MetricAnomalyDetail {
+func aggregateScores(space *SpaceDetectionResult, cardIDs []int, cfg DetectionConfig) map[int]map[MetricName]*MetricAnomalyDetail {
 	result := make(map[int]map[MetricName]*MetricAnomalyDetail)
 
 	for _, cid := range cardIDs {
@@ -195,7 +195,7 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 			if len(zscores) == 0 {
 				result[cid][metric] = &MetricAnomalyDetail{
 					Metric:     metric,
-					SpaceScore: 0,
+					Score: 0,
 				}
 				continue
 			}
@@ -203,7 +203,7 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 			// Absolute methods flag via the 999 sentinel; cluster methods score
 			// the cluster ratio.
 			meta := MetricMetaRegistry[metric]
-			isSentinel := meta.SpaceMethod == MethodAbsolute
+			isSentinel := meta.Method == MethodAbsolute
 
 			var sum float64
 			abnormalCount := 0
@@ -224,7 +224,7 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 				spaceScore = float64(abnormalCount) / float64(len(zscores))
 				spaceAbnormal = spaceScore > 0.5
 			} else {
-				// Cluster: space_score is the cluster ratio on the last point;
+				// Cluster: score is the cluster ratio on the last point;
 				// abnormal when the ratio exceeds SpaceRatioThreshold.
 				spaceScore = sum / float64(len(zscores))
 				spaceAbnormal = spaceScore > cfg.SpaceRatioThreshold
@@ -232,8 +232,8 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 
 			result[cid][metric] = &MetricAnomalyDetail{
 				Metric:        metric,
-				SpaceScore:    spaceScore,
-				SpaceAbnormal: spaceAbnormal,
+				Score:    spaceScore,
+				Abnormal: spaceAbnormal,
 			}
 		}
 	}

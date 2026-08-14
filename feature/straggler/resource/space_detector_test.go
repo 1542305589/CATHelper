@@ -41,11 +41,11 @@ func TestSpaceFreqSingleDownclock(t *testing.T) {
 		}
 	}
 
-	details := aggregateSpaceScores(res, cardIDs, cfg)
-	if d := details[7][MetricAICoreFreq]; !d.SpaceAbnormal {
-		t.Errorf("card 7 spaceAbnormal = false, want true (score=%v)", d.SpaceScore)
+	details := aggregateScores(res, cardIDs, cfg)
+	if d := details[7][MetricAICoreFreq]; !d.Abnormal {
+		t.Errorf("card 7 spaceAbnormal = false, want true (score=%v)", d.Score)
 	}
-	if d := details[0][MetricAICoreFreq]; d.SpaceAbnormal {
+	if d := details[0][MetricAICoreFreq]; d.Abnormal {
 		t.Errorf("card 0 spaceAbnormal = true, want false")
 	}
 }
@@ -62,10 +62,10 @@ func TestSpaceFreqAllNormal(t *testing.T) {
 			t.Errorf("card %d at common clock → score = %v, want 1.0 (neutral ratio)", cid, z)
 		}
 	}
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 	for _, cid := range cardIDs {
-		if d := details[cid][MetricAICoreFreq]; d.SpaceScore != 1.0 {
-			t.Errorf("card %d aggregate space score = %v, want 1.0", cid, d.SpaceScore)
+		if d := details[cid][MetricAICoreFreq]; d.Score != 1.0 {
+			t.Errorf("card %d aggregate space score = %v, want 1.0", cid, d.Score)
 		}
 	}
 }
@@ -78,15 +78,15 @@ func TestSpaceFreqMultiDownclock(t *testing.T) {
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 800, 7: 800}
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 	for _, cid := range []int{6, 7} {
-		if !details[cid][MetricAICoreFreq].SpaceAbnormal {
+		if !details[cid][MetricAICoreFreq].Abnormal {
 			t.Errorf("downclocked card %d should be space-abnormal (score=%v)",
-				cid, details[cid][MetricAICoreFreq].SpaceScore)
+				cid, details[cid][MetricAICoreFreq].Score)
 		}
 	}
 	for cid := 0; cid < 6; cid++ {
-		if details[cid][MetricAICoreFreq].SpaceAbnormal {
+		if details[cid][MetricAICoreFreq].Abnormal {
 			t.Errorf("normal card %d should not be space-abnormal", cid)
 		}
 	}
@@ -113,10 +113,10 @@ func TestSpaceFreqMildDownclock(t *testing.T) {
 	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1500}
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
-	if details[3][MetricAICoreFreq].SpaceAbnormal {
+	details := aggregateScores(res, cardIDs, cfg)
+	if details[3][MetricAICoreFreq].Abnormal {
 		t.Errorf("mild downclock card 3 should not be space-abnormal (score=%v)",
-			details[3][MetricAICoreFreq].SpaceScore)
+			details[3][MetricAICoreFreq].Score)
 	}
 }
 
@@ -151,16 +151,16 @@ func TestSpaceClusterSingleAnomaly(t *testing.T) {
 
 	rows := clusterTempRows([][]float64{{30, 30, 30, 30, 30, 30, 30, 100}})
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
-	if !details[7][MetricTemp].SpaceAbnormal {
-		t.Errorf("hot card 7 should be space-abnormal (score=%v)", details[7][MetricTemp].SpaceScore)
+	if !details[7][MetricTemp].Abnormal {
+		t.Errorf("hot card 7 should be space-abnormal (score=%v)", details[7][MetricTemp].Score)
 	}
-	if got := details[7][MetricTemp].SpaceScore; got < 3.33 || got > 3.34 {
-		t.Errorf("hot card 7 space_score = %v, want ≈3.33", got)
+	if got := details[7][MetricTemp].Score; got < 3.33 || got > 3.34 {
+		t.Errorf("hot card 7 score = %v, want ≈3.33", got)
 	}
 	for cid := 0; cid < 7; cid++ {
-		if details[cid][MetricTemp].SpaceAbnormal {
+		if details[cid][MetricTemp].Abnormal {
 			t.Errorf("normal card %d should not be space-abnormal", cid)
 		}
 	}
@@ -174,15 +174,15 @@ func TestSpaceClusterMultiAnomaly(t *testing.T) {
 
 	rows := clusterTempRows([][]float64{{30, 30, 30, 30, 30, 30, 100, 100}})
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
 	for _, cid := range []int{6, 7} {
-		if !details[cid][MetricTemp].SpaceAbnormal {
-			t.Errorf("hot card %d should be space-abnormal (score=%v)", cid, details[cid][MetricTemp].SpaceScore)
+		if !details[cid][MetricTemp].Abnormal {
+			t.Errorf("hot card %d should be space-abnormal (score=%v)", cid, details[cid][MetricTemp].Score)
 		}
 	}
 	for cid := 0; cid < 6; cid++ {
-		if details[cid][MetricTemp].SpaceAbnormal {
+		if details[cid][MetricTemp].Abnormal {
 			t.Errorf("normal card %d should not be space-abnormal", cid)
 		}
 	}
@@ -197,12 +197,12 @@ func TestSpaceClusterMajorityNormalSpread(t *testing.T) {
 
 	rows := clusterTempRows([][]float64{{54, 55, 55, 56, 57, 58, 59, 60}})
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
 	for _, cid := range cardIDs {
-		if details[cid][MetricTemp].SpaceAbnormal {
+		if details[cid][MetricTemp].Abnormal {
 			t.Errorf("card %d in a normal spread should not be space-abnormal (score=%v)",
-				cid, details[cid][MetricTemp].SpaceScore)
+				cid, details[cid][MetricTemp].Score)
 		}
 	}
 }
@@ -216,12 +216,12 @@ func TestSpaceClusterMajorityAnomaly(t *testing.T) {
 
 	rows := clusterTempRows([][]float64{{60, 60, 60, 60, 60, 55, 55, 55}})
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
 	for _, cid := range cardIDs {
-		if details[cid][MetricTemp].SpaceAbnormal {
+		if details[cid][MetricTemp].Abnormal {
 			t.Errorf("card %d: mild fleet-wide shift must stay silent (score=%v)",
-				cid, details[cid][MetricTemp].SpaceScore)
+				cid, details[cid][MetricTemp].Score)
 		}
 	}
 }
@@ -234,15 +234,15 @@ func TestSpaceClusterTieBaseline(t *testing.T) {
 
 	rows := clusterTempRows([][]float64{{30, 30, 30, 30, 80, 80, 80, 80}})
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
 	for _, cid := range []int{4, 5, 6, 7} {
-		if !details[cid][MetricTemp].SpaceAbnormal {
+		if !details[cid][MetricTemp].Abnormal {
 			t.Errorf("hot card %d (tie baseline) should be space-abnormal", cid)
 		}
 	}
 	for cid := 0; cid < 4; cid++ {
-		if details[cid][MetricTemp].SpaceAbnormal {
+		if details[cid][MetricTemp].Abnormal {
 			t.Errorf("cool card %d should not be space-abnormal", cid)
 		}
 	}
@@ -260,16 +260,16 @@ func TestSpaceClusterDirLow(t *testing.T) {
 		AICoreUtil: map[int]float64{0: 90, 1: 90, 2: 90, 3: 90, 4: 90, 5: 90, 6: 30, 7: 30},
 	}}
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
 	for _, cid := range []int{6, 7} {
-		if !details[cid][MetricAICoreUtil].SpaceAbnormal {
+		if !details[cid][MetricAICoreUtil].Abnormal {
 			t.Errorf("low-util card %d should be space-abnormal (score=%v)",
-				cid, details[cid][MetricAICoreUtil].SpaceScore)
+				cid, details[cid][MetricAICoreUtil].Score)
 		}
 	}
 	for cid := 0; cid < 6; cid++ {
-		if details[cid][MetricAICoreUtil].SpaceAbnormal {
+		if details[cid][MetricAICoreUtil].Abnormal {
 			t.Errorf("working card %d should not be space-abnormal", cid)
 		}
 	}
@@ -288,8 +288,8 @@ func TestSpaceClusterLastPointOnly(t *testing.T) {
 		{30, 30, 30, 30, 30, 30, 30, 30},
 	})
 	res := detectSpaceAnomalies(rowsCleanLast, cardIDs, cfg)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
-	if details[7][MetricTemp].SpaceAbnormal {
+	details := aggregateScores(res, cardIDs, cfg)
+	if details[7][MetricTemp].Abnormal {
 		t.Errorf("card 7 flagged although the LAST point was normal")
 	}
 
@@ -299,10 +299,10 @@ func TestSpaceClusterLastPointOnly(t *testing.T) {
 		{30, 30, 30, 30, 30, 30, 30, 100},
 	})
 	resLast := detectSpaceAnomalies(rowsLast, cardIDs, cfg)
-	detailsLast := aggregateSpaceScores(resLast, cardIDs, cfg)
-	if !detailsLast[7][MetricTemp].SpaceAbnormal {
+	detailsLast := aggregateScores(resLast, cardIDs, cfg)
+	if !detailsLast[7][MetricTemp].Abnormal {
 		t.Errorf("card 7 should be flagged on the last point (score=%v)",
-			detailsLast[7][MetricTemp].SpaceScore)
+			detailsLast[7][MetricTemp].Score)
 	}
 	if got := len(resLast.Scores[7][MetricTemp]); got != 1 {
 		t.Errorf("score array has %d elements, want exactly 1 (last point only)", got)

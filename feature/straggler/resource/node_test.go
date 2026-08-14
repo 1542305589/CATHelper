@@ -111,20 +111,20 @@ func TestSpaceClusterPerNode(t *testing.T) {
 	// ratio 2.67 > 2.0).
 	rows := []CSVRow{{Timestamp: 1_000_000, Temp: map[int]float64{0: 30, 1: 30, 2: 30, 3: 80}}}
 	res := detectSpaceAnomalies(rows, cardIDs, cfg, nodeOf)
-	details := aggregateSpaceScores(res, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
 
-	if !details[3][MetricTemp].SpaceAbnormal {
+	if !details[3][MetricTemp].Abnormal {
 		t.Errorf("node-b card 3 (hot) should be space-abnormal, score=%v",
-			details[3][MetricTemp].SpaceScore)
+			details[3][MetricTemp].Score)
 	}
 	for _, cid := range []int{0, 1, 2} {
-		if details[cid][MetricTemp].SpaceAbnormal {
+		if details[cid][MetricTemp].Abnormal {
 			t.Errorf("card %d should NOT be space-abnormal (node-b card 2 must not be polluted by card 3)", cid)
 		}
 	}
 	// node-b card 2 (local 0) is the baseline in its node; card 0 in node-a is
 	// normal in its own node. Both stay clean even though card 3 is hot.
-	if details[2][MetricTemp].SpaceAbnormal {
+	if details[2][MetricTemp].Abnormal {
 		t.Errorf("node-b card 2 is the majority member → should be exempt")
 	}
 }
@@ -134,12 +134,12 @@ func TestSpaceClusterPerNode(t *testing.T) {
 // =============================================================================
 
 func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
-	// Space-only detail → metric/space_score/space_abnormal/space_method.
+	// Space-only detail → metric/score/abnormal/method.
 	d := MetricAnomalyDetail{
-		Metric:        MetricTemp,
-		SpaceScore:    2.25,
-		SpaceAbnormal: true,
-		SpaceMethod:   MethodCluster,
+		Metric:   MetricTemp,
+		Score:    2.25,
+		Abnormal: true,
+		Method:   MethodCluster,
 	}
 	b, err := json.Marshal(d)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
 	}
 	var m map[string]interface{}
 	json.Unmarshal(b, &m)
-	for _, k := range []string{"metric", "space_score", "space_abnormal", "space_method"} {
+	for _, k := range []string{"metric", "score", "abnormal", "method"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("detail missing key %q in %s", k, b)
 		}
@@ -168,18 +168,18 @@ func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
 	if len(got) < 1 || !strings.HasPrefix(got, `{"metric":`) {
 		t.Errorf("detail JSON should start with {\"metric\":..., got %s", got)
 	}
-	if idxMetric := strings.Index(got, `"metric"`); idxMetric < 0 || strings.Index(got, `"space_score"`) < idxMetric {
-		t.Errorf("metric must come before space_score in %s", got)
+	if idxMetric := strings.Index(got, `"metric"`); idxMetric < 0 || strings.Index(got, `"score"`) < idxMetric {
+		t.Errorf("metric must come before score in %s", got)
 	}
 }
 
 // TestMetricAnomalyJSON verifies the metric-first output JSON shape.
 func TestMetricAnomalyJSON(t *testing.T) {
 	ma := MetricAnomaly{
-		Metric:      MetricAICoreFreq,
-		SpaceMethod: MethodCluster,
+		Metric: MetricAICoreFreq,
+		Method: MethodCluster,
 		Cards: []AnomalousCard{
-			{Node: "86", CardID: 1, SpaceScore: 2.25, SpaceAbnormal: true},
+			{Node: "86", CardID: 1, Score: 2.25, Abnormal: true},
 		},
 	}
 	b, err := json.Marshal(ma)
@@ -188,7 +188,7 @@ func TestMetricAnomalyJSON(t *testing.T) {
 	}
 	var m map[string]interface{}
 	json.Unmarshal(b, &m)
-	for _, k := range []string{"metric", "space_method", "cards"} {
+	for _, k := range []string{"metric", "method", "cards"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("MetricAnomaly missing key %q in %s", k, b)
 		}

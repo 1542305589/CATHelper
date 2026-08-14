@@ -193,7 +193,7 @@ if 增量 > 0: 聚合值 = 增量
 ```
 空间维度
   某指标某卡正常 → 正常
-  某指标某卡异常 → 该卡异常（输出按指标分组：异常指标 → 卡 + space_score）
+  某指标某卡异常 → 该卡异常（输出按指标分组：异常指标 → 卡 + score）
 ```
 
 | 状态 | 空间 | 判定 | 含义 |
@@ -210,10 +210,10 @@ if 增量 > 0: 聚合值 = 增量
 
   空间分 S_space[m][c] = 簇比例（kmeans）：簇均值 / 方向极值簇均值
                          （absolute 方法：值 > 0 → sentinel 999）
-  被标记卡 space_score = 簇比例（> SpaceRatioThreshold）
-  未标记卡 space_score = 1.0（中性）
+  被标记卡 score = 簇比例（> SpaceRatioThreshold）
+  未标记卡 score = 1.0（中性）
 
-  复合评分 = 异常指标 space_score 的均值
+  复合评分 = 异常指标 score 的均值
 ```
 
 - 只取全部数据的**最后一个聚合点**判定（无窗口切分）
@@ -239,8 +239,8 @@ if 增量 > 0: 聚合值 = 增量
 6. 基线簇 = 方向极值簇（DirHigh→最小均值簇，DirLow→最大均值簇）
 7. 簇均值比 > SpaceRatioThreshold（默认 2.0）→ 异常簇
 8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
-9. 参与聚类的卡都有 space_score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）：被标记卡为其比值，未标记卡为中性 1.0；缺失/值 ≤ 0 的卡为 0
-聚合：space_score > SpaceRatioThreshold 判空间异常
+9. 参与聚类的卡都有 score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）：被标记卡为其比值，未标记卡为中性 1.0；缺失/值 ≤ 0 的卡为 0
+聚合：score > SpaceRatioThreshold 判空间异常
 ```
 
 适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH（在各节点内独立检测）
@@ -303,7 +303,7 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 
 ## 6. 输出（根因定界与跨卡关联已移除）
 
-根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。faultsub 事件 detail 为 `{指标: space_score}`。
+根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。faultsub 事件 detail 为 `{指标: score}`。
 
 ---
 
@@ -504,23 +504,23 @@ const ( MethodAbsolute DetectionMethod = "absolute"; MethodCluster = "cluster" )
 // MetricAnomalyDetail 单个指标的异常详情（仅空间维度）。
 type MetricAnomalyDetail struct {
     Metric        MetricName
-    SpaceScore    float64 // 空间簇比例
-    SpaceAbnormal bool    // 空间维是否异常
-    SpaceMethod   DetectionMethod
+    Score    float64 // 空间簇比例
+    Abnormal bool    // 空间维是否异常
+    Method   DetectionMethod
 }
 
 // AnomalousCard 某指标下异常的卡。
 type AnomalousCard struct {
     Node          string
     CardID        int
-    SpaceScore    float64
-    SpaceAbnormal bool
+    Score    float64
+    Abnormal bool
 }
 
 // MetricAnomaly 指标优先的异常分组。
 type MetricAnomaly struct {
     Metric      MetricName
-    SpaceMethod DetectionMethod
+    Method DetectionMethod
     Cards       []AnomalousCard
 }
 
@@ -631,20 +631,20 @@ KPI 检测专用选项:
 
 ```json
 {
-  "summary": { "total_cards": 8, "total_nodes": 1, "anomalies": 1, "normal": 7, "kpi_csv": "/data/kpi_csv_dir" },
+  "summary": { "total_cards": 8, "total_nodes": 1, "anomalies": 1, "normal": 7, "source": "/data/kpi_jsonl_dir" },
   "anomaly_metrics": [
     {
       "metric": "temp",
-      "space_method": "cluster",
+      "method": "cluster",
       "cards": [
-        { "node": "86", "card_id": 3, "space_score": 3.2, "space_abnormal": true }
+        { "node": "86", "card_id": 3, "score": 3.2, "abnormal": true }
       ]
     },
     {
       "metric": "aicore_freq",
-      "space_method": "cluster",
+      "method": "cluster",
       "cards": [
-        { "node": "86", "card_id": 3, "space_score": 5.0, "space_abnormal": true }
+        { "node": "86", "card_id": 3, "score": 5.0, "abnormal": true }
       ]
     }
   ]
@@ -656,7 +656,7 @@ KPI 检测专用选项:
 
 类似现有 `detection_report.log` 风格，包含：
 - 检测摘要（正常 / 异常卡数统计）
-- 异常指标详情（指标在前，其后为异常卡及空间 score，如 `aicore_freq  卡1(2.25)`）
+- 异常指标详情（指标在前，其后为异常卡及空间 score，如 `aicore_freq  node86:card1(2.25)`）
 
 ---
 
@@ -665,11 +665,11 @@ KPI 检测专用选项:
 | # | 决策 | 理由 |
 |---|------|------|
 | 1 | **10秒截尾均值预处理** | 单采样点噪声大。窗口内排序→去前后各25%→中间50%取均值，比全量均值稳健（抗尖峰），比中位数有代表性（保留分布信息） |
-| 2 | **指标优先输出** | 输出按指标分组（异常指标 → 异常卡 + space_score），卡级不再有象限/复合评分/计算通信归类 |
+| 2 | **指标优先输出** | 输出按指标分组（异常指标 → 异常卡 + score），卡级不再有象限/复合评分/计算通信归类 |
 | 3 | **纯空间 peer 对比** | 已移除时间维度与基线/检测窗口。异常完全由最后一个聚合点的空间对比判定（kmeans 簇比例 / 错误计数绝对阈值），简单且无需历史基线 |
 | 4 | **KPI 优先 + Profiling 降级** | KPI 无侵入开销、覆盖硬件层异常，适合常态化；Profiling 开销大、覆盖软件层异常，按需触发 |
 | 5 | **空间 kmeans 簇比例为主** | 只取最后一个聚合点（每节点少量卡），kmeans O(n·k·iter) 开销可忽略；方向极值簇作基线 + 比例阈值判异常，免调参 |
-| 6 | **space_score 即劣化程度** | 每个异常指标的卡直接带其 space_score，无需卡级复合评分 |
+| 6 | **score 即劣化程度** | 每个异常指标的卡直接带其 score，无需卡级复合评分 |
 | 7 | **网络错误用绝对阈值** | ERR_PKT/RETRY 正常值为 0，统计方法失效。>0 即异常 |
 | 8 | **计数型指标累加而非截尾** | ERR_PKT/RETRY/PFC_PKT 是累积计数器，应取增量总和。截尾会抹掉真正的错误尖峰 |
 | 9 | **10 秒聚合窗口** | 每个窗口内裁剪均值 / 计数器增量，单采样点噪声不污染检测结果 |

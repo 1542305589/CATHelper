@@ -172,11 +172,11 @@ CPU 取桶内最后一个值。
 
 `detectSpaceAnomalies()` **只取全部数据的最后一个聚合点**判定（已无基线/检测窗口切分）。**peer 组 = 同一节点内的在场卡**（跨节点不互比）；平铺输入（单节点 "none"）时与之前一致，peer 组 = 全体在场卡。每卡每指标的 score 数组只含 1 个元素（最后一点）。
 
-**对最后一个点、每个节点**，按 `SpaceMethod` 判定：
+**对最后一个点、每个节点**，按 `Method` 判定：
 
-| SpaceMethod | 适用指标 | 机制 | 异常判定 |
+| Method | 适用指标 | 机制 | 异常判定 |
 |-------------|---------|------|---------|
-| `cluster` | temp/power/freq/util/hbm_bandwidth_util/hbm_util/tx_bw | 递归 kmeans 比例检测（共享 `clustering` 包） | **space_score（簇比例）> 比例阈值**（`SpaceRatioThreshold`，默认 2.0）|
+| `cluster` | temp/power/freq/util/hbm_bandwidth_util/hbm_util/tx_bw | 递归 kmeans 比例检测（共享 `clustering` 包） | **score（簇比例）> 比例阈值**（`SpaceRatioThreshold`，默认 2.0）|
 | `absolute` | 4× error counters | > 0 | sentinel 999 |
 
 **cluster（kmeans 比例）机制**（共享 `feature/straggler/clustering/kmeans.go`，与 Profiler 均质化聚类同一算法）：
@@ -187,18 +187,18 @@ CPU 取桶内最后一个值。
 5. **基线簇 = 方向极值簇**（DirHigh→最小均值簇，DirLow→最大均值簇）
 6. 簇均值比 `> SpaceRatioThreshold`（默认 2.0）→ 异常簇
 7. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层；返回最深异常簇
-8. 参与聚类的卡都有 `space_score = 簇比例`：被标记卡为其比值（> 阈值），未标记卡为中性 1.0；缺失 / 值 ≤ 0 的卡为 0（无法计算比值）
+8. 参与聚类的卡都有 `score = 簇比例`：被标记卡为其比值（> 阈值），未标记卡为中性 1.0；缺失 / 值 ≤ 0 的卡为 0（无法计算比值）
 
 > 方向极值簇作基线：即使异常方是多数（整片偏离），基线仍取正常方向极值簇，不会把"谁都高"误判为正常；比例阈值（2.0）则保证自然散布（如 54..60°C）不会被当作异常。
 
-`aggregateSpaceScores()` 汇总：cluster 方法 `space_score = 簇比例`，`> SpaceRatioThreshold` 判空间异常；absolute 方法取异常占比。
+`aggregateSpaceScores()` 汇总：cluster 方法 `score = 簇比例`，`> SpaceRatioThreshold` 判空间异常；absolute 方法取异常占比。
 
 #### Step 4: 按指标分组输出
 
-`buildAnomalyMetrics()` 以**纯空间结果**判定：某指标某卡 `space_abnormal` → 该卡异常。输出为**指标优先**——每个异常指标下列出异常的卡及其 `space_score`（劣化程度）。卡级不再有 quadrant / 复合评分 / category；根因定界与跨卡关联也已移除。
+`buildAnomalyMetrics()` 以**纯空间结果**判定：某指标某卡 `abnormal` → 该卡异常。输出为**指标优先**——每个异常指标下列出异常的卡及其 `score`（劣化程度）。卡级不再有 quadrant / 复合评分 / category；根因定界与跨卡关联也已移除。
 
 ```
-某指标异常 → 该指标下所有空间异常的卡及其 space_score
+某指标异常 → 该指标下所有空间异常的卡及其 score
 ```
 
 ### 1.4 输出
@@ -219,9 +219,9 @@ CPU 取桶内最后一个值。
   "anomaly_metrics": [
     {
       "metric": "temp",
-      "space_method": "cluster",
+      "method": "cluster",
       "cards": [
-        { "node": "node-ip-1", "card_id": 0, "space_score": 2.5, "space_abnormal": true }
+        { "node": "node-ip-1", "card_id": 0, "score": 2.5, "abnormal": true }
       ]
     }
   ]
@@ -231,7 +231,7 @@ CPU 取桶内最后一个值。
 
 ### 1.5 NPU 资源指标
 
-| 指标名 | 分类 | 异常方向 | SpaceMethod | 说明 |
+| 指标名 | 分类 | 异常方向 | Method | 说明 |
 |--------|------|---------|-------------|------|
 | `temp` | 计算 | ↑ 偏高 | cluster | NPU 温度 (°C)，对称连续 |
 | `power` | 计算 | ↑ 偏高 | cluster | NPU 功耗 (W)，对称连续 |

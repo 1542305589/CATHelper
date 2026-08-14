@@ -20,7 +20,7 @@ type FaultEvent struct {
 	Component string            `json:"component"`          // "npu"
 	NPUID     string            `json:"npu_id"`
 	Severity  string            `json:"severity"`           // critical | warning
-	Detail    map[string]string `json:"detail,omitempty"`   // metric → space_score
+	Detail    map[string]string `json:"detail,omitempty"`   // metric → score
 	Timestamp time.Time         `json:"timestamp"`          // filled server-side if zero
 	Recovered bool              `json:"recovered"`
 }
@@ -56,7 +56,7 @@ func EmitToFaultSub(result *DetectionResult, cfg EmitConfig) {
 }
 
 // anomalousCardEvents flattens the metric-first result back to one event per
-// anomalous card. Detail maps each anomalous metric name to its space_score.
+// anomalous card. Detail maps each anomalous metric name to its score.
 func anomalousCardEvents(result *DetectionResult) []FaultEvent {
 	type cardAgg struct {
 		node   string
@@ -80,14 +80,16 @@ func anomalousCardEvents(result *DetectionResult) []FaultEvent {
 
 	for _, m := range result.Metrics {
 		for _, c := range m.Cards {
-			if !c.SpaceAbnormal {
+			// Debug output lists every card, so only anomalous ones are emitted;
+			// non-debug output only contains anomalous cards already.
+			if !c.Abnormal && result.Debug {
 				continue
 			}
 			a := add(c.Node, c.CardID)
-			if c.SpaceScore > a.worst {
-				a.worst = c.SpaceScore
+			if c.Score > a.worst {
+				a.worst = c.Score
 			}
-			a.detail[string(m.Metric)] = strconv.FormatFloat(c.SpaceScore, 'f', -1, 64)
+			a.detail[string(m.Metric)] = strconv.FormatFloat(c.Score, 'f', -1, 64)
 		}
 	}
 

@@ -143,23 +143,23 @@ type MetricMeta struct {
 	Name         MetricName
 	Category     AnomalyCategory
 	Direction    AnomalyDirection
-	SpaceMethod  DetectionMethod
+	Method  DetectionMethod
 	AbsThreshold float64 // for MethodAbsolute
 }
 
 // MetricMetaRegistry maps each metric to its meta-information.
 var MetricMetaRegistry = map[MetricName]MetricMeta{
-	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster},
-	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodCluster},
-	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
-	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
-	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
-	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodCluster},
-	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, SpaceMethod: MethodCluster},
-	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
-	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
-	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
-	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0},
+	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, Method: MethodCluster},
+	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, Method: MethodCluster},
+	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
+	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
+	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
+	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
+	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, Method: MethodCluster},
+	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
 }
 
 // =============================================================================
@@ -180,24 +180,24 @@ const (
 // metric, see MetricAnomaly).
 type MetricAnomalyDetail struct {
 	Metric        MetricName      `json:"metric"`
-	SpaceScore    float64         `json:"space_score"`
-	SpaceAbnormal bool            `json:"space_abnormal"`
-	SpaceMethod   DetectionMethod `json:"space_method"`
+	Score    float64         `json:"score"`
+	Abnormal bool            `json:"abnormal,omitempty"`
+	Method   DetectionMethod `json:"method"`
 }
 
 // AnomalousCard is one card anomalous for a metric, with its space degradation
-// degree (space_score).
+// degree (score).
 type AnomalousCard struct {
 	Node          string  `json:"node"`
 	CardID        int     `json:"card_id"` // node-local card ID (0-based)
-	SpaceScore    float64 `json:"space_score"`
-	SpaceAbnormal bool    `json:"space_abnormal,omitempty"`
+	Score    float64 `json:"score"`
+	Abnormal bool    `json:"abnormal,omitempty"`
 }
 
 // MetricAnomaly groups the anomalous cards of one metric.
 type MetricAnomaly struct {
 	Metric      MetricName      `json:"metric"`
-	SpaceMethod DetectionMethod `json:"space_method"`
+	Method DetectionMethod `json:"method"`
 	Cards       []AnomalousCard `json:"cards"`
 }
 
@@ -239,16 +239,21 @@ func DefaultDetectionConfig() DetectionConfig {
 type DetectionResult struct {
 	Summary DetectionSummary `json:"summary"`
 	Metrics []MetricAnomaly  `json:"anomaly_metrics,omitempty"`
+	// Debug marks --debug-output mode (not serialized): in debug every card
+	// appears in anomaly_metrics with the Abnormal flag; otherwise only
+	// anomalous cards are listed and the flag is omitted.
+	Debug bool `json:"-"`
 }
 
 // DetectionSummary is the overview section of the output.
 type DetectionSummary struct {
-	TotalCards      int    `json:"total_cards"`
-	TotalNodes      int    `json:"total_nodes"`
-	Anomalies       int    `json:"anomalies"`
-	Normal          int    `json:"normal"`
-	KPICSV          string `json:"kpi_csv"`
-	TotalTimePoints int    `json:"total_time_points"`
+	TotalCards          int     `json:"total_cards"`
+	TotalNodes          int     `json:"total_nodes"`
+	Anomalies           int     `json:"anomalies"`
+	Normal              int     `json:"normal"`
+	Source              string  `json:"source"`
+	DataPoints          int     `json:"data_points"`
+	SpaceRatioThreshold float64 `json:"space_ratio_threshold"`
 }
 
 // SpaceDetectionResult holds per-time-point space anomaly scores.

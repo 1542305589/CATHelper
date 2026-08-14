@@ -33,17 +33,18 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	defer srv.Close()
 
 	result := &DetectionResult{
+		Debug: true, // debug-style result: lists every card with its abnormal flag
 		Metrics: []MetricAnomaly{
-			{Metric: MetricTemp, SpaceMethod: MethodCluster, Cards: []AnomalousCard{
-				{Node: noneNode, CardID: 3, SpaceScore: 8.7, SpaceAbnormal: true},
-				{Node: noneNode, CardID: 1, SpaceScore: 5.1, SpaceAbnormal: true},
+			{Metric: MetricTemp, Method: MethodCluster, Cards: []AnomalousCard{
+				{Node: noneNode, CardID: 3, Score: 8.7, Abnormal: true},
+				{Node: noneNode, CardID: 1, Score: 5.1, Abnormal: true},
 			}},
-			{Metric: MetricAICoreUtil, SpaceMethod: MethodCluster, Cards: []AnomalousCard{
-				{Node: noneNode, CardID: 7, SpaceScore: 3.2, SpaceAbnormal: true},
+			{Metric: MetricAICoreUtil, Method: MethodCluster, Cards: []AnomalousCard{
+				{Node: noneNode, CardID: 7, Score: 3.2, Abnormal: true},
 			}},
-			// A normal card (debug-style entry, space_abnormal=false) is skipped.
-			{Metric: MetricTXBandwidth, SpaceMethod: MethodCluster, Cards: []AnomalousCard{
-				{Node: noneNode, CardID: 2, SpaceScore: 1.0, SpaceAbnormal: false},
+			// A normal card (debug-style entry, abnormal=false) is skipped.
+			{Metric: MetricTXBandwidth, Method: MethodCluster, Cards: []AnomalousCard{
+				{Node: noneNode, CardID: 2, Score: 1.0, Abnormal: false},
 			}},
 		},
 	}
@@ -84,7 +85,7 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 func TestEmitToFaultSubEmptyURLNoOp(t *testing.T) {
 	// No URL configured → no panic, no requests.
 	EmitToFaultSub(&DetectionResult{Metrics: []MetricAnomaly{
-		{Metric: MetricTemp, Cards: []AnomalousCard{{Node: noneNode, CardID: 0, SpaceScore: 2, SpaceAbnormal: true}}},
+		{Metric: MetricTemp, Cards: []AnomalousCard{{Node: noneNode, CardID: 0, Score: 2, Abnormal: true}}},
 	}}, EmitConfig{URL: ""})
 	EmitToFaultSub(nil, EmitConfig{URL: "http://localhost:9101"})
 }
@@ -97,7 +98,7 @@ func TestEmitToFaultSubServerDown(t *testing.T) {
 	defer srv.Close()
 	result := &DetectionResult{
 		Metrics: []MetricAnomaly{
-			{Metric: MetricTemp, Cards: []AnomalousCard{{Node: noneNode, CardID: 0, SpaceScore: 9, SpaceAbnormal: true}}},
+			{Metric: MetricTemp, Cards: []AnomalousCard{{Node: noneNode, CardID: 0, Score: 9, Abnormal: true}}},
 		},
 	}
 	EmitToFaultSub(result, EmitConfig{URL: srv.URL, Timeout: 0})

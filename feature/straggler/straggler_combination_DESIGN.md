@@ -272,7 +272,7 @@ func (s *apiServer) handleIngestEvent(w, r) {
 }
 ```
 
-新增 `FaultType`：`FaultStragglerDetected = "straggler_detected"`（`event.go`）。straggler 回注的事件 `type=straggler_detected`，`detail` 为 `{指标: space_score}`（该卡各异常指标及其空间劣化程度）。订阅者（EEP/运维）按异常指标/空间 score 决定是否触发 Profiler 精查或卡隔离。
+新增 `FaultType`：`FaultStragglerDetected = "straggler_detected"`（`event.go`）。straggler 回注的事件 `type=straggler_detected`，`detail` 为 `{指标: score}`（该卡各异常指标及其空间劣化程度）。订阅者（EEP/运维）按异常指标/空间 score 决定是否触发 Profiler 精查或卡隔离。
 
 ### 4.3 补齐指标缺口：`roce_new_pkt_rty`（hccn_tool）
 
@@ -362,7 +362,7 @@ type FaultEvent struct {  // 与 CATMonitor faultsub 契约一致（JSON）
     Component string            `json:"component"`   // "npu"
     NPUID     string            `json:"npu_id"`
     Severity  string            `json:"severity"`    // critical|warning
-    Detail    map[string]string `json:"detail"`      // 指标 → space_score
+    Detail    map[string]string `json:"detail"`      // 指标 → score
     Timestamp time.Time         `json:"timestamp"`
     Recovered bool              `json:"recovered"`
 }
@@ -494,7 +494,7 @@ POST /faultsub/events
 | 运行模式 | CLI/定时 | 检测需历史窗+基线，批量本质，不适合作实时 tap |
 | 模块结构 | feature/straggler 独立 go module | 与 EEP 顶层特性结构一致；不污染 CATMonitor 模块 |
 | 结果消费 | 报告 + 回注 faultsub | 闭环采集→检测→响应；faultsub ingest 端点复用其分发能力 |
-| 事件类型 | 新增 straggler_detected | detail 为 指标→space_score；订阅者按异常指标决策 |
+| 事件类型 | 新增 straggler_detected | detail 为 指标→score；订阅者按异常指标决策 |
 | 指标缺口 | 新增 roce_new_pkt_rty | 补齐 straggler 第 11 项；真机无则降级代理并标注 |
 
 ---

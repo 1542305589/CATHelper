@@ -75,7 +75,7 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 	// 3. Space detection (peer comparison within each node, last point only).
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 3/4: Space (peer) detection...\n")
 	spaceResult := detectSpaceAnomalies(aggregated, rawData.CardIDs, cfg, rawData.NodeOf)
-	spaceDetails := aggregateSpaceScores(spaceResult, rawData.CardIDs, cfg)
+	spaceDetails := aggregateScores(spaceResult, rawData.CardIDs, cfg)
 
 	// 4. Build the metric-first anomaly list.
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 4/4: Building metric-first anomalies...\n")
@@ -92,14 +92,16 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 
 	result := &DetectionResult{
 		Summary: DetectionSummary{
-			TotalCards:      len(rawData.CardIDs),
-			TotalNodes:      len(nodeSet),
-			Anomalies:       anomalies,
-			Normal:          len(rawData.CardIDs) - anomalies,
-			KPICSV:          source,
-			TotalTimePoints: len(aggregated),
+			TotalCards:          len(rawData.CardIDs),
+			TotalNodes:          len(nodeSet),
+			Anomalies:           anomalies,
+			Normal:              len(rawData.CardIDs) - anomalies,
+			Source:              source,
+			DataPoints:          len(aggregated),
+			SpaceRatioThreshold: cfg.SpaceRatioThreshold,
 		},
 		Metrics: metrics,
+		Debug:   cfg.EnableDebug,
 	}
 
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection complete: anomalies=%d normal=%d\n",
@@ -123,28 +125,30 @@ func buildAnomalyMetrics(
 
 	for _, metric := range AllMetrics {
 		ma := MetricAnomaly{
-			Metric:      metric,
-			SpaceMethod: MetricMetaRegistry[metric].SpaceMethod,
+			Metric: metric,
+			Method: MetricMetaRegistry[metric].Method,
 		}
 		for _, cid := range cardIDs {
 			d := spaceDetails[cid][metric]
 			if d == nil {
 				continue
 			}
-			if !cfg.EnableDebug && !d.SpaceAbnormal {
+			if !cfg.EnableDebug && !d.Abnormal {
 				continue
 			}
 			node := nodeOf[cid]
 			if node == "" {
 				node = noneNode
 			}
-			ma.Cards = append(ma.Cards, AnomalousCard{
-				Node:          node,
-				CardID:        localID[cid],
-				SpaceScore:    d.SpaceScore,
-				SpaceAbnormal: d.SpaceAbnormal,
-			})
-			if d.SpaceAbnormal {
+			c := AnomalousCard{Node: node, CardID: localID[cid], Score: d.Score}
+			if cfg.EnableDebug {
+				// Debug output lists every card, so carry the flag to
+				// distinguish normal from abnormal (non-debug only lists
+				// abnormal cards, so the flag is omitted).
+				c.Abnormal = d.Abnormal
+			}
+			ma.Cards = append(ma.Cards, c)
+			if d.Abnormal {
 				anomalyCard[cid] = true
 			}
 		}
@@ -172,27 +176,24 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 
 	// Summary.
 	b.WriteString("[SUMMARY]\n")
-	fmt.Fprintf(&b, "  CSV:        %s\n", result.Summary.KPICSV)
-	fmt.Fprintf(&b, "  数据点:     %d\n", result.Summary.TotalTimePoints)
+	fmt.Fprintf(&b, "  输入:       %s\n", result.Summary.Source)
+	fmt.Fprintf(&b, "  数据点:     %d\n", result.Summary.DataPoints)
 	fmt.Fprintf(&b, "  总卡数:     %d\n", result.Summary.TotalCards)
 	fmt.Fprintf(&b, "  ✓ 正常:     %d\n", result.Summary.Normal)
 	fmt.Fprintf(&b, "  ✗ 异常:     %d\n", result.Summary.Anomalies)
 	b.WriteString("\n")
 
-	// Metric-first anomaly list.
-	multiNode := result.Summary.TotalNodes > 1
+	// Metric-first anomaly list. Only anomalous cards are shown: in debug mode
+	// every card is listed in the result with its Abnormal flag; otherwise only
+	// anomalous cards are listed at all.
 	printed := false
 	for _, m := range result.Metrics {
 		parts := make([]string, 0, len(m.Cards))
 		for _, c := range m.Cards {
-			if !c.SpaceAbnormal {
+			if !c.Abnormal && result.Debug {
 				continue
 			}
-			if multiNode {
-				parts = append(parts, fmt.Sprintf("卡%s:%d(%.2f)", c.Node, c.CardID, c.SpaceScore))
-			} else {
-				parts = append(parts, fmt.Sprintf("卡%d(%.2f)", c.CardID, c.SpaceScore))
-			}
+			parts = append(parts, fmt.Sprintf("node%s:card%d(%.2f)", c.Node, c.CardID, c.Score))
 		}
 		if len(parts) == 0 {
 			continue
