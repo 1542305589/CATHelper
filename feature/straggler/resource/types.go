@@ -256,9 +256,12 @@ type DetectionSummary struct {
 	SpaceRatioThreshold float64 `json:"space_ratio_threshold"`
 }
 
-// SpaceDetectionResult holds per-time-point space anomaly scores.
+// SpaceDetectionResult holds per-time-point space anomaly scores plus the
+// flagged decision (parallel to Scores; cluster method uses the recursive
+// Detect flag, absolute uses the sentinel).
 type SpaceDetectionResult struct {
-	Scores map[int]map[MetricName][]float64
+	Scores  map[int]map[MetricName][]float64
+	Flagged map[int]map[MetricName][]bool
 }
 
 // =============================================================================

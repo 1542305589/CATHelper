@@ -24,7 +24,8 @@ func detectSpaceAnomalies(
 	nodeOf ...map[int]string,
 ) *SpaceDetectionResult {
 	result := &SpaceDetectionResult{
-		Scores: make(map[int]map[MetricName][]float64),
+		Scores:  make(map[int]map[MetricName][]float64),
+		Flagged: make(map[int]map[MetricName][]bool),
 	}
 
 	// Group cards by node. nodes is a partition of cardIDs, so every card is
@@ -40,8 +41,10 @@ func detectSpaceAnomalies(
 	// Init per-card score slices (exactly 1 slot: the last time point).
 	for _, cid := range cardIDs {
 		result.Scores[cid] = make(map[MetricName][]float64, len(AllMetrics))
+		result.Flagged[cid] = make(map[MetricName][]bool, len(AllMetrics))
 		for _, metric := range AllMetrics {
 			result.Scores[cid][metric] = make([]float64, 0, 1)
+			result.Flagged[cid][metric] = make([]bool, 0, 1)
 		}
 	}
 
@@ -66,6 +69,7 @@ func detectSpaceAnomalies(
 				// Need at least 2 cards present IN THIS NODE for peer comparison.
 				for _, cid := range nodeCardIDs {
 					result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
+					result.Flagged[cid][metric] = append(result.Flagged[cid][metric], false)
 				}
 				continue
 			}
@@ -75,52 +79,50 @@ func detectSpaceAnomalies(
 				// Absolute threshold: > threshold → anomaly.
 				for _, cid := range nodeCardIDs {
 					z := 0.0
+					f := false
 					if v, ok := dict[cid]; ok && v > meta.AbsThreshold {
 						z = 999 // sentinel for "absolute anomaly"
+						f = true
 					}
 					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
+					result.Flagged[cid][metric] = append(result.Flagged[cid][metric], f)
 				}
 
 			case MethodCluster:
 				// kmeans ratio detection within THIS node on the last point.
-				// Only present values > 0 participate; the ratio score =
-				// deepest-cluster mean / baseline (direction extreme) cluster
-				// mean. Every card that participates gets a ratio: flagged
-				// cards keep the detected ratio (e.g. 2.5x), non-flagged ones
-				// report the neutral 1.0 (baseline cluster) so the space score
-				// reads as a ratio for all cards, not 0 for the normal ones.
-				// Absent / non-positive cards stay 0 — no ratio is computable.
+				// Only present values > 0 participate. Every participating card
+				// gets its REAL top-level cluster ratio vs the direction-extreme
+				// baseline cluster: baseline members are exactly 1.0, other
+				// non-flagged clusters keep their real ratio (e.g. 1.2), flagged
+				// cards their ratio (> threshold). The FLAG comes from the
+				// recursive Detect decision (unchanged); Diagnose only fills the
+				// score. Absent / non-positive cards stay 0 — no ratio.
 				posPresent, posVals := filterPositive(present, presentVals)
 				if len(posVals) < 2 {
 					for _, cid := range nodeCardIDs {
 						result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
+						result.Flagged[cid][metric] = append(result.Flagged[cid][metric], false)
 					}
 					continue
 				}
 				res := clustering.Detect(posVals, cfg.SpaceRatioThreshold, meta.Direction == DirHigh)
-				flagged := make(map[int]float64, len(res))
+				flagged := make(map[int]bool, len(res))
 				for _, r := range res {
-					cid := nodeCardIDs[posPresent[r.Index]]
-					flagged[cid] = r.Ratio
+					flagged[nodeCardIDs[posPresent[r.Index]]] = true
 				}
-				inCluster := make(map[int]bool, len(posPresent))
-				for _, pi := range posPresent {
-					inCluster[nodeCardIDs[pi]] = true
+				ratioOf := make(map[int]float64, len(posPresent))
+				for _, e := range clustering.Diagnose(posVals, cfg.SpaceRatioThreshold, meta.Direction == DirHigh) {
+					ratioOf[nodeCardIDs[posPresent[e.Index]]] = e.Ratio
 				}
 				for _, cid := range nodeCardIDs {
-					ratio := 0.0
-					if inCluster[cid] {
-						ratio = 1.0 // neutral: member of the baseline cluster
-					}
-					if r, ok := flagged[cid]; ok {
-						ratio = r
-					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], ratio)
+					result.Scores[cid][metric] = append(result.Scores[cid][metric], ratioOf[cid])
+					result.Flagged[cid][metric] = append(result.Flagged[cid][metric], flagged[cid])
 				}
 
 			default: // unknown method → no score
 				for _, cid := range nodeCardIDs {
 					result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
+					result.Flagged[cid][metric] = append(result.Flagged[cid][metric], false)
 				}
 			}
 		}
@@ -194,46 +196,46 @@ func aggregateScores(space *SpaceDetectionResult, cardIDs []int, cfg DetectionCo
 			zscores := space.Scores[cid][metric]
 			if len(zscores) == 0 {
 				result[cid][metric] = &MetricAnomalyDetail{
-					Metric:     metric,
-					Score: 0,
+					Metric: metric,
+					Score:  0,
 				}
 				continue
 			}
+			flags := space.Flagged[cid][metric]
 
 			// Absolute methods flag via the 999 sentinel; cluster methods score
-			// the cluster ratio.
+			// the real top-level cluster ratio.
 			meta := MetricMetaRegistry[metric]
 			isSentinel := meta.Method == MethodAbsolute
 
 			var sum float64
-			abnormalCount := 0
-			for _, z := range zscores {
-				if isSentinel {
-					if z >= 999 {
-						abnormalCount++
-					}
-				} else {
-					sum += z
+			flaggedCount := 0
+			for i, z := range zscores {
+				sum += z
+				if i < len(flags) && flags[i] {
+					flaggedCount++
 				}
 			}
 
-			var spaceScore float64
-			var spaceAbnormal bool
+			var score float64
+			var abnormal bool
 			if isSentinel {
-				// Absolute: abnormal if >50% of points flagged.
-				spaceScore = float64(abnormalCount) / float64(len(zscores))
-				spaceAbnormal = spaceScore > 0.5
+				// Absolute: score = fraction of flagged points; abnormal if >50%.
+				score = float64(flaggedCount) / float64(len(zscores))
+				abnormal = score > 0.5
 			} else {
-				// Cluster: score is the cluster ratio on the last point;
-				// abnormal when the ratio exceeds SpaceRatioThreshold.
-				spaceScore = sum / float64(len(zscores))
-				spaceAbnormal = spaceScore > cfg.SpaceRatioThreshold
+				// Cluster: score = the real cluster ratio (baseline members are
+				// exactly 1.0, other non-flagged clusters keep their real ratio
+				// e.g. 1.2); abnormal follows the recursive Detect flag, not the
+				// raw ratio.
+				score = sum / float64(len(zscores))
+				abnormal = float64(flaggedCount)/float64(len(zscores)) > 0.5
 			}
 
 			result[cid][metric] = &MetricAnomalyDetail{
-				Metric:        metric,
-				Score:    spaceScore,
-				Abnormal: spaceAbnormal,
+				Metric:   metric,
+				Score:    score,
+				Abnormal: abnormal,
 			}
 		}
 	}

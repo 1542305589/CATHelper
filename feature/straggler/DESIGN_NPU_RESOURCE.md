@@ -211,7 +211,8 @@ if 增量 > 0: 聚合值 = 增量
   空间分 S_space[m][c] = 簇比例（kmeans）：簇均值 / 方向极值簇均值
                          （absolute 方法：值 > 0 → sentinel 999）
   被标记卡 score = 簇比例（> SpaceRatioThreshold）
-  未标记卡 score = 1.0（中性）
+  基线簇成员 score = 1.0（真实比值）
+  其他未标记簇 score = 真实比值（如 1.2）
 
   复合评分 = 异常指标 score 的均值
 ```
@@ -239,8 +240,8 @@ if 增量 > 0: 聚合值 = 增量
 6. 基线簇 = 方向极值簇（DirHigh→最小均值簇，DirLow→最大均值簇）
 7. 簇均值比 > SpaceRatioThreshold（默认 2.0）→ 异常簇
 8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
-9. 参与聚类的卡都有 score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）：被标记卡为其比值，未标记卡为中性 1.0；缺失/值 ≤ 0 的卡为 0
-聚合：score > SpaceRatioThreshold 判空间异常
+9. 参与聚类的卡都有 score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）：基线簇成员恰为 1.0，其他未标记簇保留真实比值，被标记卡为其比值；缺失/值 ≤ 0 的卡为 0
+聚合：判定用递归 Detect 的标记（不随比值变化）；score > SpaceRatioThreshold 仅用于解释
 ```
 
 适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH（在各节点内独立检测）
