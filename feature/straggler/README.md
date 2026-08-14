@@ -69,7 +69,6 @@ straggler/
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
 │   ├── fusion.go           #   空间融合 + 先计算后通信
-│   ├── rootcause.go        #   根因定界推理
 │   ├── report.go           #   管线编排 + 文本报告
 │   └── emit.go             #   faultsub 闭环回传
 ├── profiling/              # 第二道防线：Profiling 检测
@@ -232,7 +231,7 @@ Profiler 模式:
 
 ```
 CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
-融合(先计算后通信) → 根因定界 → 跨卡关联 → 合并 JSON
+融合(先计算后通信) → 合并 JSON
 ```
 
 **指标注册表**（方向 = 异常方向；方法 = 空间检测方法）：
@@ -284,9 +283,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 {
   "kpi": {
     "summary": { "total_cards": 8, "total_nodes": 2, "confirmed_anomalies": 1, "...": "..." },
-    "results": [ { "card_id": 0, "node": "node-1", "quadrant": 3, "anomaly_details": [ "..."] } ],
-    "root_causes": [ { "node": "node-1", "card_id": 0, "category": "thermal_throttle", "evidence": [ "..."] } ],
-    "correlations": [ "..."]
+    "results": [ { "card_id": 0, "node": "node-1", "quadrant": 3, "anomaly_details": [ "..."] } ]
   },
   "profiler": {
     "node_result": [
@@ -298,7 +295,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 ```
 
 - **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键；KPI 失败且无 Profiler → 不写文件。
-- `kpi` 段 = KPI 检测结果（summary / results / root_causes / correlations）。
+- `kpi` 段 = KPI 检测结果（summary / results；`results[].anomaly_details` 为异常指标及空间 score）。
 - `profiler` 段 = 节点聚合结果：`node_result[]` 按物理节点（hostname）分组，`npu[]` 只含异常 NPU（cal/npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
 
 **`--debug-output` 调试输出**（不加额外键，直接在现有结果里展示所有数据，仍在 `straggler_output.json`）：
@@ -313,7 +310,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 | 报告 | 路径 | 内容 |
 |------|------|------|
-| KPI 报告 | `path/analysis_result/npu_resource_detection_report.log`（仅 KPI 时 `./analysis_result/`） | 汇总、确认异常详情、跨卡关联 |
+| KPI 报告 | `path/analysis_result/npu_resource_detection_report.log`（仅 KPI 时 `./analysis_result/`） | 汇总、异常卡详情（异常指标 + 空间 score） |
 | Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel/ZP_Host 排序柱状图、通信域分组对比 |
 
 ### 6.3 stdout
@@ -334,26 +331,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | `quadrant`（整数 0-3） | JSON 中输出为整数：`0`=normal（正常）、`3`=confirmed_anomaly（空间维度判定异常）。`1`/`2` 为历史值，纯空间判定下不再产生 |
 | `space_score` | 空间簇比例（cluster 方法）；异常条件 `> SpaceRatioThreshold` |
 | `anomaly_category` | `compute` / `communication` |
-| `root_cause.category` | 定界结果（见下表） |
 | `secondary_comm_anomalies` | 计算异常导致的继发性通信异常 |
-
-### 6.5 根因定界 → 排查方向
-
-| 定界结果 | 排查方向 |
-|---------|---------|
-| `thermal_throttle` | 检查风扇转速、风道堵塞、机房温度 |
-| `cooling_insufficient` | 检查散热器接触、硅脂老化 |
-| `forced_downclock` | 检查驱动/固件频率策略 |
-| `temp_sensor_fault` | 检查温度传感器，交叉验证功率/频率数据确认是否漂移 |
-| `straggler` | 触发 Profiling 精查，确认计算慢/通信慢根因 |
-| `load_imbalance` | 检查数据分发策略、模型并行切分均衡性 |
-| `memory_bottleneck` | 检查 HBM 访问模式、cache miss、显存分配 |
-| `network_link_issue` | 检查光模块、光纤、交换机端口 CRC |
-| `network_congestion` | 检查 PFC 配置、队列 buffer、ECN |
-| `network_packet_loss` | 检查 RoCE ECN/DCQCN 参数 |
-| `bandwidth_limited` | 检查网卡协商速率、PCIe 带宽、光模块型号 |
-| `hardware_fault` | 隔离该卡，安排硬件诊断 |
-| `unknown` | 无法精确定界，建议人工分析原始数据 |
 
 ---
 

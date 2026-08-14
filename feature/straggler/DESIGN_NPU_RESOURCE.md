@@ -70,7 +70,7 @@
 | `NPU_CARD_AICORE_FREQ` | 每卡 AI Core 频率 | MHz | JSON dict[card→float] |
 | `NPU_CARD_AICORE_UTIL` | 每卡 AI Core 利用率 | % | JSON dict[card→float] |
 | `NPU_CARD_HBM_BANDWIDTH_UTIL` | 每卡 HBM 带宽使用率 | % | JSON dict[card→float] |
-| `NPU_CARD_HBM_UTIL` | 每卡 HBM 内存使用率（仅采集跟踪，不参与根因规则） | % | JSON dict[card→float] |
+| `NPU_CARD_HBM_UTIL` | 每卡 HBM 内存使用率（仅采集跟踪） | % | JSON dict[card→float] |
 | `NPU_TX_BANDWIDTH` | 每卡发送带宽 | ? | JSON dict[card→float] |
 | `NPU_RX_PFC_PKT` | 每卡接收 PFC 暂停帧 | 包数 | JSON dict[card→float] |
 | `NPU_ROCE_TX_ERR_PKT` | 每卡 RoCE 发送错误包 | 包数 | JSON dict[card→float] |
@@ -177,7 +177,7 @@ if 增量 > 0: 聚合值 = 增量
 [空间检测]  → 只取最后一个聚合点，节点内 peer 对比（kmeans 簇比例 / 绝对阈值）
   │
   ▼
-[融合]  → 纯空间判定（compute-first）→ 根因定界 → 跨卡关联
+[融合]  → 纯空间判定（compute-first）→ 输出（异常指标 + 空间 score）
 ```
 
 ---
@@ -336,63 +336,9 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 
 ---
 
-## 6. 根因定界
+## 6. 输出（根因定界与跨卡关联已移除）
 
-### 6.1 定界规则表
-
-基于异常指标的组合模式推断根因。规则按**先计算后通信**的顺序排列，且通信类规则仅在计算类指标正常时生效（避免将计算慢导致的继发通信异常误判为网络问题）。
-
-**计算类规则**（优先匹配）：
-
-| # | 模式 | 根因推断 | 置信度 | 建议动作 |
-|---|------|---------|--------|---------|
-| C1 | TEMP↑ + FREQ↓ | **热降频** | 高 | 检查风扇转速/风道堵塞/机房环境温度 |
-| C2 | TEMP↑ + POWER↑ + FREQ— | **散热能力不足** | 高 | 检查散热器接触/硅脂老化/风扇故障 |
-| C3 | FREQ↓ + TEMP— | **强制降频（非热）** | 中 | 检查驱动/固件的频率策略配置 |
-| C4 | POWER↓ + AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL↓ | **Straggler（卡空闲等待）** | 高 | 该卡可能在等通信/等数据，触发 Profiling 精查 |
-| C5 | AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL— | **计算负载不均** | 中 | 检查数据分发策略/模型并行切分是否均衡 |
-| C6 | HBM_BANDWIDTH_UTIL↓ + AICORE_UTIL— | **内存带宽瓶颈** | 低 | 检查 HBM 访问模式/是否有大量 cache miss |
-| C7 | TEMP↑ + POWER— + FREQ— | **温度传感器漂移** | 中 | 交叉验证功率数据（真发热必伴随功率↑） |
-| C8 | 多指标同时异常（≥4个，含计算类） | **板卡综合性硬件故障** | 高 | 建议隔离该卡，安排硬件诊断/更换 |
-| C9 | 单项 TEMP↑ 孤立 | **局部热点/传感器个体差异** | 低 | 持续观察；若伴随 FREQ↓ 则按 C1 处理 |
-| C10 | 单项 POWER↑ 孤立 | **功耗计量偏差** | 低 | 交叉验证：功率↑应伴随温度↑，否则可能是计量误差 |
-
-**通信类规则**（仅在计算类指标全部正常时生效）：
-
-| # | 模式 | 根因推断 | 置信度 | 建议动作 |
-|---|------|---------|--------|---------|
-| N1 | ERR_PKT↑（持续） | **网络物理链路故障** | 高 | 检查光模块/光纤/交换机端口 CRC 错误 |
-| N2 | PFC_PKT↑（持续） | **网络拥塞（PFC 风暴）** | 高 | 检查交换机 PFC 配置/队列 buffer/ECN 标记 |
-| N3 | OUT_OF_ORDER↑ + RETRY↑ | **RoCE 网络丢包乱序** | 高 | 检查 RoCE 路径 ECN 配置/DCQCN 参数 |
-| N4 | TX_BANDWIDTH↓ + AICORE_UTIL— | **通信带宽受限** | 中 | 检查网卡协商速率/PCIe 带宽/光模块型号 |
-
-> **注意**：若某卡同时命中计算类和通信类规则，以计算类为准，通信异常标记为"可能继发于计算异常"，不独立告警。
-
-### 6.2 定界实现
-
-```
-func BoundRootCause(cardID, anomalyMatrix, trends) RootCauseResult:
-    1. 检查计算类指标异常集
-    2. 若计算类有异常 → 仅匹配计算类规则 C1-C10
-       → 通信类异常标记为"可能继发于计算异常"
-    3. 若计算类全部正常 → 才匹配通信类规则 N1-N4
-    4. 按规则表优先级逐条匹配（精确匹配 + 允许额外指标）
-    5. 匹配成功 → 返回根因类别 + 置信度 + 证据 + 建议
-    6. 无匹配 → "unknown"，输出全量异常指标供人工分析
-```
-
-### 6.3 跨卡关联分析
-
-部分根因会同时影响多张卡：
-
-| 异常卡分布 | 推断 | 示例 |
-|-----------|------|------|
-| 同一物理节点的所有卡 | **服务器级故障**（散热/电源） | 节点 A 的 8 张卡温度同时升高 |
-| 同一通信域的所有卡 | **网络级故障**（交换机端口） | tp 组内 4 张卡 ERR_PKT 同时增加 |
-| 全部卡 | **任务级故障**（训练 hang） | 所有卡 UTIL↓ + POWER↓ |
-| 个别孤立卡 | **板卡级故障** | 单卡 TEMP↑ + FREQ↓ |
-
-关联分析通过 `CPU_average` 字段推断物理节点归属（每 CPU 通常对应特定的一组 NPU 卡）。
+根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。`root_causes` / `correlations` 不再生成；faultsub 事件 detail 只含 `quadrant` / `anomaly_category` / `composite_score`。
 
 ---
 
@@ -430,10 +376,10 @@ func BoundRootCause(cardID, anomalyMatrix, trends) RootCauseResult:
     │ ┌── 再检测通信 ─────────┐ │
     │ │ BANDWIDTH/ERR_PKT/    │ │
     │ │ PFC_PKT/RETRY/OOO     │ │
-    │ │ → 异常? → 通信类定界   │ │
+    │ │ → 异常? → 输出         │ │
     │ └──────────────────────┘ │
     │                          │
-    │ 4. 跨卡关联分析          │
+    │ 4. 输出异常卡详情          │
     └──────────┬───────────────┘
                │
                ▼
@@ -472,7 +418,7 @@ func main() {
         //   1. 解析 → 2. 聚合 → 3. 空间检测（最后一点 peer）
         //   4. 先检测计算类指标 (FREQ/UTIL/HBM/TEMP/POWER)
         //   5. 计算正常 → 再检测通信类指标 (BANDWIDTH/ERR/PFC/RETRY/OOO)
-        //   6. 融合（compute-first）→ 7. 根因定界(计算类优先) → 8. 关联分析
+        //   6. 融合（compute-first）→ 7. 输出（异常指标 + 空间 score）
     }
 
     if kpiResult != nil && kpiResult.HasConfirmedAnomaly() {
@@ -528,7 +474,6 @@ features/straggler/
   │   ├── aggregator.go          # 10秒截尾均值聚合（AggregationWindowSec，排序→截尾→均值）
   │   ├── space_detector.go      # 空间维度检测（peer 对比，最后一点；kmeans 比例 / 绝对阈值）
   │   ├── fusion.go              # 纯空间融合 + 先计算后通信排序
-  │   ├── rootcause.go           # 根因定界推理 + 关联分析
   │   └── report.go              # 结果输出（JSON + 文本报告）
   └── config/
       └── config.go              # 扩展：KPI 检测配置项
@@ -628,43 +573,9 @@ const (
     CatCommunication AnomalyCategory = "communication"
 )
 
-// ==================== 定界 ====================
+// ==================== 定界（已移除） ====================
 
-type RootCauseCategory string
-const (
-    RcThermalThrottle      RootCauseCategory = "thermal_throttle"
-    RcCoolingInsufficient  RootCauseCategory = "cooling_insufficient"
-    RcTempSensorFault      RootCauseCategory = "temp_sensor_fault"
-    RcForcedDownclock      RootCauseCategory = "forced_downclock"
-    RcStraggler            RootCauseCategory = "straggler"
-    RcLoadImbalance        RootCauseCategory = "load_imbalance"
-    RcMemBottleneck        RootCauseCategory = "memory_bottleneck"
-    RcNetworkLinkIssue     RootCauseCategory = "network_link_issue"
-    RcNetworkCongestion    RootCauseCategory = "network_congestion"
-    RcNetworkPacketLoss    RootCauseCategory = "network_packet_loss"
-    RcBandwidthLimited     RootCauseCategory = "bandwidth_limited"
-    RcHardwareFault        RootCauseCategory = "hardware_fault"
-    RcUnknown              RootCauseCategory = "unknown"
-)
-
-type RootCauseResult struct {
-    CardID     int
-    Category   RootCauseCategory
-    Confidence Confidence
-    Evidence   []MetricAnomalyDetail
-    Suggestion string
-}
-
-// CorrelationResult 跨卡关联分析结果。
-type CorrelationResult struct {
-    Type        string   // "node_level" | "network_level" | "job_level" | "card_level"
-    Description string
-    CardIDs     []int
-    Confidence  Confidence
-}
-
-type Severity   string // "critical" | "warning" | "info"
-type Confidence string // "high" | "medium" | "low"
+type Severity string // "critical" | "warning" | "info"
 
 // ==================== 配置 ====================
 
@@ -723,21 +634,11 @@ func FuseAndSummarize(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, 
 func HasConfirmedAnomaly(summaries []CardDetectionSummary) bool
 
 
-// ==================== rootcause.go ====================
-// BoundRootCause 对异常卡执行根因定界。
-func BoundRootCause(summaries []CardDetectionSummary, data *TimeSeriesData) []RootCauseResult
-
-// CrossCardCorrelation 跨卡关联分析。
-func CrossCardCorrelation(results []RootCauseResult, data *TimeSeriesData) []CorrelationResult
-
-
 // ==================== report.go ====================
 // DetectionResult 是 KPI 检测的完整结果。
 type DetectionResult struct {
-    Summaries   []CardDetectionSummary
-    RootCauses  []RootCauseResult
-    Correlations []CorrelationResult
-    Config      DetectionConfig
+    Summary DetectionSummary
+    Results []CardDetectionSummary
 }
 
 // WriteResourceReport 生成文本报告。
@@ -798,15 +699,6 @@ KPI 检测专用选项:
       "composite_score": 0.85,
       "severity": "warning",
       "communication_anomalies_secondary": true,
-      "root_cause": {
-        "category": "thermal_throttle",
-        "confidence": "high",
-        "evidence": [
-          {"metric": "temp", "space_score": 3.2, "quadrant": "confirmed_anomaly"},
-          {"metric": "aicore_freq", "space_score": 5.0, "quadrant": "confirmed_anomaly"}
-        ],
-        "suggestion": "Card 3 温度(空间 3.2x) + 降频(空间 5.0x)。建议检查风扇/风道/散热器。"
-      },
       "metric_details": {
         "temp": {
           "quadrant": "confirmed_anomaly",
@@ -840,8 +732,7 @@ KPI 检测专用选项:
 
 类似现有 `detection_report.log` 风格，包含：
 - 检测摘要（正常 / 确认异常卡数统计）
-- 确认异常卡列表 + 定界结果（含建议）
-- 跨卡关联分析
+- 异常卡详情（异常指标 + 空间 score）
 - 各指标的 `space_score` / 象限
 
 ---

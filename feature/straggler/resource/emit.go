@@ -33,10 +33,9 @@ type EmitConfig struct {
 
 // EmitToFaultSub POSTs one straggler_detected event per anomalous card in the
 // detection result to faultsub's ingest endpoint (POST {URL}/faultsub/events).
-// Confirmed anomalies → critical; early degradation → warning; individual
-// variance → info (carried but low priority). Cards that are QuadNormal are
-// skipped. Errors are logged to stderr; detection proceeds regardless (a
-// faultsub outage must not block the report).
+// Confirmed anomalies → critical; other non-normal quadrants → warning. Cards
+// that are QuadNormal are skipped. Errors are logged to stderr; detection
+// proceeds regardless (a faultsub outage must not block the report).
 func EmitToFaultSub(result *DetectionResult, cfg EmitConfig) {
 	if cfg.URL == "" || result == nil {
 		return
@@ -48,42 +47,27 @@ func EmitToFaultSub(result *DetectionResult, cfg EmitConfig) {
 	client := &http.Client{Timeout: timeout}
 	endpoint := cfg.URL + "/faultsub/events"
 
-	rootCauseByCard := map[int]RootCauseResult{}
-	for _, rc := range result.RootCauses {
-		rootCauseByCard[rc.CardID] = rc
-	}
-
 	for _, s := range result.Results {
 		if s.Quadrant == QuadNormal {
 			continue
 		}
-		ev := buildEvent(s, rootCauseByCard[s.CardID])
-	if err := postEvent(client, endpoint, ev); err != nil {
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] faultsub emit card %d failed: %v\n", s.CardID, err)
+		ev := buildEvent(s)
+		if err := postEvent(client, endpoint, ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] faultsub emit card %d failed: %v\n", s.CardID, err)
+		}
 	}
-}
 }
 
 // buildEvent assembles a straggler_detected FaultEvent for one card.
-func buildEvent(s CardDetectionSummary, rc RootCauseResult) FaultEvent {
+func buildEvent(s CardDetectionSummary) FaultEvent {
 	sev := "warning"
-	switch s.Quadrant {
-	case QuadConfirmedAnomaly:
+	if s.Quadrant == QuadConfirmedAnomaly {
 		sev = "critical"
-	case QuadIndividualVariance:
-		sev = "info"
 	}
 	detail := map[string]string{
-		"quadrant":          s.Quadrant.String(),
-		"anomaly_category":  string(s.AnomalyCategory),
-		"composite_score":   strconv.FormatFloat(s.CompositeScore, 'f', -1, 64),
-	}
-	if rc.Category != "" {
-		detail["root_cause"] = string(rc.Category)
-		if rc.Suggestion != "" {
-			detail["suggestion"] = rc.Suggestion
-		}
-		detail["confidence"] = string(rc.Confidence)
+		"quadrant":         s.Quadrant.String(),
+		"anomaly_category": string(s.AnomalyCategory),
+		"composite_score":  strconv.FormatFloat(s.CompositeScore, 'f', -1, 64),
 	}
 	// NPUID includes the node so cards from different nodes with the same
 	// per-node card ID do not collide in faultsub.

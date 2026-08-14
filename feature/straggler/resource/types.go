@@ -235,48 +235,7 @@ type CardDetectionSummary struct {
 }
 
 // =============================================================================
-// Root Cause
-// =============================================================================
-
-// RootCauseCategory enumerates diagnosed root causes.
-type RootCauseCategory string
-
-const (
-	RcThermalThrottle     RootCauseCategory = "thermal_throttle"
-	RcCoolingInsufficient RootCauseCategory = "cooling_insufficient"
-	RcTempSensorFault     RootCauseCategory = "temp_sensor_fault"
-	RcForcedDownclock     RootCauseCategory = "forced_downclock"
-	RcStraggler           RootCauseCategory = "straggler"
-	RcLoadImbalance       RootCauseCategory = "load_imbalance"
-	RcMemBottleneck       RootCauseCategory = "memory_bottleneck"
-	RcNetworkLinkIssue    RootCauseCategory = "network_link_issue"
-	RcNetworkCongestion   RootCauseCategory = "network_congestion"
-	RcNetworkPacketLoss   RootCauseCategory = "network_packet_loss"
-	RcBandwidthLimited    RootCauseCategory = "bandwidth_limited"
-	RcHardwareFault       RootCauseCategory = "hardware_fault"
-	RcUnknown             RootCauseCategory = "unknown"
-)
-
-// RootCauseResult is the diagnosed root cause for one anomalous card.
-type RootCauseResult struct {
-	CardID     int                   `json:"card_id"`
-	Node       string                `json:"node"`
-	Category   RootCauseCategory     `json:"category"`
-	Confidence Confidence            `json:"confidence"`
-	Evidence   []MetricAnomalyDetail `json:"evidence"`
-	Suggestion string                `json:"suggestion"`
-}
-
-// CorrelationResult records cross-card correlation findings.
-type CorrelationResult struct {
-	Type        string     `json:"type"` // node_level | network_level | job_level | card_level
-	Description string     `json:"description"`
-	CardIDs     []int      `json:"card_ids"`
-	Confidence  Confidence `json:"confidence"`
-}
-
-// =============================================================================
-// Severity & Confidence Enums
+// Severity Enums
 // =============================================================================
 
 // Severity indicates how urgent the finding is.
@@ -286,15 +245,6 @@ const (
 	SevCritical Severity = "critical"
 	SevWarning  Severity = "warning"
 	SevInfo     Severity = "info"
-)
-
-// Confidence indicates how confident the diagnosis is.
-type Confidence string
-
-const (
-	ConfHigh   Confidence = "high"
-	ConfMedium Confidence = "medium"
-	ConfLow    Confidence = "low"
 )
 
 // =============================================================================
@@ -343,10 +293,8 @@ func DefaultDetectionConfig() DetectionConfig {
 
 // DetectionResult is the complete KPI detection output.
 type DetectionResult struct {
-	Summary      DetectionSummary       `json:"summary"`
-	Results      []CardDetectionSummary `json:"results"`
-	RootCauses   []RootCauseResult      `json:"root_causes"`
-	Correlations []CorrelationResult    `json:"correlations"`
+	Summary DetectionSummary       `json:"summary"`
+	Results []CardDetectionSummary `json:"results"`
 }
 
 // DetectionSummary is the overview section of the output.

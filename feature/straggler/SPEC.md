@@ -91,15 +91,8 @@ detectSpaceAnomalies
      │
      ▼
 FuseAndSummarize
-        (2D cross-validation,
+        (space-only,
          compute-first ordering)
-                   │
-                   ▼
-           BoundRootCause
-        (C1-C10 / N1-N4 rules)
-                   │
-                   ▼
-        CrossCardCorrelation
                    │
                    ▼
     ┌──────────────┼──────────────┐
@@ -219,47 +212,7 @@ Space异常 → confirmed_anomaly
 4. 整体象限取所有异常指标中最严重的
 5. 复合评分 = 异常指标 `space_score` 的均值
 
-#### Step 5: 根因定界
-
-`BoundRootCause()` 基于异常指标模式匹配规则：
-
-**计算类规则（C1-C10）**：
-
-| 规则 | 指标组合 | 根因 | 置信度 |
-|------|---------|------|--------|
-| C1 | TEMP↑ + FREQ↓ | thermal_throttle（热降频） | 高 |
-| C2 | TEMP↑ + POWER↑ + FREQ 正常 | cooling_insufficient（散热不足） | 高 |
-| C3 | FREQ↓ + TEMP 正常 | forced_downclock（强制降频） | 中 |
-| C4 | POWER↓ + UTIL↓ + HBM_BANDWIDTH_UTIL↓ | straggler（卡空闲等待） | 高 |
-| C5 | UTIL↓ + HBM_BANDWIDTH_UTIL 正常 | load_imbalance（负载不均） | 中 |
-| C6 | HBM_BANDWIDTH_UTIL↓ + UTIL 正常 | memory_bottleneck（内存带宽瓶颈） | 低 |
-| C7 | TEMP↑ + POWER 正常 + FREQ 正常 | temp_sensor_fault（传感器漂移） | 中 |
-| C8 | ≥4 个计算指标异常 | hardware_fault（硬件故障） | 高 |
-| C9 | 仅 TEMP↑ | temp_sensor_fault（局部热点） | 低 |
-| C10 | 仅 POWER↑（TEMP 正常） | unknown（功率计量偏差） | 低 |
-
-> `hbm_util`（HBM 内存使用率）参与采集/聚合/空间检测/报告展示，但**不参与任何根因规则匹配**。其单独异常时无规则命中，回退为 `unknown` 供人工分析；但异常计数计入 C8 的多指标综合判定。
-
-**通信类规则（N1-N4）**：
-
-| 规则 | 指标组合 | 根因 | 置信度 |
-|------|---------|------|--------|
-| N1 | ERR_PKT↑ | network_link_issue（物理链路故障） | 高 |
-| N2 | PFC_PKT↑ | network_congestion（PFC 风暴） | 高 |
-| N3 | OUT_OF_ORDER↑ + RETRY↑ | network_packet_loss（丢包乱序） | 高 |
-| N4 | TX_BW↓ + UTIL 正常 | bandwidth_limited（带宽受限） | 中 |
-
-规则按顺序匹配，命中即返回。未命中则 fallback 为 "unknown"。
-
-#### Step 6: 跨卡关联
-
-`CrossCardCorrelation()` 判断异常卡之间的关联：
-
-| 模式 | 条件 | 含义 |
-|------|------|------|
-| job_level | 所有卡均异常 | 任务级故障（hang/环境问题） |
-| card_level | 仅 1 卡异常 | 板卡级故障 |
-| card_level | 2-99% 卡异常 | 逐卡排查 |
+（根因定界与跨卡关联已移除：输出只保留异常指标及其空间 score。）
 
 ### 1.4 输出
 
@@ -293,13 +246,10 @@ Space异常 → confirmed_anomaly
       "composite_score": 2.5,
       "severity": "warning"
     }
-  ],
-  "root_causes": [
-    { "node": "node-ip-1", "card_id": 0, "category": "...", "evidence": [ { "...": "同上" } ] }
   ]
 }
 ```
-（`anomaly_details` 仅含空间字段：`metric` / `space_score` / `space_abnormal` / `quadrant` / `space_method`。）
+（`anomaly_details` 仅含空间字段：`metric` / `space_score` / `space_abnormal` / `quadrant` / `space_method`；无 `root_causes` / `correlations`。）
 
 ### 1.5 NPU 资源指标
 
@@ -527,7 +477,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | 包 | 文件数 | 职责 |
 |------|--------|------|
 | `main` | 1 | CLI 参数解析、双模式编排（KPI → Profiler 降级链） |
-| `resource` | 14 | KPI 检测引擎：解析 → 聚合 → 基线 → 空间检测 → 时间检测 → 融合 → 根因 → 关联 → 报告 → JSON 导出 → FaultSub 推送 |
+| `resource` | 11 | KPI 检测引擎：解析 → 聚合 → 空间检测 → 融合 → 报告 → JSON 导出 → FaultSub 推送 |
 | `config` | 1 | Profiler 全局配置（FilePath、阈值）、DegradationData 结果聚合 |
 | `profiling/dataparse` | 3 | SQLite `.db` 解析 → CSV + JSON 中间文件（含 host_info） |
 | `profiling/detector` | 4 | 并行域拓扑解析、单步快照、四类检测逻辑 |
@@ -543,7 +493,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 - **KPI: 纯空间 peer 对比**：已移除时间维度与基线/检测窗口，异常完全由最后一个聚合点的空间 peer 对比判定（kmeans 簇比例 / 错误计数绝对阈值）。
 - **KPI: Compute-First 排序**：计算慢必然导致通信慢（卡无法按时参与集合通信），先判定计算再审视通信，避免将计算慢的卡误归因为通信故障。
 - **KPI: 裁剪均值聚合**：原始数据 ~2s 采集，每 10 秒聚合窗口（`AggregationWindowSec=10`）内使用 25% 裁剪均值，抵抗采集噪声（温度/功耗传感器的瞬时抖动）。
-- **KPI: HBM 双指标并存**：`hbm_bandwidth_util`（带宽，参与 C4/C5/C6 根因规则）+ `hbm_util`（内存，仅跟踪展示，不参与规则），语义上带宽更贴合性能瓶颈判断，但内存使用率仍有采集跟踪价值。
+- **KPI: HBM 双指标并存**：`hbm_bandwidth_util`（带宽）+ `hbm_util`（内存）都做空间检测；语义上带宽更贴合性能瓶颈判断，内存使用率仅跟踪展示。
 - **Profiler: 合并 Step**：所有 step 合并为单聚合 step（minStart → maxEnd），CSV 仅一行。Profiler 时间分辨率低，逐 step 不可靠。
 - **Profiler: 倒数第二行**：多行数据取 n-2 行，避免末行不完整。
 - **-99999 哨兵**（Profiler）：统一无效数据标记，在 GetCurJobLastStepData、detectionZpBubbleData、report.filterValid 中跳过。

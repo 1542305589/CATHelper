@@ -186,9 +186,7 @@ func TestApplyNodeIdentity(t *testing.T) {
 		{CardID: 5, Quadrant: QuadConfirmedAnomaly},
 		{CardID: 6, Quadrant: QuadNormal},
 	}
-	rootCauses := []RootCauseResult{{CardID: 5, Category: RcThermalThrottle}}
-
-	s, r := applyNodeIdentity(summaries, rootCauses, nodeOf, localID)
+	s := applyNodeIdentity(summaries, nodeOf, localID)
 
 	if s[0].Node != "node-a" || s[0].CardID != 1 {
 		t.Errorf("summary[0] → node=%s card=%d, want node-a/1", s[0].Node, s[0].CardID)
@@ -199,15 +197,11 @@ func TestApplyNodeIdentity(t *testing.T) {
 	if s[0].Quadrant != QuadConfirmedAnomaly {
 		t.Errorf("quadrant must be preserved through conversion, got %v", s[0].Quadrant)
 	}
-	if len(r) != 1 || r[0].Node != "node-a" || r[0].CardID != 1 {
-		t.Errorf("root cause not converted: %+v", r)
-	}
 }
 
 func TestApplyNodeIdentityMissingDefaultsToNone(t *testing.T) {
-	s, _ := applyNodeIdentity(
+	s := applyNodeIdentity(
 		[]CardDetectionSummary{{CardID: 9}},
-		[]RootCauseResult{},
 		map[int]string{}, map[int]int{},
 	)
 	if s[0].Node != noneNode {

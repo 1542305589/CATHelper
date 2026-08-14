@@ -40,10 +40,6 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 			{CardID: 2, Quadrant: QuadNormal, AnomalyCategory: CatNone, CompositeScore: 0}, // skipped
 			{CardID: 7, Quadrant: QuadIndividualVariance, AnomalyCategory: CatCommunication, CompositeScore: 3.2},
 		},
-		RootCauses: []RootCauseResult{
-			{CardID: 3, Category: RcThermalThrottle, Confidence: ConfHigh, Suggestion: "check fan"},
-			{CardID: 1, Category: RcStraggler, Confidence: ConfMedium},
-		},
 	}
 	EmitToFaultSub(result, EmitConfig{URL: srv.URL, Timeout: 0})
 
@@ -52,7 +48,7 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events (3 anomalous, 1 normal skipped), got %d", len(events))
 	}
-	// Card 3 → critical + thermal_throttle root cause (node defaults to "none").
+	// Card 3 → critical (node defaults to "none").
 	ev3 := findEmit(events, "none:3")
 	if ev3 == nil {
 		t.Fatal("missing card 3 event")
@@ -60,7 +56,7 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	if ev3.Type != "straggler_detected" || ev3.Severity != "critical" {
 		t.Errorf("card3 event wrong: %+v", ev3)
 	}
-	if ev3.Detail["root_cause"] != "thermal_throttle" || ev3.Detail["quadrant"] != "confirmed_anomaly" {
+	if ev3.Detail["quadrant"] != "confirmed_anomaly" {
 		t.Errorf("card3 detail wrong: %+v", ev3.Detail)
 	}
 	if ev3.Detail["composite_score"] != strconv.FormatFloat(8.7, 'f', -1, 64) {
@@ -71,10 +67,10 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	if ev1 == nil || ev1.Severity != "warning" {
 		t.Errorf("card1 should be warning: %+v", ev1)
 	}
-	// Card 7 → info (individual variance).
+	// Card 7 → warning (non-confirmed quadrant).
 	ev7 := findEmit(events, "none:7")
-	if ev7 == nil || ev7.Severity != "info" {
-		t.Errorf("card7 should be info: %+v", ev7)
+	if ev7 == nil || ev7.Severity != "warning" {
+		t.Errorf("card7 should be warning: %+v", ev7)
 	}
 }
 
