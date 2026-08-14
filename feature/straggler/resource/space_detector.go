@@ -1,7 +1,6 @@
 package resource
 
 import (
-	"math"
 	"sort"
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/clustering"
@@ -82,23 +81,6 @@ func detectSpaceAnomalies(
 					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
 				}
 
-			case MethodIQR:
-				sorted := make([]float64, len(presentVals))
-				copy(sorted, presentVals)
-				sort.Float64s(sorted)
-				q1 := Percentile(sorted, 0.25)
-				q3 := Percentile(sorted, 0.75)
-				iqr := q3 - q1
-				lower := q1 - cfg.SpaceIQRMult*iqr
-				upper := q3 + cfg.SpaceIQRMult*iqr
-				for _, cid := range nodeCardIDs {
-					z := 0.0
-					if v, ok := dict[cid]; ok && (v < lower || v > upper) {
-						z = 999
-					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
-				}
-
 			case MethodCluster:
 				// kmeans ratio detection within THIS node on the last point.
 				// Only present values > 0 participate; the ratio score =
@@ -136,14 +118,9 @@ func detectSpaceAnomalies(
 					result.Scores[cid][metric] = append(result.Scores[cid][metric], ratio)
 				}
 
-			default: // MethodZScore
-				mean, std := MeanStd(presentVals)
+			default: // unknown method → no score
 				for _, cid := range nodeCardIDs {
-					z := 0.0
-					if v, ok := dict[cid]; ok && std > 0 {
-						z = math.Abs(v-mean) / std
-					}
-					result.Scores[cid][metric] = append(result.Scores[cid][metric], z)
+					result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
 				}
 			}
 		}
@@ -223,11 +200,10 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 				continue
 			}
 
-			// For absolute methods, consider "abnormal" if any point had a
-			// sentinel value.
+			// Absolute methods flag via the 999 sentinel; cluster methods score
+			// the cluster ratio.
 			meta := MetricMetaRegistry[metric]
 			isSentinel := meta.SpaceMethod == MethodAbsolute
-			isCluster := meta.SpaceMethod == MethodCluster
 
 			var sum float64
 			abnormalCount := 0
@@ -238,31 +214,20 @@ func aggregateSpaceScores(space *SpaceDetectionResult, cardIDs []int, cfg Detect
 					}
 				} else {
 					sum += z
-					if z > cfg.SpaceZThreshold {
-						abnormalCount++
-					}
 				}
 			}
 
 			var spaceScore float64
 			var spaceAbnormal bool
-			switch {
-			case isSentinel:
-				// For absolute/direct: abnormal if >50% of points flagged.
+			if isSentinel {
+				// Absolute: abnormal if >50% of points flagged.
 				spaceScore = float64(abnormalCount) / float64(len(zscores))
 				spaceAbnormal = spaceScore > 0.5
-			case isCluster:
-				// Cluster method: space_score is the deepest-cluster ratio
-				// (cluster mean / baseline mean) on the last point. Abnormal
-				// when the ratio exceeds the ratio threshold. The kmeans
-				// algorithm has no historical baseline mean or noise scale, so
-				// SpaceRef (space_baseline_mean) and SpaceScale (space_scale)
-				// stay 0.
+			} else {
+				// Cluster: space_score is the cluster ratio on the last point;
+				// abnormal when the ratio exceeds SpaceRatioThreshold.
 				spaceScore = sum / float64(len(zscores))
 				spaceAbnormal = spaceScore > cfg.SpaceRatioThreshold
-			default:
-				spaceScore = sum / float64(len(zscores))
-				spaceAbnormal = spaceScore > cfg.SpaceZThreshold
 			}
 
 			result[cid][metric] = &MetricAnomalyDetail{

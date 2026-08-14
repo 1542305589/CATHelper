@@ -7,10 +7,6 @@
 //   fusion → root-cause bounding → JSON + text report
 package resource
 
-import (
-	"math"
-)
-
 // =============================================================================
 // Raw Data Types
 // =============================================================================
@@ -138,9 +134,6 @@ const (
 type DetectionMethod string
 
 const (
-	MethodZScore   DetectionMethod = "zscore"
-	MethodIQR      DetectionMethod = "iqr"
-	MethodDirect   DetectionMethod = "direct"   // direct comparison (no metric currently uses it)
 	MethodAbsolute DetectionMethod = "absolute" // > threshold → anomaly
 	MethodCluster  DetectionMethod = "cluster"  // majority-mode clustering
 )
@@ -220,16 +213,10 @@ type DetectionConfig struct {
 	MinSamplesForTrim    int     // minimum samples to apply trimming, default 4
 
 	// Space dimension
-	SpaceZThreshold     float64 // default 2.5
-	SpaceIQRMult        float64 // default 1.5
 	SpaceRatioThreshold float64 // kmeans cluster ratio threshold (cluster mean / baseline mean), default 2.0
 
 	// Debug
 	EnableDebug bool // --debug-output: include all cards × all metrics in the result
-
-	// Profiling integration
-	FallbackToProfiling bool
-	AlwaysRunProfiling  bool
 }
 
 // DefaultDetectionConfig returns a DetectionConfig with sensible defaults.
@@ -239,12 +226,7 @@ func DefaultDetectionConfig() DetectionConfig {
 		TrimRatio:            0.25,
 		MinSamplesForTrim:    4,
 
-		SpaceZThreshold:     2.5,
-		SpaceIQRMult:        1.5,
 		SpaceRatioThreshold: 2.0,
-
-		FallbackToProfiling: true,
-		AlwaysRunProfiling:  false,
 	}
 }
 
@@ -277,66 +259,6 @@ type SpaceDetectionResult struct {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-// MeanStd calculates the mean and standard deviation of a float64 slice.
-func MeanStd(values []float64) (mean, std float64) {
-	if len(values) == 0 {
-		return 0, 0
-	}
-	n := float64(len(values))
-	var sum float64
-	for _, v := range values {
-		sum += v
-	}
-	mean = sum / n
-	if len(values) < 2 {
-		return mean, 0
-	}
-	var sqSum float64
-	for _, v := range values {
-		d := v - mean
-		sqSum += d * d
-	}
-	std = math.Sqrt(sqSum / (n - 1))
-	return
-}
-
-// MinMax returns the min and max of a float64 slice.
-func MinMax(values []float64) (min, max float64) {
-	if len(values) == 0 {
-		return 0, 0
-	}
-	min, max = values[0], values[0]
-	for _, v := range values[1:] {
-		if v < min {
-			min = v
-		}
-		if v > max {
-			max = v
-		}
-	}
-	return
-}
-
-// Percentile calculates the p-th percentile (0..1) of sorted values.
-func Percentile(sorted []float64, p float64) float64 {
-	if len(sorted) == 0 {
-		return 0
-	}
-	if p <= 0 {
-		return sorted[0]
-	}
-	if p >= 1 {
-		return sorted[len(sorted)-1]
-	}
-	k := p * float64(len(sorted)-1)
-	f := math.Floor(k)
-	c := math.Ceil(k)
-	if f == c {
-		return sorted[int(k)]
-	}
-	return sorted[int(f)]*(c-k) + sorted[int(c)]*(k-f)
-}
 
 // HasAnomaly reports whether the result contains any anomalous card.
 func HasAnomaly(result *DetectionResult) bool {

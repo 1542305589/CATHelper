@@ -55,9 +55,6 @@ slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs 
 ### 阈值计算
 
 ```
-KPI 模式:
-  SpaceZThreshold = 1 + degradation
-
 Profiler 模式:
   CalThreshold  = 1 + degradation
   CommThreshold = 1 + degradation × 5
@@ -267,7 +264,6 @@ AggregationWindowSec: 10      // 10 秒聚合
 TrimRatio:            0.25    // 裁剪比例（每端 25%，中间 50%）
 MinSamplesForTrim:    4       // 低于此样本数降级为普通均值
 SpaceRatioThreshold:  2.0     // 空间 kmeans 簇比例阈值（独立旋钮，--space-ratio-threshold 覆盖，默认 2.0）
-SpaceZThreshold:      1 + degradation  // 空间 Z 阈值（zscore/absolute 备用）
 ```
 
 ---

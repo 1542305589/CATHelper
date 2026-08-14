@@ -204,7 +204,6 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 
 ```
 KPI 模式:
-  SpaceZThreshold     = 1 + degradation          # 空间 Z 阈值（zscore/absolute 备用）
   SpaceRatioThreshold = --space-ratio-threshold  # 空间簇比例阈值（默认 2.0，不随 degradation 变化）
 
 Profiler 模式:
@@ -220,7 +219,6 @@ Profiler 模式:
 | `TrimRatio` | 0.25 | 裁剪比例（每端 25%，中间 50%） |
 | `MinSamplesForTrim` | 4 | 桶内原始样本 < 4 时降级为普通均值 |
 | `SpaceRatioThreshold` | 2.0 | 空间 kmeans 簇比例阈值（CLI `--space-ratio-threshold` 覆盖） |
-| `SpaceZThreshold` | 2.5 | 空间 zscore/absolute 方法的 Z 阈值 |
 
 ---
 

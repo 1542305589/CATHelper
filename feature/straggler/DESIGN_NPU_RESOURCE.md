@@ -389,7 +389,7 @@ func main() {
     if kpiResult != nil && kpiResult.HasAnomaly() {
         nupresource.WriteResourceReport(kpiResult, inputPath)
         nupresource.ExportResourceJSON(kpiResult, inputPath)
-        if !config.AlwaysRunProfiling {
+        if inputPath == "" {
             os.Exit(0)
         }
     }
@@ -497,7 +497,7 @@ const ( DirHigh AnomalyDirection = iota; DirLow )
 
 // DetectionMethod 检测方法。
 type DetectionMethod string
-const ( MethodZScore DetectionMethod = "zscore"; MethodIQR = "iqr"; MethodDirect = "direct"; MethodAbsolute = "absolute"; MethodCluster = "cluster" )
+const ( MethodAbsolute DetectionMethod = "absolute"; MethodCluster = "cluster" )
 
 // ==================== 检测结果 ====================
 
@@ -545,16 +545,10 @@ type DetectionConfig struct {
     MinSamplesForTrim    int     // 截尾最少样本数，默认 4
 
     // 空间维度
-    SpaceZThreshold     float64 // 默认 2.5
-    SpaceIQRMult        float64 // 默认 1.5
     SpaceRatioThreshold float64 // kmeans 簇比例阈值，默认 2.0
 
     // 调试
     EnableDebug bool // --debug-output：全量输出（含正常卡/正常指标）
-
-    // 与 Profiling 联动
-    FallbackToProfiling bool // KPI 未发现异常时是否自动跑 Profiling，默认 true
-    AlwaysRunProfiling  bool // 是否始终跑 Profiling（交叉验证），默认 false
 }
 ```
 

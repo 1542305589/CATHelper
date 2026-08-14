@@ -127,7 +127,6 @@ func main() {
 
 	if kpiInput != "" {
 		kpiCfg := resource.DefaultDetectionConfig()
-		kpiCfg.SpaceZThreshold = 1 + degradation  // tie to degradation param
 		kpiCfg.EnableDebug = debugOutput // --debug-output: kpi result includes all cards × metrics
 		if spaceRatioThreshold > 0 {
 			// Space ratio threshold is an independent knob; only override
