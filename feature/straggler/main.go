@@ -154,17 +154,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Falling through to Profiler detection...\n")
 			}
 		} else {
-			// Text report (KPI output dir: inputPath when profiling too, else cwd).
-			kpiOutputDir := "."
-			if inputPath != "" {
-				kpiOutputDir = inputPath
-			}
-			reportDir := kpiOutputDir + "/analysis_result"
-			reportContent, err := resource.WriteReport(kpiResult, reportDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write KPI report: %v\n", err)
-			}
-			fmt.Print(reportContent)
+			// KPI text report (stdout only; no file is written).
+			fmt.Print(resource.WriteReport(kpiResult))
 
 			// Emit anomalous cards back to CATMonitor faultsub (closed loop).
 			if faultsubURL != "" {

@@ -95,8 +95,8 @@ buildAnomalyMetrics
     ┌──────────────┼──────────────┐
     ▼              ▼              ▼
 合并输出JSON   WriteReport    EmitToFaultSub
- (straggler_    (text report)   (callback)
-  output.json)
+ (straggler_    (stdout text   (callback)
+  output.json)   report)
 ```
 
 ### 1.2 输入格式
@@ -206,9 +206,8 @@ CPU 取桶内最后一个值。
 | 文件 | 位置 | 内容 |
 |------|------|------|
 | `straggler_output.json` | 运行目录（当前目录） | **合并输出**：`{"kpi": <KPI 结果>, "profiler": <Profiler 结果>}`；只跑了哪个维度就只含哪个键 |
-| `npu_resource_detection_report.log` | `path/analysis_result/`（仅 KPI 时 `./analysis_result/`） | KPI 文本报告 |
 | `detection_report.log` | `path/analysis_result/` | Profiler 文本报告 |
-| stdout | — | KPI 文本报告内容 + Profiler 逐类摘要 |
+| stdout | — | KPI 文本报告（不落盘）+ Profiler 逐类摘要 |
 | FaultSub | `--faultsub-url` | 异常卡事件回传 |
 
 **JSON 输出结构**（`straggler_output.json` 的 `kpi` 段，即 `{"kpi": {...}}`）：

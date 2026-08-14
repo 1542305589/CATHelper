@@ -439,7 +439,7 @@ features/straggler/
   │   ├── parser.go              # CSV 解析 → 原始行
   │   ├── aggregator.go          # 10秒截尾均值聚合（AggregationWindowSec，排序→截尾→均值）
   │   ├── space_detector.go      # 空间维度检测（peer 对比，最后一点；kmeans 比例 / 绝对阈值）
-  │   └── report.go              # 结果输出（JSON + 文本报告）
+  │   └── report.go              # 结果输出（JSON + stdout 文本报告）
   └── config/
       └── config.go              # 扩展：KPI 检测配置项
 ```
@@ -589,8 +589,8 @@ type DetectionResult struct {
     Metrics []MetricAnomaly
 }
 
-// WriteResourceReport 生成文本报告。
-func WriteResourceReport(result *DetectionResult, outputDir string) string
+// WriteReport 生成 KPI 文本报告（仅 stdout，不落盘）。
+func WriteReport(result *DetectionResult) string
 
 // ExportResourceJSON 导出 JSON。
 func ExportResourceJSON(result *DetectionResult, outputPath string) error
@@ -649,9 +649,9 @@ KPI 检测专用选项:
 ```
 （输出为指标优先：`anomaly_metrics[].cards[]` 列出该指标异常的卡及其空间 score（劣化程度）。）
 
-### 10.2 文本报告
+### 10.2 stdout 文本报告
 
-类似现有 `detection_report.log` 风格，包含：
+KPI 文本报告**只打印到 stdout，不再写入文件**（原 `npu_resource_detection_report.log` 已移除）。包含：
 - 检测摘要（正常 / 异常卡数统计）
 - 异常指标详情（指标在前，其后为异常卡及空间 score，如 `aicore_freq  node86:card1(2.25)`）
 

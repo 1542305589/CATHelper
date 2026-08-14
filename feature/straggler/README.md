@@ -307,12 +307,13 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 | 报告 | 路径 | 内容 |
 |------|------|------|
-| KPI 报告 | `path/analysis_result/npu_resource_detection_report.log`（仅 KPI 时 `./analysis_result/`） | 汇总、异常卡详情（异常指标 + 空间 score） |
 | Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel/ZP_Host 排序柱状图、通信域分组对比 |
+
+> KPI 已无文本报告文件（`npu_resource_detection_report.log` 已移除），文本仅打印到 stdout。
 
 ### 6.3 stdout
 
-- KPI 文本报告内容
+- KPI 文本报告（仅 stdout，不落盘）
 - Profiler 逐类摘要（有异常才列出详情）：
   ```
   慢计算 (cal): 无异常 / 异常 (2) 0: 1.50x; 3: 1.60x

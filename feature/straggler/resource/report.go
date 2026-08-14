@@ -3,7 +3,6 @@ package resource
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -164,10 +163,11 @@ func buildAnomalyMetrics(
 // Text Report
 // =============================================================================
 
-// WriteReport generates a human-readable text report. The anomaly list is
-// metric-first: each metric is followed by the cards anomalous for it with the
-// space degradation degree in parentheses.
-func WriteReport(result *DetectionResult, outputDir string) (string, error) {
+// WriteReport renders the human-readable KPI text report (stdout only — no
+// file is written). The anomaly list is metric-first: each metric is followed
+// by the cards anomalous for it with the space degradation degree in
+// parentheses.
+func WriteReport(result *DetectionResult) string {
 	var b strings.Builder
 
 	b.WriteString("================================================================================\n")
@@ -211,19 +211,7 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 	b.WriteString("  报告结束\n")
 	b.WriteString("================================================================================\n")
 
-	reportContent := b.String()
-
-	// Write to file.
-	outPath := filepath.Join(outputDir, "npu_resource_detection_report.log")
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return reportContent, fmt.Errorf("create output dir: %w", err)
-	}
-	if err := os.WriteFile(outPath, []byte(reportContent), 0644); err != nil {
-		return reportContent, fmt.Errorf("write report: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI report written to %s\n", outPath)
-
-	return reportContent, nil
+	return b.String()
 }
 
 // =============================================================================
