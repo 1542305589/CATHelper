@@ -31,7 +31,7 @@
 - **KPI 模式**：基于 11 个 NPU 资源指标，空间维度 peer 对比（最后一个聚合点），轻量快速，适合常态化初筛。有异常时可选触发 Profiler 模式做交叉验证。
 - **Profiler 模式**：基于 Ascend PyTorch Profiler Level0 SQLite 数据，从计算/通信/CPU/Bubble 四个维度深入分析单步性能。
 
-**运行策略**：KPI 检测始终优先执行。若 KPI 发现确认异常且有 `path`（Profiler 数据），则继续运行 Profiler 做交叉验证；若 KPI 无异常，降级到 Profiler；若仅 KPI 无 Profiler，KPI 结果即为最终输出。
+**运行策略**：KPI 检测始终优先执行。若 KPI 发现异常且有 `path`（Profiler 数据），则继续运行 Profiler 做交叉验证；若 KPI 无异常，降级到 Profiler；若仅 KPI 无 Profiler，KPI 结果即为最终输出。
 
 ---
 
@@ -90,9 +90,9 @@ detectSpaceAnomalies
   aggregated point)
      │
      ▼
-FuseAndSummarize
-        (space-only,
-         compute-first ordering)
+buildAnomalyMetrics
+        (metric-first grouping:
+         metric → anomalous cards + space score)
                    │
                    ▼
     ┌──────────────┼──────────────┐
@@ -154,7 +154,7 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 
 `ReadKPIFiles()` 读取目录内全部 `straggler_kpi_{date}.jsonl` 文件并重建 `TimeSeriesData`，与 CSV 路径共享后续全部检测管线。
 
-### 1.3 检测管线（6 步）
+### 1.3 检测管线（4 步）
 
 #### Step 1: CSV 解析 → `TimeSeriesData`
 
@@ -196,23 +196,13 @@ CPU 取桶内最后一个值。
 
 `aggregateSpaceScores()` 汇总：cluster 方法 `space_score = 簇比例`，`> SpaceRatioThreshold` 判空间异常；absolute 方法取异常占比。
 
-#### Step 4: 融合与排序
+#### Step 4: 按指标分组输出
 
-`FuseAndSummarize()` 以**纯空间结果**判定，**每指标独立判定象限**：
+`buildAnomalyMetrics()` 以**纯空间结果**判定：某指标某卡 `space_abnormal` → 该卡异常。输出为**指标优先**——每个异常指标下列出异常的卡及其 `space_score`（劣化程度）。卡级不再有 quadrant / 复合评分 / category；根因定界与跨卡关联也已移除。
 
 ```
-Space正常 → normal
-Space异常 → confirmed_anomaly
+某指标异常 → 该指标下所有空间异常的卡及其 space_score
 ```
-
-**Compute-First 排序**：
-1. 先查计算类指标（temp/power/freq/util/hbm_bandwidth_util/hbm_util）
-2. 若计算异常 → category=compute，通信异常标记为 secondary（可能由计算慢导致）
-3. 若计算干净 → 查通信类指标 → category=communication
-4. 整体象限取所有异常指标中最严重的
-5. 复合评分 = 异常指标 `space_score` 的均值
-
-（根因定界与跨卡关联已移除：输出只保留异常指标及其空间 score。）
 
 ### 1.4 输出
 
@@ -228,28 +218,19 @@ Space异常 → confirmed_anomaly
 
 ```json
 {
-  "summary": { "total_cards": 16, "total_nodes": 2, "...": "不变" },  // total_nodes 新增
-  "results": [
+  "summary": { "total_cards": 16, "total_nodes": 2, "anomalies": 1, "normal": 15 },
+  "anomaly_metrics": [
     {
-      "node": "node-ip-1",              // 新增：节点名，平铺输入为 "none"
-      "card_id": 0,                     // 节点内卡 ID（每节点从 0 起）
-      "quadrant": 3,
-      "anomaly_details": [
-        {
-          "metric": "temp",
-          "space_score": 2.5,
-          "space_abnormal": true,
-          "quadrant": 3,
-          "space_method": "cluster"
-        }
-      ],
-      "composite_score": 2.5,
-      "severity": "warning"
+      "metric": "temp",
+      "space_method": "cluster",
+      "cards": [
+        { "node": "node-ip-1", "card_id": 0, "space_score": 2.5, "space_abnormal": true }
+      ]
     }
   ]
 }
 ```
-（`anomaly_details` 仅含空间字段：`metric` / `space_score` / `space_abnormal` / `quadrant` / `space_method`；无 `root_causes` / `correlations`。）
+（输出为指标优先：`anomaly_metrics[].cards[]` 列出该指标异常的卡及其空间 score；无 quadrant / composite_score / root_causes / correlations。）
 
 ### 1.5 NPU 资源指标
 

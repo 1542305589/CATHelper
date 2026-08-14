@@ -182,70 +182,31 @@ const (
 	CatCommunication AnomalyCategory = "communication"
 )
 
-// Quadrant is the card-level anomaly state. With the time dimension removed it
-// is decided purely by the space dimension: space-abnormal → confirmed_anomaly,
-// else normal. QuadEarlyDegradation / QuadIndividualVariance are retained for
-// output compatibility but never produced.
-type Quadrant int
-
-const (
-	QuadNormal            Quadrant = iota // no space anomaly
-	QuadEarlyDegradation                 // retained (not produced)
-	QuadIndividualVariance               // retained (not produced)
-	QuadConfirmedAnomaly                 // space-abnormal
-)
-
-func (q Quadrant) String() string {
-	switch q {
-	case QuadNormal:
-		return "normal"
-	case QuadEarlyDegradation:
-		return "early_degradation"
-	case QuadIndividualVariance:
-		return "individual_variance"
-	case QuadConfirmedAnomaly:
-		return "confirmed_anomaly"
-	default:
-		return "unknown"
-	}
-}
-
 // MetricAnomalyDetail records the space-dimension anomaly score for one metric
-// on one card.
+// on one card (internal detection detail; the output groups anomalies by
+// metric, see MetricAnomaly).
 type MetricAnomalyDetail struct {
 	Metric        MetricName      `json:"metric"`
 	SpaceScore    float64         `json:"space_score"`
 	SpaceAbnormal bool            `json:"space_abnormal"`
-	Quadrant      Quadrant        `json:"quadrant"`
 	SpaceMethod   DetectionMethod `json:"space_method"`
 }
 
-// CardDetectionSummary is the per-card detection result.
-// CardID is the per-node card ID (0-based within the node) at output time;
-// Node disambiguates cards across nodes. Set in applyNodeIdentity (report.go).
-type CardDetectionSummary struct {
-	CardID                 int                   `json:"card_id"`
-	Node                   string                `json:"node"`
-	AnomalyCategory        AnomalyCategory       `json:"anomaly_category"`
-	Quadrant               Quadrant              `json:"quadrant"`
-	AnomalyDetails         []MetricAnomalyDetail `json:"anomaly_details,omitempty"`
-	SecondaryCommAnomalies []MetricAnomalyDetail `json:"secondary_comm_anomalies,omitempty"`
-	CompositeScore         float64               `json:"composite_score"`
-	Severity               Severity              `json:"severity"`
+// AnomalousCard is one card anomalous for a metric, with its space degradation
+// degree (space_score).
+type AnomalousCard struct {
+	Node          string  `json:"node"`
+	CardID        int     `json:"card_id"` // node-local card ID (0-based)
+	SpaceScore    float64 `json:"space_score"`
+	SpaceAbnormal bool    `json:"space_abnormal,omitempty"`
 }
 
-// =============================================================================
-// Severity Enums
-// =============================================================================
-
-// Severity indicates how urgent the finding is.
-type Severity string
-
-const (
-	SevCritical Severity = "critical"
-	SevWarning  Severity = "warning"
-	SevInfo     Severity = "info"
-)
+// MetricAnomaly groups the anomalous cards of one metric.
+type MetricAnomaly struct {
+	Metric      MetricName      `json:"metric"`
+	SpaceMethod DetectionMethod `json:"space_method"`
+	Cards       []AnomalousCard `json:"cards"`
+}
 
 // =============================================================================
 // Detection Config
@@ -291,22 +252,21 @@ func DefaultDetectionConfig() DetectionConfig {
 // Detection Result (top-level)
 // =============================================================================
 
-// DetectionResult is the complete KPI detection output.
+// DetectionResult is the complete KPI detection output. Anomalies are grouped
+// by metric (metric-first), not by card.
 type DetectionResult struct {
-	Summary DetectionSummary       `json:"summary"`
-	Results []CardDetectionSummary `json:"results"`
+	Summary DetectionSummary `json:"summary"`
+	Metrics []MetricAnomaly  `json:"anomaly_metrics,omitempty"`
 }
 
 // DetectionSummary is the overview section of the output.
 type DetectionSummary struct {
-	TotalCards         int    `json:"total_cards"`
-	TotalNodes         int    `json:"total_nodes"`
-	ConfirmedAnomalies int    `json:"confirmed_anomalies"`
-	EarlyDegradation   int    `json:"early_degradation"`
-	IndividualVariance int    `json:"individual_variance"`
-	Normal             int    `json:"normal"`
-	KPICSV             string `json:"kpi_csv"`
-	TotalTimePoints    int    `json:"total_time_points"`
+	TotalCards      int    `json:"total_cards"`
+	TotalNodes      int    `json:"total_nodes"`
+	Anomalies       int    `json:"anomalies"`
+	Normal          int    `json:"normal"`
+	KPICSV          string `json:"kpi_csv"`
+	TotalTimePoints int    `json:"total_time_points"`
 }
 
 // SpaceDetectionResult holds per-time-point space anomaly scores.
@@ -378,12 +338,7 @@ func Percentile(sorted []float64, p float64) float64 {
 	return sorted[int(f)]*(c-k) + sorted[int(c)]*(k-f)
 }
 
-// HasConfirmedAnomaly reports whether any card has a confirmed anomaly.
-func HasConfirmedAnomaly(summaries []CardDetectionSummary) bool {
-	for _, s := range summaries {
-		if s.Quadrant == QuadConfirmedAnomaly {
-			return true
-		}
-	}
-	return false
+// HasAnomaly reports whether the result contains any anomalous card.
+func HasAnomaly(result *DetectionResult) bool {
+	return result != nil && result.Summary.Anomalies > 0
 }

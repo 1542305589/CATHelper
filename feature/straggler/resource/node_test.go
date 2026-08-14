@@ -134,12 +134,11 @@ func TestSpaceClusterPerNode(t *testing.T) {
 // =============================================================================
 
 func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
-	// Space-only detail → metric/space_score/space_abnormal/quadrant/space_method.
+	// Space-only detail → metric/space_score/space_abnormal/space_method.
 	d := MetricAnomalyDetail{
 		Metric:        MetricTemp,
-		SpaceScore:    16.9,
+		SpaceScore:    2.25,
 		SpaceAbnormal: true,
-		Quadrant:      QuadConfirmedAnomaly,
 		SpaceMethod:   MethodCluster,
 	}
 	b, err := json.Marshal(d)
@@ -148,14 +147,14 @@ func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
 	}
 	var m map[string]interface{}
 	json.Unmarshal(b, &m)
-	for _, k := range []string{"metric", "space_score", "space_abnormal", "quadrant", "space_method"} {
+	for _, k := range []string{"metric", "space_score", "space_abnormal", "space_method"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("detail missing key %q in %s", k, b)
 		}
 	}
-	// Time-dimension and fusion fields must not appear anymore.
+	// Quadrant / time / fusion fields must not appear anymore.
 	for _, k := range []string{
-		"time_score", "time_abnormal", "time_method", "fusion_score",
+		"quadrant", "time_score", "time_abnormal", "time_method", "fusion_score",
 		"current_median", "current_mean", "time_baseline_median", "time_baseline_mean",
 		"time_baseline_mad", "time_baseline_std", "peer_mean",
 		"space_baseline_mean", "space_scale",
@@ -174,38 +173,28 @@ func TestMetricAnomalyDetailMarshalJSON(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// applyNodeIdentity
-// =============================================================================
-
-func TestApplyNodeIdentity(t *testing.T) {
-	nodeOf := map[int]string{5: "node-a", 6: "node-b"}
-	localID := map[int]int{5: 1, 6: 0}
-
-	summaries := []CardDetectionSummary{
-		{CardID: 5, Quadrant: QuadConfirmedAnomaly},
-		{CardID: 6, Quadrant: QuadNormal},
+// TestMetricAnomalyJSON verifies the metric-first output JSON shape.
+func TestMetricAnomalyJSON(t *testing.T) {
+	ma := MetricAnomaly{
+		Metric:      MetricAICoreFreq,
+		SpaceMethod: MethodCluster,
+		Cards: []AnomalousCard{
+			{Node: "86", CardID: 1, SpaceScore: 2.25, SpaceAbnormal: true},
+		},
 	}
-	s := applyNodeIdentity(summaries, nodeOf, localID)
-
-	if s[0].Node != "node-a" || s[0].CardID != 1 {
-		t.Errorf("summary[0] → node=%s card=%d, want node-a/1", s[0].Node, s[0].CardID)
+	b, err := json.Marshal(ma)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s[1].Node != "node-b" || s[1].CardID != 0 {
-		t.Errorf("summary[1] → node=%s card=%d, want node-b/0", s[1].Node, s[1].CardID)
+	var m map[string]interface{}
+	json.Unmarshal(b, &m)
+	for _, k := range []string{"metric", "space_method", "cards"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("MetricAnomaly missing key %q in %s", k, b)
+		}
 	}
-	if s[0].Quadrant != QuadConfirmedAnomaly {
-		t.Errorf("quadrant must be preserved through conversion, got %v", s[0].Quadrant)
-	}
-}
-
-func TestApplyNodeIdentityMissingDefaultsToNone(t *testing.T) {
-	s := applyNodeIdentity(
-		[]CardDetectionSummary{{CardID: 9}},
-		map[int]string{}, map[int]int{},
-	)
-	if s[0].Node != noneNode {
-		t.Errorf("missing node map → node %q, want %q", s[0].Node, noneNode)
+	if _, ok := m["composite_score"]; ok {
+		t.Errorf("MetricAnomaly should NOT have composite_score in %s", b)
 	}
 }
 

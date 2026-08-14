@@ -11,7 +11,7 @@
 本方案基于 `kpi_collect.sh` 采集的**NPU 资源 KPI CSV**（保留 **15 天**，聚合窗口 10 秒），以**无侵入、常态化**方式实现：
 
 - **纯空间 peer 对比**：异常完全由最后一个聚合点的空间维度判定（时间维度与基线/检测窗口已移除）
-- **先计算后通信的因果检测顺序**：计算慢会导致通信慢，先检计算可避免误判
+- **纯空间 peer 对比**：异常完全由最后一个聚合点的空间维度判定（时间维度、基线/检测窗口、根因定界、四象限均已移除）
 - **10秒截尾均值抗噪**：排序→去两端 25%→中间 50% 均值，单采样点噪声不污染检测结果
 
 ### 1.2 与 Profiler 检测的定位
@@ -192,16 +192,16 @@ if 增量 > 0: 聚合值 = 增量
 
 ```
 空间维度
-  正常 → ✓ 正常
-  异常 → ✗ confirmed_anomaly（空间判定）
+  某指标某卡正常 → 正常
+  某指标某卡异常 → 该卡异常（输出按指标分组：异常指标 → 卡 + space_score）
 ```
 
 | 状态 | 空间 | 判定 | 含义 |
 |------|------|------|------|
 | 正常 | 正常 | ✓ 正常 | 该卡一切正常 |
-| 确认异常 | 异常 | ✗ 告警 | 最后一个聚合点上该卡偏离同伴群体，直接定界 |
+| 异常 | 异常 | ✗ 告警 | 最后一个聚合点上该卡偏离同伴群体 |
 
-（`early_degradation` / `individual_variance` 象限为历史遗留枚举，纯空间判定下不再产生。）
+（quadrant / composite_score / severity 已移除；输出只保留异常指标及其空间 score。）
 
 ### 4.3 空间评分
 
@@ -291,44 +291,9 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 | | `ROCE_OUT_OF_ORDER` | 乱序包 | ↑ 网络质量问题 |
 | | `ROCE_NEW_PKT_RTY` | 重传包 | ↑ 网络丢包 |
 
-### 5.4 检测顺序：先计算后通信
+### 5.4 检测顺序（已简化）
 
-**因果逻辑**：计算异常 → 卡无法按时完成计算 → 在集合通信中迟到 → 通信指标也表现为异常。如果先检测通信，会把计算慢导致的通信异常误判为网络问题。
-
-```
-对每张卡：
-  ┌─────────────┐
-  │ 1. 检测计算  │  ← FREQ, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TEMP, POWER
-  └──────┬──────┘
-         │
-    ┌────┴────┐
-    │ 计算异常? │
-    └────┬────┘
-         │
-   ┌─────┴─────┐
-   │ 是         │ 否
-   ▼            ▼
-┌──────────┐  ┌─────────────┐
-│ 输出:     │  │ 2. 检测通信  │  ← TX_BANDWIDTH, ERR_PKT, PFC_PKT, RETRY, OUT_OF_ORDER
-│ 计算类异常 │  └──────┬──────┘
-│ 通信指标   │         │
-│ 标记为     │    ┌────┴────┐
-│ "可能继发" │    │ 通信异常? │
-└──────────┘    └────┬────┘
-                     │
-               ┌─────┴─────┐
-               │ 是         │ 否
-               ▼            ▼
-          ┌──────────┐  ┌──────┐
-          │ 输出:     │  │ 正常  │
-          │ 通信类异常 │  └──────┘
-          │ (独立)    │
-          └──────────┘
-```
-
-**关键规则**：
-- 计算类任一指标异常 → 该卡归类为"计算异常"，通信指标**不独立检测**（标记为"可能继发于计算异常"）
-- 计算类全部正常 → 才检测通信指标 → 通信异常可确认为**独立网络问题**
+先计算后通信的排序与"可能继发"标记已移除：每个指标独立做空间检测，输出按指标分组——某指标异常即列出该指标下异常的卡及空间 score，不做计算/通信的卡级归类。
 
 这个顺序也决定了定界规则的优先级：计算类规则优先匹配，通信类规则仅在计算正常时生效。
 
@@ -338,7 +303,7 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 
 ## 6. 输出（根因定界与跨卡关联已移除）
 
-根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。`root_causes` / `correlations` 不再生成；faultsub 事件 detail 只含 `quadrant` / `anomaly_category` / `composite_score`。
+根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。faultsub 事件 detail 为 `{指标: space_score}`。
 
 ---
 
@@ -384,7 +349,7 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
                │
                ▼
     ┌─────────────────────┐
-    │ 发现确认异常?         │
+    │ 发现异常?           │
     └──────────┬──────────┘
                │
      ┌─────────┴─────────┐
@@ -421,7 +386,7 @@ func main() {
         //   6. 融合（compute-first）→ 7. 输出（异常指标 + 空间 score）
     }
 
-    if kpiResult != nil && kpiResult.HasConfirmedAnomaly() {
+    if kpiResult != nil && kpiResult.HasAnomaly() {
         nupresource.WriteResourceReport(kpiResult, inputPath)
         nupresource.ExportResourceJSON(kpiResult, inputPath)
         if !config.AlwaysRunProfiling {
@@ -473,7 +438,6 @@ features/straggler/
   │   ├── parser.go              # CSV 解析 → 原始行
   │   ├── aggregator.go          # 10秒截尾均值聚合（AggregationWindowSec，排序→截尾→均值）
   │   ├── space_detector.go      # 空间维度检测（peer 对比，最后一点；kmeans 比例 / 绝对阈值）
-  │   ├── fusion.go              # 纯空间融合 + 先计算后通信排序
   │   └── report.go              # 结果输出（JSON + 文本报告）
   └── config/
       └── config.go              # 扩展：KPI 检测配置项
@@ -542,27 +506,22 @@ type MetricAnomalyDetail struct {
     Metric        MetricName
     SpaceScore    float64 // 空间簇比例
     SpaceAbnormal bool    // 空间维是否异常
-    Quadrant      Quadrant
     SpaceMethod   DetectionMethod
 }
 
-// Quadrant 异常状态。
-type Quadrant int
-const (
-    QuadNormal          Quadrant = iota // 正常
-    QuadEarlyDegradation                // 保留（不再产生）
-    QuadIndividualVariance              // 保留（不再产生）
-    QuadConfirmedAnomaly                // 空间异常
-)
+// AnomalousCard 某指标下异常的卡。
+type AnomalousCard struct {
+    Node          string
+    CardID        int
+    SpaceScore    float64
+    SpaceAbnormal bool
+}
 
-// CardDetectionSummary 单卡检测汇总。
-type CardDetectionSummary struct {
-    CardID          int
-    AnomalyCategory AnomalyCategory // "compute" | "communication" | "none"
-    Quadrant        Quadrant
-    AnomalyDetails  []MetricAnomalyDetail
-    CompositeScore  float64
-    Severity        Severity
+// MetricAnomaly 指标优先的异常分组。
+type MetricAnomaly struct {
+    Metric      MetricName
+    SpaceMethod DetectionMethod
+    Cards       []AnomalousCard
 }
 
 // AnomalyCategory 异常大类。
@@ -626,19 +585,17 @@ func Midmean(values []float64) float64
 func detectSpaceAnomalies(detectionRows []CSVRow, cardIDs []int, cfg DetectionConfig, nodeOf ...map[int]string) *SpaceDetectionResult
 
 
-// ==================== fusion.go ====================
-// FuseAndSummarize 以纯空间结果融合（compute-first），返回每张卡的象限归属。
-func FuseAndSummarize(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, cfg DetectionConfig) []CardDetectionSummary
-
-// HasConfirmedAnomaly 是否有确认异常的卡。
-func HasConfirmedAnomaly(summaries []CardDetectionSummary) bool
-
-
 // ==================== report.go ====================
-// DetectionResult 是 KPI 检测的完整结果。
+// buildAnomalyMetrics 以纯空间结果按指标分组异常卡（指标优先输出）。
+func buildAnomalyMetrics(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, nodeOf map[int]string, localID map[int]int, cfg DetectionConfig) ([]MetricAnomaly, int)
+
+// HasAnomaly 结果中是否有异常卡。
+func HasAnomaly(result *DetectionResult) bool
+
+// DetectionResult 是 KPI 检测的完整结果（指标优先）。
 type DetectionResult struct {
     Summary DetectionSummary
-    Results []CardDetectionSummary
+    Metrics []MetricAnomaly
 }
 
 // WriteResourceReport 生成文本报告。
@@ -667,7 +624,7 @@ KPI 检测专用选项:
   --kpi-jsonl-dir=<dir>           KPI 模式：CATMonitor straggler_kpi_{date}.jsonl 目录（优先于 --kpi-path）
   --faultsub-url=<url>            FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环）
   --space-ratio-threshold=<float> 空间簇比例阈值，默认 2.0（未传时联动 degradation 取 1+degradation）
-  --debug-output                 同时输出所有正常+异常数据（KPI anomaly_details 全指标；Profiler 全节点/全通信组）
+  --debug-output                 同时输出所有正常+异常数据（KPI anomaly_metrics 全部指标含正常卡；Profiler 全节点/全通信组）
 ```
 
 > 注：`--baseline-hours` / `--detection-hours` / `--space-method` / `--space-z-threshold` / `--time-z-threshold` / `--time-weight` / `--no-trend` / `--no-fallback` / `--always-profiling` 等旧 flag 已移除（时间维度与基线/检测窗口已删除，KPI 异常完全由空间维度判定）。
@@ -680,60 +637,32 @@ KPI 检测专用选项:
 
 ```json
 {
-  "summary": {
-    "total_cards": 8,
-    "confirmed_anomalies": 1,
-    "early_degradation": 0,
-    "individual_variance": 0,
-    "normal": 7,
-    "kpi_csv": "/data/kpi_csv_dir",
-    "time_range": {"start": 1784547926, "end": 1785847926, "total_points": 129600},
-    "baseline_window": "360h",
-    "detection_window": "1h"
-  },
-  "results": [
+  "summary": { "total_cards": 8, "total_nodes": 1, "anomalies": 1, "normal": 7, "kpi_csv": "/data/kpi_csv_dir" },
+  "anomaly_metrics": [
     {
-      "card_id": 3,
-      "anomaly_category": "compute",
-      "quadrant": "confirmed_anomaly",
-      "composite_score": 0.85,
-      "severity": "warning",
-      "communication_anomalies_secondary": true,
-      "metric_details": {
-        "temp": {
-          "quadrant": "confirmed_anomaly",
-          "space_zscore": 3.2,
-          "time_zscore": 4.1,
-          "baseline_mean": 46.2,
-          "baseline_std": 2.1,
-          "current_mean": 57.3,
-          "peer_mean": 47.0
-        },
-        "aicore_freq": {
-          "quadrant": "confirmed_anomaly",
-          "space_zscore": 5.0,
-          "time_zscore": 6.0,
-          "baseline_mean": 800.0,
-          "baseline_std": 0.0,
-          "current_mean": 400.0,
-          "peer_mean": 800.0
-        }
-      },
-      "trend_findings": [
-        {"metric": "temp", "slope": 0.002, "r_squared": 0.78, "desc": "温度持续上升趋势: +0.002℃/分钟 ≈ +2.9℃/天"}
+      "metric": "temp",
+      "space_method": "cluster",
+      "cards": [
+        { "node": "86", "card_id": 3, "space_score": 3.2, "space_abnormal": true }
+      ]
+    },
+    {
+      "metric": "aicore_freq",
+      "space_method": "cluster",
+      "cards": [
+        { "node": "86", "card_id": 3, "space_score": 5.0, "space_abnormal": true }
       ]
     }
-  ],
-  "correlations": []
+  ]
 }
 ```
+（输出为指标优先：`anomaly_metrics[].cards[]` 列出该指标异常的卡及其空间 score（劣化程度）。）
 
 ### 10.2 文本报告
 
 类似现有 `detection_report.log` 风格，包含：
-- 检测摘要（正常 / 确认异常卡数统计）
-- 异常卡详情（异常指标 + 空间 score）
-- 各指标的 `space_score` / 象限
+- 检测摘要（正常 / 异常卡数统计）
+- 异常指标详情（指标在前，其后为异常卡及空间 score，如 `aicore_freq  卡1(2.25)`）
 
 ---
 
@@ -742,15 +671,15 @@ KPI 检测专用选项:
 | # | 决策 | 理由 |
 |---|------|------|
 | 1 | **10秒截尾均值预处理** | 单采样点噪声大。窗口内排序→去前后各25%→中间50%取均值，比全量均值稳健（抗尖峰），比中位数有代表性（保留分布信息） |
-| 2 | **先计算后通信的检测顺序** | 计算慢必然导致通信慢（无法按时参与集合通信），反之不成立。先检计算可避免将继发性通信异常误判为网络问题。通信类定界规则仅在计算正常时生效 |
+| 2 | **指标优先输出** | 输出按指标分组（异常指标 → 异常卡 + space_score），卡级不再有象限/复合评分/计算通信归类 |
 | 3 | **纯空间 peer 对比** | 已移除时间维度与基线/检测窗口。异常完全由最后一个聚合点的空间对比判定（kmeans 簇比例 / 错误计数绝对阈值），简单且无需历史基线 |
 | 4 | **KPI 优先 + Profiling 降级** | KPI 无侵入开销、覆盖硬件层异常，适合常态化；Profiling 开销大、覆盖软件层异常，按需触发 |
 | 5 | **空间 kmeans 簇比例为主** | 只取最后一个聚合点（每节点少量卡），kmeans O(n·k·iter) 开销可忽略；方向极值簇作基线 + 比例阈值判异常，免调参 |
-| 6 | **复合评分 = 异常指标 space_score 均值** | 纯空间判定，无权重参数 |
+| 6 | **space_score 即劣化程度** | 每个异常指标的卡直接带其 space_score，无需卡级复合评分 |
 | 7 | **网络错误用绝对阈值** | ERR_PKT/RETRY 正常值为 0，统计方法失效。>0 即异常 |
 | 8 | **计数型指标累加而非截尾** | ERR_PKT/RETRY/PFC_PKT 是累积计数器，应取增量总和。截尾会抹掉真正的错误尖峰 |
 | 9 | **10 秒聚合窗口** | 每个窗口内裁剪均值 / 计数器增量，单采样点噪声不污染检测结果 |
-| 10 | **象限分类（正常 / 确认异常）** | 空间异常 → `confirmed_anomaly`；`early_degradation` / `individual_variance` 为历史遗留，不再产生 |
+| 10 | **正常 / 异常二元判定** | 某指标某卡空间异常 → 该卡异常；不再有四象限概念 |
 
 ---
 

@@ -49,7 +49,7 @@ go run . path=/data/profiler_output degradation=0.3
 go run . path=/data/profiler_output --kpi-path=/data/kpi_csv_dir degradation=0.3
 ```
 
-**检测顺序**：先跑 KPI（轻量、无侵入）→ 若 KPI 发现确认异常则输出定界结果 → 若 KPI 无确认异常则 fallback 到 Profiler 精查。两道结果都会合并进 `straggler_output.json`。
+**检测顺序**：先跑 KPI（轻量、无侵入）→ 若 KPI 发现异常则输出结果 → 若 KPI 无异常则 fallback 到 Profiler 精查。两道结果都会合并进 `straggler_output.json`。
 
 ---
 
@@ -68,7 +68,6 @@ straggler/
 │   ├── json_reader.go      #   CATMonitor straggler_kpi JSONL 读取（含多节点子目录布局）
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
-│   ├── fusion.go           #   空间融合 + 先计算后通信
 │   ├── report.go           #   管线编排 + 文本报告
 │   └── emit.go             #   faultsub 闭环回传
 ├── profiling/              # 第二道防线：Profiling 检测
@@ -197,7 +196,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
 | `--faultsub-url` | string | 否 | — | FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮，不随 degradation 变化） |
-| `--debug-output` | bool | 否 | 假 | 输出全量数据排查未检出（仍在 `straggler_output.json`，不额外生成文件、不加额外键）：KPI 每卡 `anomaly_details` 列出全部指标（含正常 score/quadrant）；Profiler `node_result` 包含所有节点（含正常节点及其诊断 score） |
+| `--debug-output` | bool | 否 | 假 | 输出全量数据排查未检出（仍在 `straggler_output.json`，不额外生成文件、不加额外键）：KPI 每个指标的 `cards` 列出全部卡（含正常的 space_score）；Profiler `node_result` 包含所有节点（含正常节点及其诊断 score） |
 
 \* `path` 与 KPI 输入（`--kpi-path` / `--kpi-jsonl-dir`）至少提供一个；都没有则打印用法并退出。
 
@@ -231,7 +230,7 @@ Profiler 模式:
 
 ```
 CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
-融合(先计算后通信) → 合并 JSON
+按指标分组异常卡(含空间劣化程度) → 合并 JSON
 ```
 
 **指标注册表**（方向 = 异常方向；方法 = 空间检测方法）：
@@ -254,7 +253,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 - **cluster（kmeans 比例）**：共享 `clustering` 包。过滤 ≤0 → z-score 标准化 → 肘部法选 k → kmeans++ + Lloyd 迭代 → 基线簇 = 方向极值簇（↑→最小均值簇，↓→最大均值簇）→ 簇均值比 `> SpaceRatioThreshold` 判定异常 → 对异常簇递归精化。被标记卡 `space_score = 簇比例`，未标记卡为中性 1.0。多卡同档异常会一起标记。
 - **absolute**：错误计数类指标，值 `> 0` 即异常（sentinel 999）。
 
-**融合**：每指标独立判定象限（空间异常 → `confirmed_anomaly`，否则 `normal`）→ 先计算后通信排序 → 复合评分 = 异常指标 `space_score` 均值。
+**判定与输出**：某指标某卡空间异常 → 该卡异常（卡级不再有 quadrant / 复合评分）。输出按**指标分组**：每个异常指标下列出异常的卡及其 `space_score`（劣化程度）。
 
 ### 5.2 Profiler 检测（profiling/）
 
@@ -283,7 +282,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 {
   "kpi": {
     "summary": { "total_cards": 8, "total_nodes": 2, "confirmed_anomalies": 1, "...": "..." },
-    "results": [ { "card_id": 0, "node": "node-1", "quadrant": 3, "anomaly_details": [ "..."] } ]
+    "anomaly_metrics": [ { "metric": "aicore_freq", "space_method": "cluster", "cards": [ { "node": "node-1", "card_id": 0, "space_score": 2.25 } ] } ]
   },
   "profiler": {
     "node_result": [
@@ -295,11 +294,11 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 ```
 
 - **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键；KPI 失败且无 Profiler → 不写文件。
-- `kpi` 段 = KPI 检测结果（summary / results；`results[].anomaly_details` 为异常指标及空间 score）。
+- `kpi` 段 = KPI 检测结果（summary / anomaly_metrics，指标优先：每个异常指标下列异常卡及空间 score）。
 - `profiler` 段 = 节点聚合结果：`node_result[]` 按物理节点（hostname）分组，`npu[]` 只含异常 NPU（cal/npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
 
 **`--debug-output` 调试输出**（不加额外键，直接在现有结果里展示所有数据，仍在 `straggler_output.json`）：
-- **KPI**：每张卡的 `anomaly_details` 列出**全部 11 个指标**（含正常的）的完整明细——`space_score`/`space_abnormal`/`quadrant`/`space_method` 等；正常指标的 `quadrant` 为 `0`、`space_abnormal` 为 `false`，但 `space_score` 照常给出（正常约 1.0），可对照看"为什么某指标没标"。
+- **KPI**：`anomaly_metrics` 对**全部 11 个指标**列出其 `cards`（含正常的，`space_abnormal` 区分是否标异常），正常卡的 `space_score` 约 1.0，可对照看"为什么某指标没标"。
 - **Profiler**：`node_result[]` 包含**所有节点**（异常+正常），正常节点的 `npu[]` 也列出其 `cal`/`npu_bubble`/`cpu` 的诊断 score（比值，正常 rank 约 1.0；无数据/被 ≤0 过滤的 rank 不出现该键）；`comm_domain_result` 也包含**所有通信组**（异常+正常），每组的 score 为代表卡比值（正常组约 1.0）：
   ```json
   { "hostname": "node-1", "npu": [ { "id": 0, "cal": { "score": 1.02 }, "npu_bubble": { "score": 8000 } } ], "cpu": { "score": 1.05 } }
@@ -328,10 +327,8 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 | 字段 | 含义 |
 |------|------|
-| `quadrant`（整数 0-3） | JSON 中输出为整数：`0`=normal（正常）、`3`=confirmed_anomaly（空间维度判定异常）。`1`/`2` 为历史值，纯空间判定下不再产生 |
-| `space_score` | 空间簇比例（cluster 方法）；异常条件 `> SpaceRatioThreshold` |
-| `anomaly_category` | `compute` / `communication` |
-| `secondary_comm_anomalies` | 计算异常导致的继发性通信异常 |
+| `space_score` | 空间簇比例（cluster 方法）= 劣化程度；异常条件 `> SpaceRatioThreshold` |
+| `anomaly_metrics[].cards[].space_abnormal` | 该指标下该卡是否空间异常 |
 
 ---
 

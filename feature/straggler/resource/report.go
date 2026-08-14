@@ -17,7 +17,7 @@ func RunDetection(csvPath string, cfg DetectionConfig) (*DetectionResult, error)
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection starting: %s\n", csvPath)
 
 	// 1. Parse CSV.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/5: Parsing CSV...\n")
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/4: Parsing CSV...\n")
 	rawData, err := ParseCSV(csvPath)
 	if err != nil {
 		return nil, fmt.Errorf("parse CSV: %w", err)
@@ -35,7 +35,7 @@ func RunDetectionFromDir(dir string, cfg DetectionConfig) (*DetectionResult, err
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection starting: %s\n", dir)
 
 	// 1. Parse the directory (multi-node CSVs + node_config.json).
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/5: Parsing KPI directory...\n")
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 1/4: Parsing KPI directory...\n")
 	ts, err := ParseKPIDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("parse KPI dir: %w", err)
@@ -55,16 +55,15 @@ func RunDetectionFromData(ts *TimeSeriesData, source string, cfg DetectionConfig
 	return runDetection(ts, source, cfg)
 }
 
-// runDetection executes steps 2-5 on already-parsed TimeSeriesData.
+// runDetection executes steps 2-4 on already-parsed TimeSeriesData.
 //
 // Pipeline:
 //  2. AggregateByMinute
 //  3. Space detection (peer comparison) on the last aggregated point
-//  4. FuseAndSummarize (compute-first ordering)
-//  5. Node identity at the output boundary
+//  4. Build the metric-first anomaly list
 func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (*DetectionResult, error) {
 	// 2. Aggregate by the aggregation window (AggregationWindowSec, default 10s).
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 2/5: Aggregating (trimmed mean, window=%ds)...\n", cfg.AggregationWindowSec)
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 2/4: Aggregating (trimmed mean, window=%ds)...\n", cfg.AggregationWindowSec)
 	aggregated, err := AggregateByMinute(rawData.RawRows, rawData.CardIDs, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate: %w", err)
@@ -74,30 +73,13 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 	rawData.Rows = aggregated
 
 	// 3. Space detection (peer comparison within each node, last point only).
-	//    With the time dimension and baseline/detection windows removed, the
-	//    judgment is purely the peer comparison on the most recent reading.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 3/5: Space (peer) detection...\n")
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 3/4: Space (peer) detection...\n")
 	spaceResult := detectSpaceAnomalies(aggregated, rawData.CardIDs, cfg, rawData.NodeOf)
 	spaceDetails := aggregateSpaceScores(spaceResult, rawData.CardIDs, cfg)
 
-	// 4. Fuse + compute-first ordering.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 4/5: Fusion (compute-first)...\n")
-	summaries := FuseAndSummarize(spaceDetails, rawData.CardIDs, cfg)
-
-	// 5. Node identity at the output boundary: convert global card IDs to
-	//    per-node IDs and attach the node name.
-	summaries = applyNodeIdentity(summaries, rawData.NodeOf, rawData.LocalID)
-
-	// Build result.
-	confirmed := 0
-	normal := 0
-	for _, s := range summaries {
-		if s.Quadrant == QuadConfirmedAnomaly {
-			confirmed++
-		} else {
-			normal++
-		}
-	}
+	// 4. Build the metric-first anomaly list.
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 4/4: Building metric-first anomalies...\n")
+	metrics, anomalies := buildAnomalyMetrics(spaceDetails, rawData.CardIDs, rawData.NodeOf, rawData.LocalID, cfg)
 
 	// Distinct node count (flat/single-node input → 1).
 	nodeSet := make(map[string]bool)
@@ -110,47 +92,77 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 
 	result := &DetectionResult{
 		Summary: DetectionSummary{
-			TotalCards:         len(rawData.CardIDs),
-			TotalNodes:         len(nodeSet),
-			ConfirmedAnomalies: confirmed,
-			Normal:             normal,
-			KPICSV:             source,
-			TotalTimePoints:    len(aggregated),
+			TotalCards:      len(rawData.CardIDs),
+			TotalNodes:      len(nodeSet),
+			Anomalies:       anomalies,
+			Normal:          len(rawData.CardIDs) - anomalies,
+			KPICSV:          source,
+			TotalTimePoints: len(aggregated),
 		},
-		Results: summaries,
+		Metrics: metrics,
 	}
 
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection complete: confirmed=%d normal=%d\n", confirmed, normal)
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection complete: anomalies=%d normal=%d\n",
+		anomalies, result.Summary.Normal)
 
 	return result, nil
 }
 
-// applyNodeIdentity converts global card IDs to per-node IDs and attaches the
-// node name at the output boundary. It is a pure bijection (LocalID), so scores,
-// quadrants and ordering are untouched — only the reported identity changes.
-func applyNodeIdentity(
-	summaries []CardDetectionSummary,
+// buildAnomalyMetrics groups the space-abnormal cards by metric (metric-first
+// output) and counts how many distinct cards have at least one anomalous metric.
+// With cfg.EnableDebug every card's space score is included per metric (normal
+// ≈ 1.0) so undetected cards can be inspected; otherwise only anomalous cards.
+func buildAnomalyMetrics(
+	spaceDetails map[int]map[MetricName]*MetricAnomalyDetail,
+	cardIDs []int,
 	nodeOf map[int]string,
 	localID map[int]int,
-) []CardDetectionSummary {
-	for i := range summaries {
-		g := summaries[i].CardID
-		summaries[i].Node = nodeOf[g]
-		if summaries[i].Node == "" {
-			summaries[i].Node = noneNode
+	cfg DetectionConfig,
+) (metrics []MetricAnomaly, anomalies int) {
+	anomalyCard := make(map[int]bool, len(cardIDs))
+
+	for _, metric := range AllMetrics {
+		ma := MetricAnomaly{
+			Metric:      metric,
+			SpaceMethod: MetricMetaRegistry[metric].SpaceMethod,
 		}
-		summaries[i].CardID = localID[g]
+		for _, cid := range cardIDs {
+			d := spaceDetails[cid][metric]
+			if d == nil {
+				continue
+			}
+			if !cfg.EnableDebug && !d.SpaceAbnormal {
+				continue
+			}
+			node := nodeOf[cid]
+			if node == "" {
+				node = noneNode
+			}
+			ma.Cards = append(ma.Cards, AnomalousCard{
+				Node:          node,
+				CardID:        localID[cid],
+				SpaceScore:    d.SpaceScore,
+				SpaceAbnormal: d.SpaceAbnormal,
+			})
+			if d.SpaceAbnormal {
+				anomalyCard[cid] = true
+			}
+		}
+		if len(ma.Cards) > 0 {
+			metrics = append(metrics, ma)
+		}
 	}
-	return summaries
+
+	return metrics, len(anomalyCard)
 }
 
 // =============================================================================
 // Text Report
 // =============================================================================
 
-// WriteReport generates a human-readable text report. It only lists the
-// anomalous cards with their anomalous metrics and space scores (degradation
-// degree); root-cause bounding and cross-card correlation are removed.
+// WriteReport generates a human-readable text report. The anomaly list is
+// metric-first: each metric is followed by the cards anomalous for it with the
+// space degradation degree in parentheses.
 func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 	var b strings.Builder
 
@@ -164,29 +176,34 @@ func WriteReport(result *DetectionResult, outputDir string) (string, error) {
 	fmt.Fprintf(&b, "  数据点:     %d\n", result.Summary.TotalTimePoints)
 	fmt.Fprintf(&b, "  总卡数:     %d\n", result.Summary.TotalCards)
 	fmt.Fprintf(&b, "  ✓ 正常:     %d\n", result.Summary.Normal)
-	fmt.Fprintf(&b, "  ✗ 确认异常: %d\n", result.Summary.ConfirmedAnomalies)
+	fmt.Fprintf(&b, "  ✗ 异常:     %d\n", result.Summary.Anomalies)
 	b.WriteString("\n")
 
-	// Anomalous cards: anomalous metrics + space scores.
+	// Metric-first anomaly list.
+	multiNode := result.Summary.TotalNodes > 1
 	printed := false
-	for _, s := range result.Results {
-		if s.Quadrant != QuadConfirmedAnomaly {
+	for _, m := range result.Metrics {
+		parts := make([]string, 0, len(m.Cards))
+		for _, c := range m.Cards {
+			if !c.SpaceAbnormal {
+				continue
+			}
+			if multiNode {
+				parts = append(parts, fmt.Sprintf("卡%s:%d(%.2f)", c.Node, c.CardID, c.SpaceScore))
+			} else {
+				parts = append(parts, fmt.Sprintf("卡%d(%.2f)", c.CardID, c.SpaceScore))
+			}
+		}
+		if len(parts) == 0 {
 			continue
 		}
 		if !printed {
 			b.WriteString("================================================================================\n")
-			b.WriteString("  异常卡详情\n")
+			b.WriteString("  异常指标详情\n")
 			b.WriteString("================================================================================\n\n")
 			printed = true
 		}
-		fmt.Fprintf(&b, "  Node %s Card %d | score=%.2f\n", s.Node, s.CardID, s.CompositeScore)
-		for _, d := range s.AnomalyDetails {
-			if !d.SpaceAbnormal {
-				continue
-			}
-			fmt.Fprintf(&b, "    %-20s space=%.2f quadrant=%s\n", d.Metric, d.SpaceScore, d.Quadrant)
-		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "  %-20s %s\n", m.Metric, strings.Join(parts, ", "))
 	}
 
 	b.WriteString("================================================================================\n")

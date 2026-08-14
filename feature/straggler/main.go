@@ -177,12 +177,12 @@ func main() {
 			// the end of main, after the Profiler step, when this is the only
 			// KPI result it still gets emitted under the "kpi" key).
 			switch {
-			case resource.HasConfirmedAnomaly(kpiResult.Results) && inputPath == "":
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection found confirmed anomalies. Done.\n")
-			case resource.HasConfirmedAnomaly(kpiResult.Results):
+			case resource.HasAnomaly(kpiResult) && inputPath == "":
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI detection found anomalies. Done.\n")
+			case resource.HasAnomaly(kpiResult):
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI found anomalies, proceeding to Profiler for cross-validation...\n")
 			case inputPath != "":
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI found no confirmed anomalies, falling back to Profiler...\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] KPI found no anomalies, falling back to Profiler...\n")
 			}
 		}
 	}
