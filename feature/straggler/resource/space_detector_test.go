@@ -36,8 +36,8 @@ func TestSpaceFreqSingleDownclock(t *testing.T) {
 		t.Fatalf("downclocked card 7 → space score = %v, want ≈2.25", got)
 	}
 	for cid := 0; cid < 7; cid++ {
-		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
-			t.Errorf("normal card %d → space score = %v, want 0", cid, z)
+		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 1.0 {
+			t.Errorf("normal card %d → space score = %v, want 1.0 (neutral ratio)", cid, z)
 		}
 	}
 
@@ -58,8 +58,14 @@ func TestSpaceFreqAllNormal(t *testing.T) {
 
 	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
 	for _, cid := range cardIDs {
-		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 0 {
-			t.Errorf("card %d at common clock → score = %v, want 0", cid, z)
+		if z := res.Scores[cid][MetricAICoreFreq][0]; z != 1.0 {
+			t.Errorf("card %d at common clock → score = %v, want 1.0 (neutral ratio)", cid, z)
+		}
+	}
+	details := aggregateSpaceScores(res, cardIDs, cfg)
+	for _, cid := range cardIDs {
+		if d := details[cid][MetricAICoreFreq]; d.SpaceScore != 1.0 {
+			t.Errorf("card %d aggregate space score = %v, want 1.0", cid, d.SpaceScore)
 		}
 	}
 }

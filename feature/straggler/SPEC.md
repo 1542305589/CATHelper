@@ -216,7 +216,7 @@ CPU 取桶内最后一个值。
 5. **基线簇 = 方向极值簇**（DirHigh→最小均值簇，DirLow→最大均值簇）
 6. 簇均值比 `> SpaceRatioThreshold`（默认 2.0）→ 异常簇
 7. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层；返回最深异常簇
-8. 被标记卡的 `space_score = 簇比例（簇均值 / 基线均值，DirLow 为基线/簇均值）`，其余 0
+8. 参与聚类的卡都有 `space_score = 簇比例`：被标记卡为其比值（> 阈值），未标记卡为中性 1.0；缺失 / 值 ≤ 0 的卡为 0（无法计算比值）
 
 > 方向极值簇作基线：即使异常方是多数（整片偏离），基线仍取正常方向极值簇，不会把"谁都高"误判为正常；比例阈值（2.0）则保证自然散布（如 54..60°C）不会被当作异常。
 
@@ -230,10 +230,10 @@ CPU 取桶内最后一个值。
 
 | TimeMethod | 适用指标 | 公式 | 零离散度处理 |
 |------------|---------|------|-------------|
-| **MAD Zscore** | temp / power / aicore_freq / aicore_util / hbm_bandwidth_util | `Z = |currentMedian − baseline.Median| / (1.4826 × baseline.Mad)` | `Mad==0` 且 |Δ|>0.01 → 999 |
-| **Mean/std Zscore** | hbm_util / tx_bandwidth / 4× error counters | `Z = |currentMean − baseline.Mean| / baseline.StdDev` | `StdDev==0` 且 |Δ|>0.01 → 999 |
+| **MAD Zscore** | temp / power / aicore_freq / aicore_util / hbm_bandwidth_util | `Z = (currentMedian − baseline.Median) / (1.4826 × baseline.Mad)`（仅异常侧） | `Mad==0` 且异常侧 Δ>0.01 → 999 |
+| **Mean/std Zscore** | hbm_util / tx_bandwidth / 4× error counters | `Z = (currentMean − baseline.Mean) / baseline.StdDev`（仅异常侧） | `StdDev==0` 且异常侧 Δ>0.01 → 999 |
 
-> 两种 TimeMethod 都是 Z-Score，区别只在基线统计量：**MAD Zscore** 用鲁棒 median/MAD，**Mean/std Zscore** 用经典 mean/std。
+> 两种 TimeMethod 都是 Z-Score，区别只在基线统计量：**MAD Zscore** 用鲁棒 median/MAD，**Mean/std Zscore** 用经典 mean/std。两者都**方向感知**：只取指标异常侧（DirHigh → 当前 > 基线；DirLow → 当前 < 基线），良性侧 Z=0 不判异常。
 
 **MAD 鲁棒性原理**：Median 和 MAD 崩溃点为 50%。只要基线窗口内正常数据占多数，少数异常时段不会带偏统计量。`1.4826 = 1/0.6745` 使 MAD 标定至 σ 尺度，阈值语义不变。
 
@@ -374,7 +374,7 @@ Time异常    early_degradation  confirmed_anomaly
 | 检测窗口无数据 | `RunDetection` 返回错误 |
 | 空间维度同行点 < 2 卡 | Z=0（无法做 peer comparison） |
 | 某节点在场卡 < 2 | 该节点 Z=0（节点内无法做 peer comparison），其他节点不受影响 |
-| MAD=0（历史值恒定）且当前有偏差 | sentinel 999 → 判定异常 |
+| MAD=0（历史值恒定）且当前在异常侧有偏差 | sentinel 999 → 判定异常（良性侧不触发） |
 | 裁尾后数据不足 | 降级为中位数 |
 | 计数器回绕 | 自动加 `MaxUint64` 修正 |
 | JSONL 某天文件不存在 | 跳过该天（非错误） |

@@ -51,6 +51,11 @@ func detectTimeAnomalies(
 				continue
 			}
 
+			// Direction-aware Z-Score: only deviations on the metric's anomaly
+			// side count (DirHigh → current above baseline; DirLow → current
+			// below baseline). Benign-side movement scores 0, so a DirHigh metric
+			// dropping (or a DirLow metric rising) is never flagged.
+			direction := MetricMetaRegistry[metric].Direction
 			var zScore float64
 			if MetricMetaRegistry[metric].TimeMethod == MethodMAD {
 				// Robust time Z-Score using median + MAD. Median and MAD have a
@@ -59,15 +64,13 @@ func detectTimeAnomalies(
 				currentMedian := Median(curVals)
 				scale := madToStdFactor * baseline.Mad
 				if scale > 0 {
-					zScore = math.Abs(currentMedian-baseline.Median) / scale
+					zScore = oneSidedZ(currentMedian, baseline.Median, scale, direction)
 				} else {
-					// Historical MAD is 0 (stable value). If current differs, it's anomalous.
-					if math.Abs(currentMedian-baseline.Median) > 0.01 {
-						zScore = 999 // sentinel
-					}
+					zScore = oneSidedSentinel(currentMedian, baseline.Median, direction)
 				}
 			} else {
-				// Classic time Z-Score = |current - baseline_mean| / baseline_std.
+				// Classic time Z-Score = (current - baseline_mean) / baseline_std,
+				// also one-sided along the metric direction.
 				var sum float64
 				for _, v := range curVals {
 					sum += v
@@ -75,12 +78,9 @@ func detectTimeAnomalies(
 				currentMean := sum / float64(len(curVals))
 
 				if baseline.StdDev > 0 {
-					zScore = math.Abs(currentMean-baseline.Mean) / baseline.StdDev
+					zScore = oneSidedZ(currentMean, baseline.Mean, baseline.StdDev, direction)
 				} else {
-					// Historical std is 0 (stable value). If current differs, it's anomalous.
-					if math.Abs(currentMean-baseline.Mean) > 0.01 {
-						zScore = 999 // sentinel
-					}
+					zScore = oneSidedSentinel(currentMean, baseline.Mean, direction)
 				}
 			}
 
@@ -89,6 +89,44 @@ func detectTimeAnomalies(
 	}
 
 	return result
+}
+
+// oneSidedZ is the direction-aware time Z-score: only the metric's anomaly side
+// counts. DirHigh (higher is worse) scores only when current > baseline; DirLow
+// scores only when current < baseline. Benign-side deviations return 0.
+func oneSidedZ(current, baseline, scale float64, direction AnomalyDirection) float64 {
+	switch direction {
+	case DirLow:
+		if current < baseline {
+			return (baseline - current) / scale
+		}
+	default: // DirHigh
+		if current > baseline {
+			return (current - baseline) / scale
+		}
+	}
+	return 0
+}
+
+// oneSidedSentinel is the direction-aware counterpart of the 999 sentinel used
+// when the baseline scale is 0 (perfectly stable history): any movement on the
+// anomaly side is 999, the benign side stays 0.
+func oneSidedSentinel(current, baseline float64, direction AnomalyDirection) float64 {
+	var diff float64
+	switch direction {
+	case DirLow:
+		if current < baseline {
+			diff = baseline - current
+		}
+	default: // DirHigh
+		if current > baseline {
+			diff = current - baseline
+		}
+	}
+	if diff > 0.01 {
+		return 999
+	}
+	return 0
 }
 
 // =============================================================================

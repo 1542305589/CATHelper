@@ -115,11 +115,19 @@ func TestDetectTimeAnomaliesMAD(t *testing.T) {
 		t.Errorf("normal current → robust Z = %v, want ≈0 (no false positive)", z)
 	}
 
-	// Degraded current window → clearly anomalous (would be missed by a
-	// mean/std baseline dragged toward 50°C).
-	res = detectTimeAnomalies(makeDetectionRows(55, 60), baselines, []int{0}, cfg)
+	// Degraded current window (temp ABOVE baseline — the anomaly side of a
+	// DirHigh metric) → clearly anomalous (would be missed by a mean/std
+	// baseline dragged toward 50°C).
+	res = detectTimeAnomalies(makeDetectionRows(100, 60), baselines, []int{0}, cfg)
 	if z := res.Scores[0][MetricTemp]; z <= cfg.TimeZThreshold {
 		t.Errorf("degraded current → robust Z = %v, want > threshold %v", z, cfg.TimeZThreshold)
+	}
+
+	// Benign side (temp BELOW baseline, i.e. cooler) must NOT be flagged: the
+	// time Z-Score is one-sided along the metric direction.
+	res = detectTimeAnomalies(makeDetectionRows(55, 60), baselines, []int{0}, cfg)
+	if z := res.Scores[0][MetricTemp]; z != 0 {
+		t.Errorf("cooler current → robust Z = %v, want 0 (benign side not flagged)", z)
 	}
 }
 

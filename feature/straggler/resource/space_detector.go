@@ -103,7 +103,11 @@ func detectSpaceAnomalies(
 				// kmeans ratio detection within THIS node on the last point.
 				// Only present values > 0 participate; the ratio score =
 				// deepest-cluster mean / baseline (direction extreme) cluster
-				// mean.
+				// mean. Every card that participates gets a ratio: flagged
+				// cards keep the detected ratio (e.g. 2.5x), non-flagged ones
+				// report the neutral 1.0 (baseline cluster) so the space score
+				// reads as a ratio for all cards, not 0 for the normal ones.
+				// Absent / non-positive cards stay 0 — no ratio is computable.
 				posPresent, posVals := filterPositive(present, presentVals)
 				if len(posVals) < 2 {
 					for _, cid := range nodeCardIDs {
@@ -117,12 +121,19 @@ func detectSpaceAnomalies(
 					cid := nodeCardIDs[posPresent[r.Index]]
 					flagged[cid] = r.Ratio
 				}
+				inCluster := make(map[int]bool, len(posPresent))
+				for _, pi := range posPresent {
+					inCluster[nodeCardIDs[pi]] = true
+				}
 				for _, cid := range nodeCardIDs {
-					if ratio, ok := flagged[cid]; ok {
-						result.Scores[cid][metric] = append(result.Scores[cid][metric], ratio)
-					} else {
-						result.Scores[cid][metric] = append(result.Scores[cid][metric], 0)
+					ratio := 0.0
+					if inCluster[cid] {
+						ratio = 1.0 // neutral: member of the baseline cluster
 					}
+					if r, ok := flagged[cid]; ok {
+						ratio = r
+					}
+					result.Scores[cid][metric] = append(result.Scores[cid][metric], ratio)
 				}
 
 			default: // MethodZScore

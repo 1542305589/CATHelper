@@ -280,7 +280,7 @@ if 增量 > 0: 聚合值 = 增量
 6. 基线簇 = 方向极值簇（DirHigh→最小均值簇，DirLow→最大均值簇）
 7. 簇均值比 > SpaceRatioThreshold（默认 2.0）→ 异常簇
 8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
-9. 被标记卡 space_score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）
+9. 参与聚类的卡都有 space_score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）：被标记卡为其比值，未标记卡为中性 1.0；缺失/值 ≤ 0 的卡为 0
 聚合：space_score > SpaceRatioThreshold 判空间异常
 ```
 
@@ -323,9 +323,9 @@ IQR = Q3 - Q1
   baseline_mad    = MAD(B) = median(|B - baseline_median|)
 
   检测窗口内的均值 current_mean = avg(检测窗口内的值)
-  时间 Z-Score = |current_mean - baseline_mean| / baseline_std
+  时间 Z-Score = (current_mean - baseline_mean) / baseline_std   // 仅异常侧：DirHigh 当前>基线，DirLow 当前<基线
 
-  if baseline_std == 0 → 跳过（历史无波动）
+  if baseline_std == 0 → 历史无波动：异常侧有偏差 → sentinel 999，否则 Z=0
   if 时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
   if N < MinBaselineSamples (默认 30，10 秒聚合下 ≈ 5 分钟) → 时间 Z=0，不判定异常
 ```
@@ -336,9 +336,9 @@ IQR = Q3 - Q1
 
 ```
   检测窗口内的中位数 current_median = median(检测窗口内的值)
-  鲁棒时间 Z-Score = |current_median - baseline_median| / (1.4826 * baseline_mad)
+  鲁棒时间 Z-Score = (current_median - baseline_median) / (1.4826 * baseline_mad)   // 仅异常侧
 
-  if baseline_mad == 0 → 跳过（历史无波动）
+  if baseline_mad == 0 → 历史无波动：异常侧有偏差 → sentinel 999，否则 Z=0
   if 鲁棒时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
 ```
 

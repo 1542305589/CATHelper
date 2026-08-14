@@ -266,8 +266,9 @@ CSV/JSONL 解析 → 10 秒聚合 → 窗口切分(基线/检测) → 建历史�
 - **absolute**：错误计数类指标，值 `> 0` 即异常（sentinel 999）。
 
 **时间维度（自对比）**：基线聚合点 `N < MinBaselineSamples(30)` 时 Z=0 不判定。
-- **MAD**：`Z = |current_median − baseline.Median| / (1.4826 × baseline.Mad)`（鲁棒，5 个连续/双峰指标）。
-- **zscore**：`Z = |current_mean − baseline.Mean| / baseline.StdDev`。
+- **MAD**：`Z = (current_median − baseline.Median) / (1.4826 × baseline.Mad)`（鲁棒，5 个连续/双峰指标）。
+- **zscore**：`Z = (current_mean − baseline.Mean) / baseline.StdDev`。
+- **方向感知**：两种 Z 都只取异常侧——DirHigh 只在 `当前 > 基线` 计分，DirLow 只在 `当前 < 基线` 计分，良性侧 Z=0 不判异常。
 
 **融合**：每指标独立判定象限 → 先计算后通信排序 → 复合评分 `α×TimeZ + β×SpaceZ`。
 
@@ -380,7 +381,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | 检测窗口无数据 | KPI 检测返回错误 |
 | 空间维度同行点 < 2 卡 | 该节点 Z=0（无法 peer 对比） |
 | 某节点在场卡 < 2 | 该节点 Z=0，其他节点不受影响 |
-| MAD=0（历史恒定）且当前有偏差 | sentinel 999 → 判定异常 |
+| MAD=0（历史恒定）且当前在异常侧有偏差 | sentinel 999 → 判定异常（良性侧不触发） |
 | 裁尾后数据不足 | 降级为中位数 |
 | 计数器回绕 | 自动加 `MaxUint64` 修正 |
 | JSONL 某天文件不存在 | 跳过该天（非错误） |
