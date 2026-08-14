@@ -275,7 +275,7 @@ func TestSpaceClusterDirLow(t *testing.T) {
 	}
 }
 
-// Space detection judges ONLY the last aggregated minute point: an anomaly in
+// Space detection judges ONLY the last aggregated point: an anomaly in
 // an earlier row (but a clean last row) is not flagged, and a clean earlier
 // row followed by an anomalous last row IS flagged.
 func TestSpaceClusterLastPointOnly(t *testing.T) {

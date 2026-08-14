@@ -12,8 +12,8 @@ import (
 // =============================================================================
 
 // detectSpaceAnomalies computes space scores for all cards across all metrics
-// using ONLY the last aggregated minute point of the detection window (the
-// most recent reading is what matters for a straggler).
+// using ONLY the last aggregated point of the detection window (the most recent
+// reading is what matters for a straggler).
 //
 // Returns: cardID → metric → []score (exactly one element — the last point).
 // nodeOf is optional; when provided, peer comparison happens WITHIN each node
@@ -46,7 +46,7 @@ func detectSpaceAnomalies(
 		}
 	}
 
-	// Only the last aggregated minute point is judged.
+	// Only the last aggregated point is judged.
 	if len(detectionRows) == 0 {
 		return result
 	}

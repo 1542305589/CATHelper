@@ -38,7 +38,7 @@
 ## CLI
 
 ```
-slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/path/to/kpi.csv | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--baseline-hours=360] [--detection-hours=1] [--space-ratio-threshold=2.0]
+slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--baseline-hours=360] [--detection-hours=1] [--space-ratio-threshold=2.0]
 ```
 
 ### 参数
@@ -155,7 +155,15 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 ```json
 {"ts":1784547926,"vals":{"0":{"temp":47,"power":1628,"aicore_freq":1800,...},"1":{...}},"cpu_avg":{"cpu1":"4.26"}}
 ```
-嵌套（多节点）时 `vals` 外层是节点名：`{"node-ip-1": {"0": {"temp":47,...}, "1": {...}}, "node-ip-2": {...}}`。
+- `vals` 始终是**平铺**形态 `{cardID: {field: value}}`，卡号在**节点内**从 0 编号；`cpu_avg` 可选。
+- **多节点用二级目录 + `node_config.json`**（key = 子目录名；`node` = 节点名；`cards` = 该节点生效卡号，节点内 0 起始），与 `--kpi-path` 一致：
+  ```
+  {dir}/
+  ├── node-a/straggler_kpi_2026-08-13.jsonl   # 每个文件仍是平铺
+  ├── node-b/straggler_kpi_2026-08-13.jsonl
+  └── node_config.json
+  ```
+- 无 `node_config.json` 时按单目录读取（旧版兜底）：`vals` 平铺为单节点 `"none"`，或样本内 `vals` 外层为节点名的**嵌套**形态 `{"node-ip-1": {"0": {...}}, "node-ip-2": {...}}`（`sampleToRow` 嗅探第一个字段值是否为对象来区分）。
 
 `ReadKPIFiles()` 根据 `--baseline-hours` 计算日期范围，读取对应日期的 JSONL 文件并重建 `TimeSeriesData`，与 CSV 路径共享后续全部检测管线。
 
@@ -603,7 +611,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 - **KPI: 时间+空间 2D 交叉验证**：空间维度（同时间点 peer 对比）和时间维度（同卡 vs 历史基线）独立检测后融合，减少单维度误报。仅双维确认的异常才打出 `confirmed_anomaly`。
 - **KPI: Compute-First 排序**：计算慢必然导致通信慢（卡无法按时参与集合通信），先判定计算再审视通信，避免将计算慢的卡误归因为通信故障。
 - **KPI: MAD 鲁棒基线**：5 个连续/双峰指标使用 median + MAD 构造 Z-Score，崩溃点 50%，防止基线窗口中的少数异常数据污染统计量。
-- **KPI: 裁剪均值聚合**：原始数据 ~2s 采集，每分钟聚合时使用 25% 裁剪均值，抵抗采集噪声（温度/功耗传感器的瞬时抖动）。
+- **KPI: 裁剪均值聚合**：原始数据 ~2s 采集，每 10 秒聚合窗口（`AggregationWindowSec=10`）内使用 25% 裁剪均值，抵抗采集噪声（温度/功耗传感器的瞬时抖动）。
 - **KPI: HBM 双指标并存**：`hbm_bandwidth_util`（带宽，参与 C4/C5/C6 根因规则）+ `hbm_util`（内存，仅跟踪展示，不参与规则），语义上带宽更贴合性能瓶颈判断，但内存使用率仍有采集跟踪价值。
 - **Profiler: 合并 Step**：所有 step 合并为单聚合 step（minStart → maxEnd），CSV 仅一行。Profiler 时间分辨率低，逐 step 不可靠。
 - **Profiler: 倒数第二行**：多行数据取 n-2 行，避免末行不完整。

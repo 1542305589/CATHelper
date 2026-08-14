@@ -164,7 +164,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
   "node-b": { "node": "node-2", "cards": [0, 1] }
 }
 ```
-- 有 `node_config.json` → 按多节点子目录读取；无 → 按单节点（`"none"`）读取（兼容旧布局）。
+- 有 `node_config.json` → 按多节点子目录读取；无 → 按单目录读取（兼容旧布局：样本 `vals` 平铺 → 单节点 `"none"`；`vals` 外层为节点名的嵌套形态 → 按节点解析）。
 - 子目录名只是文件系统 key，`node` 才是参与 peer 对比的节点名（可与子目录名不同）。
 - `cards` 之外的数据会被过滤；配置引用的子目录缺失 → 报错。
 - 每个节点的样本为平铺形态 `{card: {field: value}}`，卡号节点内 0 起始（与 `--kpi-path` 的每节点 CSV 一致）。

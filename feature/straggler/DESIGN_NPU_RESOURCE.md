@@ -9,11 +9,11 @@
 - **性能开销大**：Profiler API 侵入式采集，产生大量 `.db` 文件，不适合常态化
 - **无时间维度**：仅单次快照，无法利用历史趋势
 
-本方案基于 `kpi_collect.sh` 采集的**分钟级 NPU 资源 KPI CSV**（保留 **15 天**），以**无侵入、常态化**方式实现：
+本方案基于 `kpi_collect.sh` 采集的**NPU 资源 KPI CSV**（保留 **15 天**，聚合窗口 10 秒），以**无侵入、常态化**方式实现：
 
 - **时间维度 + 空间维度 双维检测**：既与同伴比（空间），也与自己的历史基线比（时间）
 - **先计算后通信的因果检测顺序**：计算慢会导致通信慢，先检计算可避免误判
-- **1分钟截尾均值抗噪**：排序→去两端 25%→中间 50% 均值，单采样点噪声不污染检测结果
+- **10秒截尾均值抗噪**：排序→去两端 25%→中间 50% 均值，单采样点噪声不污染检测结果
 
 ### 1.2 与 Profiler 检测的定位
 
@@ -50,17 +50,16 @@
 
 ### 2.1 CSV 结构
 
-指标 JSON 支持**平铺**（单节点）和**嵌套**（多节点）两种形态，card ID 在每个节点内从 0 开始编号：
+`--kpi-path` 传一个**目录**，内含多个每节点 CSV + 固定的 `node_config.json`（与 JSONL 多节点布局一致）：
 
 ```
-# 平铺（单节点 "none"，向后兼容）
-timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
-1784547926,"{""0"":1628,...,""7"":1688}","{""0"":47,...,""7"":50}",...,"{""cpu1"":""4.26"",...}"
-
-# 嵌套（多节点，node 名可为 IP/主机名）
-timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
-1784547926,"{""node-ip-1"":{""0"":1628,...,""7"":1688},""node-ip-2"":{""0"":2629,...}}","{""node-ip-1"":{""0"":47,...},""node-ip-2"":{""0"":50,...}}",...
+{dir}/
+├── node-a.csv               # 每节点一个 CSV，单元格为平铺 {cardID: value}
+├── node-b.csv
+└── node_config.json         # {文件名: {node: 节点名, cards: [实际使用卡号]}}
 ```
+
+每个 CSV 的指标单元格为**平铺** `{cardID: value}`，card ID 在**节点内**从 0 编号；`node_config.json` 的 `cards` 之外的卡被过滤。单文件 `ParseCSV`（平铺 → 节点 `"none"`，保留嵌套 JSON 单元格解析）仅内部/测试用，CLI 主路径走目录方式。
 
 内部把 `(node, cardID)` 映射为全局整数卡 ID（`cardIndexer`），并记录 `NodeOf`（全局ID→节点名）与 `LocalID`（全局ID→节点内卡ID）；平铺输入全局 ID = 原始卡 ID。**空间检测的 peer 组是同一节点内的卡**，跨节点不互比。
 
@@ -98,7 +97,7 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 
 ---
 
-## 3. 数据预处理：1分钟截尾均值聚合
+## 3. 数据预处理：10秒截尾均值聚合
 
 ### 3.1 为什么需要预处理
 
@@ -107,13 +106,13 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
 - **误报**：一个瞬时尖峰被标记为异常
 - **漏报**：持续偏高但因单点波动大被统计方法稀释
 
-解决方案：**将 1 分钟内的所有原始采样点聚合为一个稳健的统计量**，作为后续检测的"一个数据点"。
+解决方案：**将每个聚合窗口（`AggregationWindowSec`，默认 10 秒）内的所有原始采样点聚合为一个稳健的统计量**，作为后续检测的"一个数据点"。
 
 ### 3.2 截尾均值算法（Midmean）
 
 ```
-输入：1分钟内某卡某指标的 N 个原始采样值
-输出：该分钟该卡该指标的聚合值
+输入：10 秒窗口内某卡某指标的 N 个原始采样值
+输出：该 10 秒窗口该卡该指标的聚合值
 
 步骤：
   1. 排序：将 N 个值升序排列 → sorted[0..N-1]
@@ -122,10 +121,10 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,...,CPU_average
      保留区间 = sorted[trim .. N-1-trim]
   3. 平均：对保留区间内的值取算术平均
      midmean = avg(sorted[trim .. N-1-trim])
-  4. 返回 midmean 作为该分钟该卡该指标的聚合值
+  4. 返回 midmean 作为该 10 秒窗口该卡该指标的聚合值
 ```
 
-**示例**：某卡在 1 分钟内采集了 20 个温度值（N=20）
+**示例**：某卡在 10 秒内采集了 20 个温度值（N=20，采集频率 2Hz）
 
 ```
 原始值: [45, 47, 46, 48, 62, 47, 46, 49, 45, 48, 47, 46, 51, 47, 46, 48, 45, 47, 46, 49]
@@ -146,13 +145,13 @@ midmean = (46+46+46+46+47+47+47+47+47+48) / 10 = 46.7
 | 指标类型 | 聚合方式 | 理由 |
 |---------|---------|------|
 | 连续型指标（TEMP, POWER, FREQ, UTIL, BANDWIDTH） | 截尾均值 | 需要消除尖峰，取稳定代表值 |
-| 计数型指标（ERR_PKT, RETRY, OUT_OF_ORDER, PFC_PKT） | **累加** | 错误包是累积计数器，应取 1 分钟内的总和而非均值 |
+| 计数型指标（ERR_PKT, RETRY, OUT_OF_ORDER, PFC_PKT） | **累加** | 错误包是累积计数器，应取窗口内（10 秒）的增量总和而非均值 |
 | NIC_RX_ALL_PKG | 截尾均值 | 接收包数波动大，截尾后更稳定 |
 | CPU_average | 截尾均值 | 同上 |
 
 对于计数型指标，聚合时注意处理计数器回绕（counter wrap）：
 ```
-该分钟增量 = counter[t_end] - counter[t_start]
+该窗口增量 = counter[t_end] - counter[t_start]
 if 增量 < 0: 增量 += 2^64 （处理回绕）
 if 增量 == 0: 正常，无错误
 if 增量 > 0: 聚合值 = 增量
@@ -161,13 +160,13 @@ if 增量 > 0: 聚合值 = 增量
 ### 3.4 聚合前后数据量变化
 
 ```
-聚合前：N 行/分钟（N = 采集频率 × 60）
-  e.g., 每秒采集 1 次 → 60 行/分钟 → 15天 = 1,296,000 行
+聚合前：N 行/10秒（N = 采集频率 × 10）
+  e.g., 每秒采集 1 次 → 10 行/10秒 → 15天 = 1,296,000 行
 
-聚合后：1 行/分钟
-  e.g., 15天 = 21,600 行
+聚合后：1 行/10秒
+  e.g., 15天 = 129,600 行
 
-聚合后的每行数据结构保持不变（timestamp 取该分钟起始时间），
+聚合后的每行数据结构保持不变（timestamp 取该窗口起始时间），
 仅 value 从"瞬时采样值"变为"截尾均值/累加和"。
 ```
 
@@ -180,11 +179,11 @@ if 增量 > 0: 聚合值 = 增量
 [CSV 解析]  逐行解析 → rawRows
   │
   ▼
-[1分钟聚合]  ← 本步骤
-  对每 1 分钟窗口：
-    按(分钟, 卡号)分组 → 排序 → 截尾25% → 中间50%均值
+[聚合]  ← 本步骤（AggregationWindowSec，默认 10 秒）
+  对每 10 秒窗口：
+    按(窗口, 卡号)分组 → 排序 → 截尾25% → 中间50%均值
     （或计数型指标：取增量累加）
-  输出：分钟级聚合行 (每分钟 1 行)
+  输出：聚合行 (每 10 秒 1 行)
   │
   ▼
 [窗口划分]  → 基线窗口 + 检测窗口
@@ -511,7 +510,7 @@ func BoundRootCause(cardID, anomalyMatrix, trends) RootCauseResult:
     ┌──────────────────────────┐  ┌──────────────────┐
     │ KPI 资源指标检测           │  │ Profiler 慢节点检测│
     │                          │  │ (已有流程)         │
-    │ 1. CSV解析 + 1分钟聚合    │  └──────────────────┘
+    │ 1. CSV/JSONL解析 + 10秒聚合 │  └──────────────────┘
     │ 2. 窗口划分              │
     │ 3. 时间+空间基线建立      │
     │                          │
@@ -622,7 +621,7 @@ features/straggler/
   ├── nupresource/               # 新增：NPU 资源 KPI 异常检测
   │   ├── types.go               # 数据结构 + 常量定义
   │   ├── parser.go              # CSV 解析 → 原始行
-  │   ├── aggregator.go          # 1分钟截尾均值聚合（排序→截尾→均值）
+  │   ├── aggregator.go          # 10秒截尾均值聚合（AggregationWindowSec，排序→截尾→均值）
   │   ├── baseline.go            # 历史基线构建 + 更新
   │   ├── space_detector.go      # 空间维度检测（Z-Score/IQR/聚类）
   │   ├── time_detector.go       # 时间维度检测（自身基线对比 + 趋势）
@@ -839,10 +838,10 @@ func SplitWindows(data *TimeSeriesData, cfg DetectionConfig) error
 
 
 // ==================== aggregator.go ====================
-// AggregateByMinute 对原始行按1分钟窗口做截尾均值聚合。
+// AggregateByMinute 对原始行按聚合窗口（AggregationWindowSec，默认 10 秒）做截尾均值聚合。
 // 连续型指标（TEMP/POWER/FREQ/UTIL/BANDWIDTH/NIC_RX）→ 排序→截尾25%→中间50%均值
-// 计数型指标（ERR_PKT/RETRY/OUT_OF_ORDER/PFC_PKT）→ 取1分钟增量（处理counter wrap）
-// 输出：每分钟1行聚合数据。
+// 计数型指标（ERR_PKT/RETRY/OUT_OF_ORDER/PFC_PKT）→ 取窗口增量（处理counter wrap）
+// 输出：每窗口 1 行聚合数据。
 func AggregateByMinute(rawRows []CSVRow) ([]CSVRow, error)
 
 // Midmean 计算截尾均值：排序→去前后各25%→中间50%取平均。
@@ -907,26 +906,25 @@ func ExportResourceJSON(result *DetectionResult, outputPath string) error
 
 ```
 # 仅 KPI 检测
-slowNodeDetection --kpi-path=/path/to/kpi.csv [options]
+slowNodeDetection --kpi-path=/dir/of/kpi_csvs [options]
 
 # KPI + Profiling 联合（KPI 优先，无异常则 fallback Profiling）
-slowNodeDetection path=/data/dir --kpi-path=/path/to/kpi.csv [options]
+slowNodeDetection path=/data/dir --kpi-path=/dir/of/kpi_csvs [options]
 
 # 仅 Profiling（已有，不变）
 slowNodeDetection path=/data/dir [degradation=0.3]
 
 KPI 检测专用选项:
-  --kpi-path=<path>              KPI CSV 文件路径
-  --baseline-hours=<int>        历史基线窗口（小时），默认 360 (15天)
-  --detection-hours=<int>       检测窗口（小时），默认 1
-  --space-method=<zscore|iqr>   空间检测方法，默认 zscore
-  --space-z-threshold=<float>   空间 Z-Score 阈值，默认 2.5
-  --time-z-threshold=<float>    时间 Z-Score 阈值，默认 2.0
-  --time-weight=<float>         时间维权重，默认 0.6
-  --no-trend                    禁用趋势检测
-  --no-fallback                 KPI 未发现异常时不 fallback 到 Profiling
-  --always-profiling            始终运行 Profiling（交叉验证模式）
+  --kpi-path=<dir>                KPI 模式：每节点 CSV + node_config.json 的目录
+  --kpi-jsonl-dir=<dir>           KPI 模式：CATMonitor straggler_kpi_{date}.jsonl 目录（优先于 --kpi-path）
+  --faultsub-url=<url>            FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环）
+  --baseline-hours=<float>       历史基线窗口（小时），默认 360 (15天)
+  --detection-hours=<float>      检测窗口（小时），默认 1
+  --space-ratio-threshold=<float> 空间簇比例阈值，默认 2.0（未传时联动 degradation 取 1+degradation）
+  --debug-output                 同时输出所有正常+异常数据（KPI anomaly_details 全指标；Profiler 全节点/全通信组）
 ```
+
+> 注：`--space-method` / `--space-z-threshold` / `--time-z-threshold` / `--time-weight` / `--no-trend` / `--no-fallback` / `--always-profiling` 等旧 flag 已移除（由统一阈值参数与固定融合策略替代）。
 
 ---
 
@@ -942,8 +940,8 @@ KPI 检测专用选项:
     "early_degradation": 0,
     "individual_variance": 0,
     "normal": 7,
-    "kpi_csv": "/data/kpi.csv",
-    "time_range": {"start": 1784547926, "end": 1785847926, "total_points": 21600},
+    "kpi_csv": "/data/kpi_csv_dir",
+    "time_range": {"start": 1784547926, "end": 1785847926, "total_points": 129600},
     "baseline_window": "360h",
     "detection_window": "1h"
   },
@@ -1008,11 +1006,11 @@ KPI 检测专用选项:
 
 | # | 决策 | 理由 |
 |---|------|------|
-| 1 | **1分钟截尾均值预处理** | 单采样点噪声大。1分钟内排序→去前后各25%→中间50%取均值，比全量均值稳健（抗尖峰），比中位数有代表性（保留分布信息） |
+| 1 | **10秒截尾均值预处理** | 单采样点噪声大。窗口内排序→去前后各25%→中间50%取均值，比全量均值稳健（抗尖峰），比中位数有代表性（保留分布信息） |
 | 2 | **先计算后通信的检测顺序** | 计算慢必然导致通信慢（无法按时参与集合通信），反之不成立。先检计算可避免将继发性通信异常误判为网络问题。通信类定界规则仅在计算正常时生效 |
 | 3 | **双维检测（时间+空间）** | 单看空间会把"一直偏热但稳定"的卡误报；单看时间会把"全集群一同升温"误报。双维交叉消除这两类误报 |
 | 4 | **KPI 优先 + Profiling 降级** | KPI 无侵入开销、覆盖硬件层异常，适合常态化；Profiling 开销大、覆盖软件层异常，按需触发 |
-| 5 | **空间维 Z-Score 默认 / 聚类可选** | Z-Score O(n) vs 聚类 O(n²)。聚合后仍有大量数据点（分钟级 × 15天），计算量差异显著 |
+| 5 | **空间维 Z-Score 默认 / 聚类可选** | Z-Score O(n) vs 聚类 O(n²)。聚合后仍有大量数据点（10 秒级 × 15天），计算量差异显著 |
 | 6 | **时间权重(0.6) > 空间权重(0.4)** | 单卡偏离自身历史基线比偏离同伴更有信息量。同伴可能集体变化，但自身趋势是确定性的 |
 | 7 | **网络错误用绝对阈值** | ERR_PKT/RETRY 正常值为 0，统计方法失效。>0 即异常 |
 | 8 | **计数型指标累加而非截尾** | ERR_PKT/RETRY/PFC_PKT 是累积计数器，应取增量总和。截尾会抹掉真正的错误尖峰 |
@@ -1026,9 +1024,9 @@ KPI 检测专用选项:
 | 场景 | 处理 |
 |------|------|
 | CSV 空文件 | 报错退出，不 fallback Profiling |
-| 1分钟内某卡某指标采样数 < 4 | 截尾25%后不足2个点，降级为全量均值 |
-| 1分钟边界时间戳不齐 | 按 `timestamp / 60 * 60` 向下取整分桶 |
-| 计数型指标出现 counter wrap | `增量 < 0` 时 += 2^64 修正，若仍 < 0 标记数据异常跳过该分钟 |
+| 聚合窗口内某卡某指标采样数 < 4 | 截尾25%后不足2个点，降级为全量均值 |
+| 窗口边界时间戳不齐 | 按 `timestamp / AggregationWindowSec * AggregationWindowSec` 向下取整分桶 |
+| 计数型指标出现 counter wrap | `增量 < 0` 时 += 2^64 修正，若仍 < 0 标记数据异常跳过该窗口 |
 | 数据不足 2 小时 | 全部作为检测窗口，跳过时间维度检测（无法建立基线） |
 | 所有卡某指标完全一致(std=0) | 空间维跳过该指标 |
 | 某卡某指标历史无波动(std=0) | 时间维跳过该指标（如频率固定在 800MHz）— 但若当前值不同，直接判定时间异常 |

@@ -67,13 +67,13 @@ func RunDetectionFromData(ts *TimeSeriesData, source string, cfg DetectionConfig
 //  8. BoundRootCause
 //  9. CrossCardCorrelation
 func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (*DetectionResult, error) {
-	// 2. Aggregate by minute.
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 2/9: Aggregating by minute (trimmed mean)...\n")
+	// 2. Aggregate by the aggregation window (AggregationWindowSec, default 10s).
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Step 2/9: Aggregating (trimmed mean, window=%ds)...\n", cfg.AggregationWindowSec)
 	aggregated, err := AggregateByMinute(rawData.RawRows, rawData.CardIDs, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Aggregated to %d minute-level rows\n", len(aggregated))
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Aggregated to %d rows\n", len(aggregated))
 
 	rawData.Rows = aggregated
 
@@ -85,7 +85,7 @@ func runDetection(rawData *TimeSeriesData, source string, cfg DetectionConfig) (
 		len(baselineRows), len(detectionRows))
 
 	if len(detectionRows) == 0 {
-		return nil, fmt.Errorf("no data in detection window (need at least 1 minute in the last %.0fh)", cfg.DetectionHours)
+		return nil, fmt.Errorf("no data in detection window (need at least one aggregated point in the last %.0fh)", cfg.DetectionHours)
 	}
 
 	// 4. Build baselines.

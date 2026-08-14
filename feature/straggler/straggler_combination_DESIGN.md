@@ -19,7 +19,7 @@ straggler 是 AI 智算集群中识别性能劣化 NPU 卡的**两道防线**检
 
 | 防线 | 包 | 输入 | 方法 | 输出 |
 |------|----|------|------|------|
-| 第一道（KPI 资源检测） | `resource/` | KPI 时序 CSV（`kpi_collect.sh` 采集，分钟级，15 天基线） | 时间×空间双维 Z-score + 二维交叉验证 + 根因定界 | JSON + 文本报告 |
+| 第一道（KPI 资源检测） | `resource/` | KPI 时序 CSV/JSONL（`kpi_collect.sh`/CATMonitor 采集，10 秒聚合，15 天基线） | 时间×空间双维检测（kmeans 比例 + MAD/经典 Z-score）+ 二维交叉验证 + 根因定界 | JSON + 文本报告 |
 | 第二道（Profiler 检测） | `profiling/` | Ascend PyTorch Profiler `.db` SQLite（应用级、按需触发） | 均质化聚类：慢计算/慢通信/慢CPU/Bubble | JSON + 文本报告 |
 
 ### 1.2 核心问题

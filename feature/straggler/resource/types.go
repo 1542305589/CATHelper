@@ -2,9 +2,9 @@
 // time+space dual-dimension peer comparison with 15-day historical baselines.
 //
 // Detection pipeline:
-//   CSV parse → 1-min trimmed-mean aggregation → window split →
-//   time baseline + space detection → compute-first 2D cross-validation →
-//   root-cause bounding → JSON + text report
+//   CSV/JSONL parse → aggregation-window (10s) trimmed-mean aggregation →
+//   window split → time baseline + space detection → compute-first 2D
+//   cross-validation → root-cause bounding → JSON + text report
 package resource
 
 import (
@@ -38,7 +38,7 @@ type CSVRow struct {
 
 // TimeSeriesData holds the complete parsed time series split into windows.
 type TimeSeriesData struct {
-	Rows    []CSVRow // aggregated rows (1 per minute after aggregation)
+	Rows    []CSVRow // aggregated rows (1 per aggregation window)
 	CardIDs []int    // all global card IDs found in the data
 	RawRows []CSVRow // raw rows before aggregation (for counter calculations)
 	// NodeOf maps each global card ID to its node name; LocalID maps it back to
