@@ -90,13 +90,26 @@ func detectSpaceAnomalies(
 
 			case MethodCluster:
 				// kmeans ratio detection within THIS node on the last point.
-				// Only present values > 0 participate. Every participating card
-				// gets its REAL top-level cluster ratio vs the direction-extreme
-				// baseline cluster: baseline members are exactly 1.0, other
-				// non-flagged clusters keep their real ratio (e.g. 1.2), flagged
-				// cards their ratio (> threshold). The FLAG comes from the
-				// recursive Detect decision (unchanged); Diagnose only fills the
-				// score. Absent / non-positive cards stay 0 — no ratio.
+				// Only present values > 0 participate. The anomaly direction is
+				// NOT pre-decided: both directions are run and the flagged COUNT
+				// picks the anomaly side.
+				//
+				//   α1 = max-direction flags (baseline = min-mean cluster,
+				//        flags the clusters above it beyond the ratio threshold)
+				//   α2 = min-direction flags (baseline = max-mean cluster,
+				//        flags the clusters below it beyond the threshold)
+				//
+				// The side flagging FEWER cards is the minority = the anomaly:
+				// a single card deviating from the majority mode is a straggler,
+				// a majority deviating is just the normal mode. Equal counts
+				// (incl. 0 == 0 healthy) → nothing flagged.
+				//
+				// Every participating card gets its REAL top-level cluster ratio
+				// from the winning direction's Diagnose: baseline members are
+				// exactly 1.0, other non-flagged clusters keep their real ratio
+				// (e.g. 1.2), flagged cards their ratio (> threshold). The FLAG
+				// comes from the recursive Detect decision; Diagnose only fills
+				// the score. Absent / non-positive cards stay 0 — no ratio.
 				posPresent, posVals := filterPositive(present, presentVals)
 				if len(posVals) < 2 {
 					for _, cid := range nodeCardIDs {
@@ -105,13 +118,21 @@ func detectSpaceAnomalies(
 					}
 					continue
 				}
-				res := clustering.Detect(posVals, cfg.SpaceRatioThreshold, meta.Direction == DirHigh)
-				flagged := make(map[int]bool, len(res))
-				for _, r := range res {
+				resMax := clustering.Detect(posVals, cfg.SpaceRatioThreshold, true)  // α1
+				resMin := clustering.Detect(posVals, cfg.SpaceRatioThreshold, false) // α2
+				winner := resMax
+				highWins := true // scores always come from the max run on a tie
+				if len(resMin) < len(resMax) {
+					winner, highWins = resMin, false
+				} else if len(resMin) == len(resMax) {
+					winner = nil // tie (incl. 0 == 0) → nothing flagged
+				}
+				flagged := make(map[int]bool, len(winner))
+				for _, r := range winner {
 					flagged[nodeCardIDs[posPresent[r.Index]]] = true
 				}
 				ratioOf := make(map[int]float64, len(posPresent))
-				for _, e := range clustering.Diagnose(posVals, cfg.SpaceRatioThreshold, meta.Direction == DirHigh) {
+				for _, e := range clustering.Diagnose(posVals, cfg.SpaceRatioThreshold, highWins) {
 					ratioOf[nodeCardIDs[posPresent[e.Index]]] = e.Ratio
 				}
 				for _, cid := range nodeCardIDs {

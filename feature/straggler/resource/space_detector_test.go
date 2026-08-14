@@ -226,9 +226,10 @@ func TestSpaceClusterMajorityAnomaly(t *testing.T) {
 	}
 }
 
-// A 4/4 tie picks the direction extreme (lower mean for DirHigh) as baseline,
-// so the hot half is still flagged — no midpoint dilution.
-func TestSpaceClusterTieBaseline(t *testing.T) {
+// A 4/4 tie (4 cards at 30°C vs 4 at 80°C, ratio 2.67 > 2.0) yields equal
+// flagged counts in BOTH directions (α1 = α2 = 4) → no minority can be called
+// → nobody is reported, per the equal-counts rule.
+func TestSpaceClusterTieEqualCountsNoReport(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
 
@@ -236,21 +237,45 @@ func TestSpaceClusterTieBaseline(t *testing.T) {
 	res := detectSpaceAnomalies(rows, cardIDs, cfg)
 	details := aggregateScores(res, cardIDs, cfg)
 
-	for _, cid := range []int{4, 5, 6, 7} {
-		if !details[cid][MetricTemp].Abnormal {
-			t.Errorf("hot card %d (tie baseline) should be space-abnormal", cid)
-		}
-	}
-	for cid := 0; cid < 4; cid++ {
+	for _, cid := range cardIDs {
 		if details[cid][MetricTemp].Abnormal {
-			t.Errorf("cool card %d should not be space-abnormal", cid)
+			t.Errorf("card %d in a 4/4 tie should NOT be space-abnormal (score=%v)",
+				cid, details[cid][MetricTemp].Score)
 		}
 	}
 }
 
-// DirLow metric (aicore_util): cards idle at 30% vs working 90% peers → the
-// low cluster is flagged (one-sided, baseline = direction extreme = working).
-func TestSpaceClusterDirLow(t *testing.T) {
+// Direction-agnostic both ways: for temp (traditionally a high-is-anomaly
+// metric), a pair of COLD cards (10°C vs 60°C peers, ratio 6.0) are the
+// minority flags — max run flags the 6 warm cards above the 10°C baseline,
+// min run flags the 2 cold cards below the 60°C baseline → the 2 cold cards
+// are reported.
+func TestSpaceClusterColdMinority(t *testing.T) {
+	cfg := DefaultDetectionConfig()
+	cardIDs := clusterCardIDs(8)
+
+	rows := clusterTempRows([][]float64{{60, 60, 60, 60, 60, 60, 10, 10}})
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
+
+	for _, cid := range []int{6, 7} {
+		if !details[cid][MetricTemp].Abnormal {
+			t.Errorf("cold card %d should be space-abnormal (score=%v)",
+				cid, details[cid][MetricTemp].Score)
+		}
+	}
+	for cid := 0; cid < 6; cid++ {
+		if details[cid][MetricTemp].Abnormal {
+			t.Errorf("warm card %d should not be space-abnormal", cid)
+		}
+	}
+}
+
+// Direction-agnostic low case (aicore_util): 6 cards working at 90% vs 2
+// cards idle at 30% (ratio 3.0 > 2.0). Max run flags the 6 working cards
+// above the 30% baseline, min run flags the 2 idle cards below the 90%
+// baseline → minority = the 2 idle cards are reported.
+func TestSpaceClusterLowMinority(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := clusterCardIDs(8)
 

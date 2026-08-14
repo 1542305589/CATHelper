@@ -226,7 +226,7 @@ if 增量 > 0: 聚合值 = 增量
 
 ### 5.1 空间维度检测（Peer Comparison）
 
-**只取全部数据的最后一个聚合点**判定（`detectSpaceAnomalies`），peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为 kmeans 比例检测（MethodCluster）**，与 Profiler 均质化聚类共享 `clustering` 包：空间维度问"谁偏离同伴"，同伴的标准是**方向极值簇**（DirHigh → 最小均值簇，DirLow → 最大均值簇）。
+**只取全部数据的最后一个聚合点**判定（`detectSpaceAnomalies`），peer 组 = 同一节点内的在场卡（跨节点不互比；平铺输入为单节点 "none"，等同全体卡）。**主方法为 kmeans 比例检测（MethodCluster）**，与 Profiler 均质化聚类共享 `clustering` 包：空间维度问"谁偏离同伴"，同伴的标准是**双方向各检一次**——max 方向（基线 = 最小均值簇）与 min 方向（基线 = 最大均值簇），标记数少的方向为异常（相等不上报）。
 
 **方法 A：kmeans 比例检测（MethodCluster，默认）**
 
@@ -237,17 +237,17 @@ if 增量 > 0: 聚合值 = 增量
 3. 肘部法选 k（K=2..min(n,10)，取 inertia 二阶差分最大）
 4. kmeans++ 初始化（首个质心 = data[0]，后续 D² 加权采样）
 5. Lloyd 迭代（≤300 轮，空簇处理，收敛 1e-9）
-6. 基线簇 = 方向极值簇（DirHigh→最小均值簇，DirLow→最大均值簇）
-7. 簇均值比 > SpaceRatioThreshold（默认 2.0）→ 异常簇
-8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
-9. 参与聚类的卡都有 score = 簇比例（簇均值/基线均值，DirLow 为基线/簇均值）：基线簇成员恰为 1.0，其他未标记簇保留真实比值，被标记卡为其比值；缺失/值 ≤ 0 的卡为 0
-聚合：判定用递归 Detect 的标记（不随比值变化）；score > SpaceRatioThreshold 仅用于解释
+6. **双方向各检一次**：max 方向（基线 = 最小均值簇，标记高于它且比例超阈值的簇）→ α1；min 方向（基线 = 最大均值簇，标记低于它且比例超阈值的簇）→ α2
+7. 比较 |α1| 与 |α2|：**少数者为异常**；**个数相等 → 不上报**（含 0==0 健康情形与 50/50 歧义情形）
+8. 对选中方向的异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
+9. 参与聚类的卡都有 score = 选中方向的簇比例（簇均值/基线均值，或基线/簇均值）：基线簇成员恰为 1.0，其他未标记簇保留真实比值，被标记卡为其比值；缺失/值 ≤ 0 的卡为 0
+聚合：判定用选中方向递归 Detect 的标记（Flagged 数组）；score 为选中方向的真实簇比值
 ```
 
 适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH（在各节点内独立检测）
 
 **设计要点**：
-- **基线 = 方向极值簇**：即使异常方是多数（整片偏离）也取正常方向极值簇，不会把"谁都高"误判为正常；单卡降频、多卡异常都能检出，无 mean/std 稀释
+- **双方向投票**：无需预判异常方向（KPI 难区分小值异常还是大值异常）——两个方向各检一次，标记数少者为异常；单卡降频、升温、冷却都能检出，多卡同向异常一起标记；多数整片偏移只是正常模式，不会被误报；无 mean/std 稀释
 - **比例阈值防误报**：簇均值比需 > 2.0，自然散布（如 54..60°C，最大比 ≈1.1）不会被当作异常
 - **递归精化**：对异常簇递归到最深异常层，避免浅层聚类吞掉深层结构；更深层无异常则保持父层
 - **只判最后一点**：空间检测退化为单个分钟点判定，实时反映最新状态
@@ -266,7 +266,7 @@ IQR = Q3 - Q1
 **方法 C：均质化聚类**（Profiler 复用共享 `clustering` 包，即上方法 A 的 kmeans 比例检测）
 
 **特殊处理**：
-- **AICORE_FREQ**：频率为固定档位值（离散）。并入 kmeans 比例检测（DirLow），`基线均值/簇均值 > SpaceRatioThreshold(2.0)` 判定——只标记 >2× 的严重降频；多卡同档降频一起标记
+- **AICORE_FREQ**：频率为固定档位值（离散）。并入 kmeans 比例检测（方向自适应，双方向投票决定），只标记 >2× 的严重降频；多卡同档降频一起标记
 - **网络错误类**（ERR_PKT, RETRY, OUT_OF_ORDER, PFC_PKT）：正常值恒为 0，> 0 即异常
 - **CPU_average**：机器粒度，不与卡级混合，独立检测
 
@@ -491,10 +491,6 @@ const (
     MetricRocEOutOfOrder MetricName = "roce_out_of_order"
     MetricRocENewPktRty  MetricName = "roce_new_pkt_rty"
 )
-
-// AnomalyDirection 异常方向。
-type AnomalyDirection int
-const ( DirHigh AnomalyDirection = iota; DirLow )
 
 // DetectionMethod 检测方法。
 type DetectionMethod string

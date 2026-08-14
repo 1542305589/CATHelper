@@ -104,26 +104,29 @@ func TestParseCSVNodeNested(t *testing.T) {
 
 func TestSpaceClusterPerNode(t *testing.T) {
 	cfg := DefaultDetectionConfig()
-	cardIDs := []int{0, 1, 2, 3}
-	nodeOf := map[int]string{0: "node-a", 1: "node-a", 2: "node-b", 3: "node-b"}
+	cardIDs := []int{0, 1, 2, 3, 4}
+	nodeOf := map[int]string{0: "node-a", 1: "node-a", 2: "node-b", 3: "node-b", 4: "node-b"}
 
-	// node-a: both 30 (normal). node-b: card 2 at 30, card 3 at 80 (hot,
-	// ratio 2.67 > 2.0).
-	rows := []CSVRow{{Timestamp: 1_000_000, Temp: map[int]float64{0: 30, 1: 30, 2: 30, 3: 80}}}
+	// node-a: both 30 (normal). node-b: cards 2,3 at 30, card 4 at 80 (hot,
+	// ratio 2.67 > 2.0) — max run flags 1 (card 4), min run flags 2 (cards
+	// 2,3) → minority = the hot card 4. (A 2-card node like [30, 80] would
+	// tie 1 vs 1 and report nothing.)
+	rows := []CSVRow{{Timestamp: 1_000_000, Temp: map[int]float64{0: 30, 1: 30, 2: 30, 3: 30, 4: 80}}}
 	res := detectSpaceAnomalies(rows, cardIDs, cfg, nodeOf)
 	details := aggregateScores(res, cardIDs, cfg)
 
-	if !details[3][MetricTemp].Abnormal {
-		t.Errorf("node-b card 3 (hot) should be space-abnormal, score=%v",
-			details[3][MetricTemp].Score)
+	if !details[4][MetricTemp].Abnormal {
+		t.Errorf("node-b card 4 (hot) should be space-abnormal, score=%v",
+			details[4][MetricTemp].Score)
 	}
-	for _, cid := range []int{0, 1, 2} {
+	for _, cid := range []int{0, 1, 2, 3} {
 		if details[cid][MetricTemp].Abnormal {
-			t.Errorf("card %d should NOT be space-abnormal (node-b card 2 must not be polluted by card 3)", cid)
+			t.Errorf("card %d should NOT be space-abnormal (node-b cards 2,3 must not be polluted by card 4)", cid)
 		}
 	}
-	// node-b card 2 (local 0) is the baseline in its node; card 0 in node-a is
-	// normal in its own node. Both stay clean even though card 3 is hot.
+	// node-b cards 2,3 (the majority) are the baseline in their node; card 0
+	// in node-a is normal in its own node. Both stay clean even though card 4
+	// is hot.
 	if details[2][MetricTemp].Abnormal {
 		t.Errorf("node-b card 2 is the majority member → should be exempt")
 	}

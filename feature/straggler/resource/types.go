@@ -119,18 +119,12 @@ func IsCommunicationMetric(m MetricName) bool { return CommunicationMetrics[m] }
 func IsCounterMetric(m MetricName) bool { return CounterMetrics[m] }
 
 // =============================================================================
-// Metric Direction & Detection Method
+// Detection Method
 // =============================================================================
 
-// AnomalyDirection indicates whether abnormal means "too high" or "too low".
-type AnomalyDirection int
-
-const (
-	DirHigh AnomalyDirection = iota // abnormally high
-	DirLow                          // abnormally low
-)
-
 // DetectionMethod selects the statistical method for space-dimension detection.
+// The cluster method's anomaly direction is NOT pre-decided: both directions
+// are run and the side flagging fewer cards is reported (see space_detector.go).
 type DetectionMethod string
 
 const (
@@ -142,24 +136,23 @@ const (
 type MetricMeta struct {
 	Name         MetricName
 	Category     AnomalyCategory
-	Direction    AnomalyDirection
-	Method  DetectionMethod
+	Method       DetectionMethod
 	AbsThreshold float64 // for MethodAbsolute
 }
 
 // MetricMetaRegistry maps each metric to its meta-information.
 var MetricMetaRegistry = map[MetricName]MetricMeta{
-	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, Method: MethodCluster},
-	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, Method: MethodCluster},
-	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
-	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
-	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
-	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, Method: MethodCluster},
-	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, Method: MethodCluster},
-	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
-	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
-	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
-	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Direction: DirHigh, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Method: MethodCluster},
+	MetricPower:          {Name: MetricPower, Category: CatCompute, Method: MethodCluster},
+	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Method: MethodCluster},
+	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Method: MethodCluster},
+	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Method: MethodCluster},
+	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Method: MethodCluster},
+	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Method: MethodCluster},
+	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
 }
 
 // =============================================================================

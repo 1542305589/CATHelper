@@ -231,24 +231,24 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 按指标分组异常卡(含空间劣化程度) → 合并 JSON
 ```
 
-**指标注册表**（方向 = 异常方向；方法 = 空间检测方法）：
+**指标注册表**（方法 = 空间检测方法；cluster 方向自适应，由双方向标记数对比决定，无需预判）：
 
-| 指标 | 分类 | 方向 | 空间方法 | 说明 |
-|------|------|------|---------|------|
-| `temp` | 计算 | ↑ | cluster | 温度 (°C) |
-| `power` | 计算 | ↑ | cluster | 功耗 (W) |
-| `aicore_freq` | 计算 | ↓ | cluster | AI Core 频率 (MHz)，离散档位 |
-| `aicore_util` | 计算 | ↓ | cluster | AI Core 利用率 (%) |
-| `hbm_bandwidth_util` | 计算 | ↓ | cluster | HBM 带宽使用率 (%) |
-| `hbm_util` | 计算 | ↓ | cluster | HBM 内存使用率 (%) |
-| `tx_bandwidth` | 通信 | ↓ | cluster | TX 带宽 |
-| `rx_pfc_pkt` | 通信 | ↑ | absolute | PFC 暂停帧（计数） |
-| `roce_tx_err_pkt` | 通信 | ↑ | absolute | RoCE 发送错误包（计数） |
-| `roce_out_of_order` | 通信 | ↑ | absolute | RoCE 乱序包（计数） |
-| `roce_new_pkt_rty` | 通信 | ↑ | absolute | RoCE 重传包（计数） |
+| 指标 | 分类 | 空间方法 | 说明 |
+|------|------|---------|------|
+| `temp` | 计算 | cluster | 温度 (°C) |
+| `power` | 计算 | cluster | 功耗 (W) |
+| `aicore_freq` | 计算 | cluster | AI Core 频率 (MHz)，离散档位 |
+| `aicore_util` | 计算 | cluster | AI Core 利用率 (%) |
+| `hbm_bandwidth_util` | 计算 | cluster | HBM 带宽使用率 (%) |
+| `hbm_util` | 计算 | cluster | HBM 内存使用率 (%) |
+| `tx_bandwidth` | 通信 | cluster | TX 带宽 |
+| `rx_pfc_pkt` | 通信 | absolute | PFC 暂停帧（计数） |
+| `roce_tx_err_pkt` | 通信 | absolute | RoCE 发送错误包（计数） |
+| `roce_out_of_order` | 通信 | absolute | RoCE 乱序包（计数） |
+| `roce_new_pkt_rty` | 通信 | absolute | RoCE 重传包（计数） |
 
 **空间维度（peer 对比）**：只取全部数据的**最后一个聚合点**（已无基线/检测窗口切分，是否异常完全由空间维度判定）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
-- **cluster（kmeans 比例）**：共享 `clustering` 包。过滤 ≤0 → z-score 标准化 → 肘部法选 k → kmeans++ + Lloyd 迭代 → 基线簇 = 方向极值簇（↑→最小均值簇，↓→最大均值簇）→ 簇均值比 `> SpaceRatioThreshold` 判定异常 → 对异常簇递归精化。参与聚类的卡都输出**真实簇比值**：基线簇成员恰为 1.0，其他未标记簇保留真实比值（如 1.2），被标记卡为其比值（> 阈值）；判定用递归 `Detect` 的标记（不随比值变化）。多卡同档异常会一起标记。
+- **cluster（kmeans 比例）**：共享 `clustering` 包。过滤 ≤0 → z-score 标准化 → 肘部法选 k → kmeans++ + Lloyd 迭代 → **双方向各检一次**（max：基线 = 最小均值簇；min：基线 = 最大均值簇），各得标记集 α1 / α2 → **标记数少的方向为异常，个数相等不上报** → 对选中方向异常簇递归精化。参与聚类的卡都输出**真实簇比值**：基线簇成员恰为 1.0，其他未标记簇保留真实比值（如 1.2），被标记卡为其比值（> 阈值）；判定用选中方向递归 `Detect` 的标记（不随比值变化）。多卡同档异常会一起标记。方向无需预判：单卡降频、升温、冷却都能检出。
 - **absolute**：错误计数类指标，值 `> 0` 即异常（sentinel 999）。
 
 **判定与输出**：某指标某卡空间异常 → 该卡异常（卡级不再有 quadrant / 复合评分）。输出按**指标分组**：每个异常指标下列出异常的卡及其 `score`（劣化程度）。
