@@ -1,6 +1,7 @@
 package resource
 
 import (
+	"math"
 	"sort"
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/clustering"
@@ -90,9 +91,11 @@ func detectSpaceAnomalies(
 
 			case MethodCluster:
 				// kmeans ratio detection within THIS node on the last point.
-				// Only present values > 0 participate. The anomaly direction is
-				// NOT pre-decided: both directions are run and the flagged COUNT
-				// picks the anomaly side.
+				// All present values participate: ≤ 0 readings are clamped to
+				// zeroFloor (a true 0 is a meaningful idle/off reading, not
+				// dropped), so a lone busy card among idle peers IS detected.
+				// The anomaly direction is NOT pre-decided: both directions are
+				// run and the flagged COUNT picks the anomaly side.
 				//
 				//   α1 = max-direction flags (baseline = min-mean cluster,
 				//        flags the clusters above it beyond the ratio threshold)
@@ -109,7 +112,7 @@ func detectSpaceAnomalies(
 				// exactly 1.0, other non-flagged clusters keep their real ratio
 				// (e.g. 1.2), flagged cards their ratio (> threshold). The FLAG
 				// comes from the recursive Detect decision; Diagnose only fills
-				// the score. Absent / non-positive cards stay 0 — no ratio.
+				// the score. Absent / NaN cards stay 0 — no ratio.
 				posPresent, posVals := filterPositive(present, presentVals)
 				if len(posVals) < 2 {
 					for _, cid := range nodeCardIDs {
@@ -189,14 +192,26 @@ func filterPresent(dict map[int]float64, nodeCardIDs []int, vals []float64) (pre
 	return present, presentVals
 }
 
-// filterPositive narrows present entries to values > 0 (kmeans ignores idle /
-// zero readings), keeping indices into nodeCardIDs.
+// zeroFloor clamps non-positive readings (zero / idle / negative) to a tiny
+// positive value before clustering, so zero cards participate as "essentially
+// off" instead of being silently dropped — otherwise "one busy card among
+// idle peers" (aicore_util 0 vs 100) was invisible. Small enough to sit far
+// below any real reading, large enough to keep the ratio finite.
+const zeroFloor = 1e-3
+
+// filterPositive keeps present entries, clamping non-positive readings (≤ 0)
+// to zeroFloor so zero / idle cards still participate in kmeans; NaN is
+// excluded. Indices stay aligned with nodeCardIDs.
 func filterPositive(present []int, presentVals []float64) (posPresent []int, posVals []float64) {
 	for i, v := range presentVals {
-		if v > 0 {
-			posPresent = append(posPresent, present[i])
-			posVals = append(posVals, v)
+		if math.IsNaN(v) {
+			continue
 		}
+		if v <= 0 {
+			v = zeroFloor
+		}
+		posPresent = append(posPresent, present[i])
+		posVals = append(posVals, v)
 	}
 	return posPresent, posVals
 }

@@ -104,6 +104,57 @@ func TestSpaceFreqAbsentCardNotFlagged(t *testing.T) {
 	}
 }
 
+// A card at 0 MHz among 1800 MHz peers: the 0 is clamped to zeroFloor (not
+// dropped) and participates — min run flags 1 (the zero card), max run flags
+// 7 (the working cards above the floor) → minority = the zero card, reported
+// with a huge ratio (1800 / zeroFloor).
+func TestSpaceFreqZeroDownclock(t *testing.T) {
+	cfg := DefaultDetectionConfig()
+	cardIDs := freqCardIDs(8)
+	freqs := map[int]float64{0: 1800, 1: 1800, 2: 1800, 3: 1800, 4: 1800, 5: 1800, 6: 1800, 7: 0}
+
+	res := detectSpaceAnomalies(freqRows(freqs), cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
+
+	if !details[7][MetricAICoreFreq].Abnormal {
+		t.Errorf("zero-freq card 7 should be space-abnormal (score=%v)",
+			details[7][MetricAICoreFreq].Score)
+	}
+	for cid := 0; cid < 7; cid++ {
+		if details[cid][MetricAICoreFreq].Abnormal {
+			t.Errorf("1800MHz card %d should not be space-abnormal", cid)
+		}
+	}
+}
+
+// aicore_util: 7 cards at 0% vs 1 card at 100% — zeros participate (clamped),
+// max run flags 1 (the busy card), min run flags 7 (the idle cards above the
+// floor) → minority = the busy card, reported with a very large ratio.
+func TestSpaceUtilZeroPeers(t *testing.T) {
+	cfg := DefaultDetectionConfig()
+	cardIDs := clusterCardIDs(8)
+
+	rows := []CSVRow{{
+		Timestamp:  1_000_000,
+		AICoreUtil: map[int]float64{0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 100},
+	}}
+	res := detectSpaceAnomalies(rows, cardIDs, cfg)
+	details := aggregateScores(res, cardIDs, cfg)
+
+	if !details[7][MetricAICoreUtil].Abnormal {
+		t.Errorf("busy card 7 should be space-abnormal (score=%v)",
+			details[7][MetricAICoreUtil].Score)
+	}
+	if got := details[7][MetricAICoreUtil].Score; got < 100 {
+		t.Errorf("busy card 7 score = %v, want ≥100 (far above the zero floor)", got)
+	}
+	for cid := 0; cid < 7; cid++ {
+		if details[cid][MetricAICoreUtil].Abnormal {
+			t.Errorf("idle card %d should not be space-abnormal", cid)
+		}
+	}
+}
+
 // A mild downclock (1500 vs 1800, ratio 1.2 < 2.0) is NOT space-flagged: the
 // global ratio threshold keeps space for severe (>2×) drops, while the time
 // dimension (freq MAD Z-score vs own history) owns the mild ones.
