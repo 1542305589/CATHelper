@@ -213,11 +213,11 @@ if 增量 > 0: 聚合值 = 增量
 ```
 对指标 m，卡 c：
 
-  空间分 S_space[m][c] = 簇比例（kmeans）：簇均值 / 基线簇均值
-                         （两方向同一定义；absolute 方法：值 > 0 → sentinel 999）
+  空间分 S_space[m][c] = 簇比例（kmeans）：簇均值 / 方向极值簇均值
+                         （absolute 方法：值 > 0 → sentinel 999）
+  被标记卡 score = 簇比例（> SpaceRatioThreshold）
   基线簇成员 score = 1.0（真实比值）
-  其他未标记簇 score = 真实比值（max 侧如 1.2，min 侧如 0.9）
-  被标记卡 score = 其真实比值（max 侧 > SpaceRatioThreshold，min 侧 < 1/SpaceRatioThreshold）
+  其他未标记簇 score = 真实比值（如 1.2）
 ```
 
 - 只取全部数据的**最后一个聚合点**判定（无窗口切分）
@@ -240,10 +240,10 @@ if 增量 > 0: 聚合值 = 增量
 3. 肘部法选 k（K=2..min(n,10)，取 inertia 二阶差分最大）
 4. kmeans++ 初始化（首个质心 = data[0]，后续 D² 加权采样，固定种子 seed=42）
 5. Lloyd 迭代（≤300 轮，空簇处理，收敛 1e-9）
-6. **双方向各检一次**：max 方向（基线 = 最小均值簇，标记高于它且 score > 阈值的簇）→ α1；min 方向（基线 = 最大均值簇，标记低于它且 score < 1/阈值的簇）→ α2
+6. **双方向各检一次**：max 方向（基线 = 最小均值簇，标记高于它且比例超阈值的簇）→ α1；min 方向（基线 = 最大均值簇，标记低于它且比例超阈值的簇）→ α2
 7. 比较 |α1| 与 |α2|：**少数者为异常**；**个数相等 → 不上报**（含 0==0 健康情形与 50/50 歧义情形）
 8. 对选中方向的异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
-9. 参与聚类的卡都有 score = **簇均值 / 基线均值（两方向统一）**：基线簇成员恰为 1.0，其他未标记簇保留真实比值（max 侧如 1.2，min 侧如 0.9），被标记卡为其比值（max 侧 > 2.0，min 侧 < 0.5）；缺失/NaN 的卡为 0（无读数，无法计算比值）
+9. 参与聚类的卡都有 score = 选中方向的簇比例（簇均值/基线均值，或基线/簇均值）：基线簇成员恰为 1.0，其他未标记簇保留真实比值，被标记卡为其比值；缺失/NaN 的卡为 0（无读数，无法计算比值）
 聚合：判定用选中方向递归 Detect 的标记（Flagged 数组）；score 为选中方向的真实簇比值
 ```
 
@@ -251,7 +251,7 @@ if 增量 > 0: 聚合值 = 增量
 
 **设计要点**：
 - **双方向投票**：无需预判异常方向（KPI 难区分小值异常还是大值异常）——两个方向各检一次，标记数少者为异常；单卡降频、升温、冷却都能检出，多卡同向异常一起标记；多数整片偏移只是正常模式，不会被误报；无 mean/std 稀释
-- **比例阈值防误报**：score = 簇均值/基线均值，max 侧需 > 2.0、min 侧需 < 0.5（即 < 1/2.0）才算异常，自然散布（如 54..60°C，最大比 ≈1.1）不会被当作异常
+- **比例阈值防误报**：簇均值比需 > 2.0，自然散布（如 54..60°C，最大比 ≈1.1）不会被当作异常
 - **极小值参与（zeroFloor）**：KPI 层在调用共享聚类前把 ≤ 0 读数钳制到 `zeroFloor=1e-3`，真实 0 是有意义的空闲/关闭读数，不再被过滤丢弃——「aicore_util 1 卡 100% 其余 0」「aicore_freq 1 卡 0MHz 其余 1800」这类单卡忙/卡死场景得以检出；钳制在资源层做，共享聚类包保持过滤 ≤0，Profiler 侧 0/缺失值不参与
 - **递归精化**：对异常簇递归到最深异常层，避免浅层聚类吞掉深层结构；更深层无异常则保持父层
 - **只判最后一点**：空间检测退化为单个聚合点判定，实时反映最新状态
@@ -300,7 +300,7 @@ KPI 指标天然分属两个层面（分类用于文档/注册表语义，检测
 
 ## 6. 输出（根因定界与跨卡关联已移除）
 
-根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。
+根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。faultsub 事件 detail 为 `{指标: score}`。
 
 ---
 
@@ -326,7 +326,8 @@ KPI 指标天然分属两个层面（分类用于文档/注册表语义，检测
                │ 2. 10秒聚合          │
                │ 3. 空间检测（最后一点 │
                │    peer，指标独立）   │
-               │ 4. stdout 报告       │
+               │ 4. stdout 报告 +     │
+               │    faultsub 回注     │
                └──────────┬─────────┘
                           │
                           ▼
@@ -351,7 +352,7 @@ KPI 指标天然分属两个层面（分类用于文档/注册表语义，检测
 // main.go 实际流程（简化）
 func main() {
     // 1. CLI 解析：path / degradation / --kpi-path / --kpi-jsonl-dir /
-    //    --space-ratio-threshold / --debug-output
+    //    --faultsub-url / --space-ratio-threshold / --debug-output
     //    KPI 输入优先 --kpi-jsonl-dir；两个输入都没有 → 用法提示退出
 
     // ── 第一道防线：KPI 资源指标检测 ──
@@ -366,6 +367,9 @@ func main() {
             // 告警；有 path 则继续 Profiler，无则最终无输出文件
         } else {
             fmt.Print(resource.WriteReport(kpiResult))       // stdout 文本报告
+            if faultsubURL != "" {                            // 闭环回注
+                resource.EmitToFaultSub(kpiResult, resource.EmitConfig{URL: faultsubURL})
+            }
             // 交叉验证决策消息（不阻断流程）：
             //   有异常 + 无 path → "Done."
             //   有异常 + 有 path → 继续 Profiler 交叉验证
@@ -388,7 +392,7 @@ func main() {
 
     // ── 合并输出 ──
     if kpiResult != nil || profilerOut != nil {
-        daemon.WriteCombinedJSON(kpiResult, profilerOut, "straggler_output.json") // 运行目录
+        writeCombinedJSON(kpiResult, profilerOut, "straggler_output.json") // 运行目录
     }
 }
 ```
@@ -423,7 +427,8 @@ feature/straggler/
   │   ├── json_reader.go      # CATMonitor straggler_kpi JSONL 读取
   │   ├── aggregator.go       # 10秒截尾均值聚合
   │   ├── space_detector.go   # 空间维度检测（peer 对比，最后一点）
-  │   └── report.go           # 管线编排 + stdout 文本报告
+  │   ├── report.go           # 管线编排 + stdout 文本报告
+  │   └── emit.go             # faultsub 闭环回传
   ├── clustering/             # 共享 kmeans 比例检测（与 Profiler 共用）
   │   └── kmeans.go
   └── config/                 # Profiler 共享配置（KPI 配置在 resource 包内）
@@ -551,7 +556,6 @@ func AggregateByMinute(rawRows []CSVRow, cardIDs []int, cfg DetectionConfig) ([]
 // detectSpaceAnomalies 对最后一个聚合点执行空间 peer 对比（节点内互比，
 // 双方向 kmeans 比例 / 绝对阈值）。
 func detectSpaceAnomalies(detectionRows []CSVRow, cardIDs []int, cfg DetectionConfig, nodeOf ...map[int]string) *SpaceDetectionResult
-<<<<<<< HEAD
 
 // ==================== report.go ====================
 // RunDetectionFromDir / RunDetectionFromData / RunDetection 是 KPI 检测入口
@@ -562,19 +566,15 @@ func RunDetectionFromData(ts *TimeSeriesData, source string, cfg DetectionConfig
 // buildAnomalyMetrics 以纯空间结果按指标分组异常卡（指标优先输出）。
 func buildAnomalyMetrics(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, nodeOf map[int]string, localID map[int]int, cfg DetectionConfig) ([]MetricAnomaly, int)
 
-=======
-
-
-// ==================== report.go ====================
-// buildAnomalyMetrics 以纯空间结果按指标分组异常卡（指标优先输出）。
-func buildAnomalyMetrics(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, nodeOf map[int]string, localID map[int]int, cfg DetectionConfig) ([]MetricAnomaly, int)
-
->>>>>>> 6d99aabd9a7b1158e71c378ac645cf1c7d188533
 // HasAnomaly 结果中是否有异常卡。
 func HasAnomaly(result *DetectionResult) bool
 
 // WriteReport 生成 KPI 文本报告（仅 stdout，不落盘）。
 func WriteReport(result *DetectionResult) string
+
+// ==================== emit.go ====================
+// EmitToFaultSub 逐异常卡 POST straggler_detected 事件到 faultsub ingest。
+func EmitToFaultSub(result *DetectionResult, cfg EmitConfig)
 
 // ==================== clustering/kmeans.go ====================
 // Detect 递归 kmeans 比例检测（过滤 ≤0；不足 2 个 → nil）。
@@ -601,6 +601,7 @@ slowNodeDetection path=/data/dir [degradation=0.3]
 KPI 检测专用选项:
   --kpi-path=<dir>                KPI 模式：每节点 CSV + node_config.json 的目录
   --kpi-jsonl-dir=<dir>           KPI 模式：CATMonitor straggler_kpi_{date}.jsonl 目录（优先于 --kpi-path）
+  --faultsub-url=<url>            FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环）
   --space-ratio-threshold=<float> 空间簇比例阈值，默认 2.0（独立旋钮，不随 degradation 变化）
   --debug-output                  输出全量数据：KPI 全部指标×全部卡；Profiler 全部节点/通信组
 ```
