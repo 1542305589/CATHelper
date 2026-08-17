@@ -345,11 +345,16 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		return pm, nil
 	}
 
-	// Build reverse: STRING_IDS id → original group name.
+	// Build reverse: STRING_IDS id → short group name (e.g. the STRING_IDS id of
+	// "group_name_42" maps to the short name "tp"). xpToGroupName is keyed by
+	// the short name ("tp") and valued by the group name found in STRING_IDS
+	// ("group_name_42"), so iterate it the other way around — the old code
+	// looked up the long name in the short-name keyed map and always missed,
+	// leaving idToXp empty and the CSV without any {domain}_Duration column.
 	idToXp := make(map[int]string)
-	for gn, sid := range groupNameIDMap {
-		if xpName, ok := xpToGroupName[gn]; ok {
-			idToXp[sid] = xpName
+	for shortName, longName := range xpToGroupName {
+		if sid, ok := groupNameIDMap[longName]; ok {
+			idToXp[sid] = shortName
 		}
 	}
 
