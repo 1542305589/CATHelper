@@ -1,6 +1,6 @@
 # CATHelper — 慢节点（Straggler）检测
 
-AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道**KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。
+AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。
 
 ---
 
@@ -49,7 +49,7 @@ go run . path=/data/profiler_output degradation=0.3
 go run . path=/data/profiler_output --kpi-path=/data/kpi_csv_dir degradation=0.3
 ```
 
-**检测顺序**：先跑 KPI（轻量、无侵入）→ 若 KPI 发现异常则输出结果 → 若 KPI 无异常则 fallback 到 Profiler 精查。两道结果都会合并进 `straggler_output.json`。
+**检测顺序**：先跑 KPI（轻量、无侵入）→ KPI 发现异常 → 有 `path` 时继续跑 Profiler 做交叉验证；KPI 无异常 → 自动 fallback 到 Profiler 精查；仅 KPI 无 `path` → KPI 结果即为最终输出。两道结果都会合并进 `straggler_output.json`（只跑哪个维度就只有哪个键）。
 
 ---
 
@@ -60,7 +60,7 @@ straggler/
 ├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON 输出
 ├── README.md               # 本文件
 ├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
-├── clustering/             # 共享 kmeans 比例检测算法（空间检测与 Profiler 均质化聚类共用）
+├── clustering/             # 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 均质化聚类共用）
 │   └── kmeans.go
 ├── resource/               # 第一道防线：资源指标检测（KPI）
 │   ├── types.go            #   数据结构 & 指标注册表 & 配置
@@ -68,7 +68,7 @@ straggler/
 │   ├── json_reader.go      #   CATMonitor straggler_kpi JSONL 读取（含多节点子目录布局）
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
-│   ├── report.go           #   管线编排 + 文本报告
+│   ├── report.go           #   管线编排 + 文本报告（stdout）
 │   └── emit.go             #   faultsub 闭环回传
 ├── profiling/              # 第二道防线：Profiling 检测
 │   ├── dataparse/          #   数据清洗（SQLite → CSV/JSON 中间件）
@@ -80,7 +80,8 @@ straggler/
 │       ├── data_parser.go  #   并行域拓扑 + 单步快照
 │       ├── detection.go    #   主流水线（4 类检测编排）
 │       ├── data_handler.go #   慢计算/慢通信/慢CPU/Bubble 实现
-│       └── clustering.go   #   HomogenizationComparisonFunc 包装（kmeans）
+│       ├── clustering.go   #   HomogenizationComparisonFunc 包装（kmeans）
+│       └── debug.go        #   --debug-output 诊断分数
 ├── config/                 # Profiler 共享配置
 │   └── config.go
 ├── utils/                  # 结果聚合（节点级）+ 工具
@@ -133,7 +134,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 
 #### `--kpi-jsonl-dir`：CATMonitor straggler_output JSONL（整合模式）
 
-传一个**目录**，读取目录内全部 `straggler_kpi_{date}.jsonl` 文件（空间检测只取最后一个聚合点，历史数据用于聚合）。**优先于 `--kpi-path`**。
+传一个**目录**，读取目录内全部 `straggler_kpi_{date}.jsonl` 文件（空间检测只取最后一个聚合点，历史数据用于 10 秒聚合）。**优先于 `--kpi-path`**。
 
 **单节点布局（向后兼容）**——文件直接放目录下：
 ```
@@ -191,23 +192,23 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | 参数 | 类型 | 必需 | 默认 | 说明 |
 |------|------|------|------|------|
 | `path` | string | 否* | — | Profiler `.db` 目录（*与 KPI 输入至少提供一个） |
-| `degradation` | float64 | 否 | 0.3 | 灵敏度。`< 0` 重置为 0.3；`> 1` 允许但告警。联动 KPI 阈值与 Profiler 阈值 |
+| `degradation` | float64 | 否 | 0.3 | 灵敏度。`< 0` 重置为 0.3；`> 1` 允许但告警。联动 Profiler 阈值 |
 | `--kpi-path` | string | 否* | — | KPI 模式：每节点 CSV + `node_config.json` 的**目录** |
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
 | `--faultsub-url` | string | 否 | — | FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮，不随 degradation 变化） |
-| `--debug-output` | bool | 否 | 假 | 输出全量数据排查未检出（仍在 `straggler_output.json`，不额外生成文件、不加额外键）：KPI 每个指标的 `cards` 列出全部卡（含正常的 score）；Profiler `node_result` 包含所有节点（含正常节点及其诊断 score） |
+| `--debug-output` | bool | 否 | 假 | 输出全量数据排查未检出（仍在 `straggler_output.json`，不额外生成文件）：KPI 每个指标的 `cards` 列出全部卡（含正常的 score，`abnormal` 区分）；Profiler `node_result` 包含所有节点（含正常节点及其诊断 score） |
 
 \* `path` 与 KPI 输入（`--kpi-path` / `--kpi-jsonl-dir`）至少提供一个；都没有则打印用法并退出。
 
-### 阈值联动（`degradation`）
+### 阈值计算
 
 ```
 KPI 模式:
-  SpaceRatioThreshold = --space-ratio-threshold  # 空间簇比例阈值（默认 2.0，不随 degradation 变化）
+  SpaceRatioThreshold = --space-ratio-threshold  # 空间簇比例阈值（默认 2.0，独立旋钮）
 
 Profiler 模式:
-  CalThreshold  = 1 + degradation              # 慢计算阈值（默认 1.3）
+  CalThreshold  = 1 + degradation              # 慢计算/慢CPU 阈值（默认 1.3）
   CommThreshold = 1 + degradation × 5          # 慢通信阈值（默认 2.5）
 ```
 
@@ -247,11 +248,11 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `roce_out_of_order` | 通信 | absolute | RoCE 乱序包（计数） |
 | `roce_new_pkt_rty` | 通信 | absolute | RoCE 重传包（计数） |
 
-**空间维度（peer 对比）**：只取全部数据的**最后一个聚合点**（已无基线/检测窗口切分，是否异常完全由空间维度判定）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
-- **cluster（kmeans 比例）**：共享 `clustering` 包。≤0 读数钳制到极小值 `zeroFloor=1e-3`（真实 0 是空闲/关闭读数，参与聚类而非丢弃）→ z-score 标准化 → 肘部法选 k → kmeans++ + Lloyd 迭代 → **双方向各检一次**（max：基线 = 最小均值簇；min：基线 = 最大均值簇），各得标记集 α1 / α2 → **标记数少的方向为异常，个数相等不上报** → 对选中方向异常簇递归精化。参与聚类的卡都输出**真实簇比值**：基线簇成员恰为 1.0，其他未标记簇保留真实比值（如 1.2），被标记卡为其比值（> 阈值）；判定用选中方向递归 `Detect` 的标记（不随比值变化）。多卡同档异常会一起标记。方向无需预判：单卡降频、升温、冷却都能检出。
+**空间维度（peer 对比）**：只取全部数据的**最后一个聚合点**（时间维度与基线/检测窗口已移除，是否异常完全由空间维度判定）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
+- **cluster（kmeans 比例）**：共享 `clustering` 包。≤0 读数（含真实 0）钳制到极小值 `zeroFloor=1e-3`——真实 0 是空闲/关闭读数，参与聚类而非丢弃 → z-score 标准化（std≈0 强制 1）→ 肘部法选 k → kmeans++ + Lloyd 迭代（固定种子，结果确定）→ **双方向各检一次**（max：基线 = 最小均值簇；min：基线 = 最大均值簇），各得标记集 α1 / α2 → **标记数少的方向为异常，个数相等不上报** → 对选中方向异常簇递归精化。参与聚类的卡都输出**真实簇比值**：基线簇成员恰为 1.0，其他未标记簇保留真实比值（如 1.2），被标记卡为其比值（> 阈值）；判定用选中方向递归 `Detect` 的标记（不随比值变化）。多卡同档异常会一起标记。方向无需预判：单卡降频、升温、冷却都能检出。
 - **absolute**：错误计数类指标，值 `> 0` 即异常（sentinel 999）。
 
-**判定与输出**：某指标某卡空间异常 → 该卡异常（卡级不再有 quadrant / 复合评分）。输出按**指标分组**：每个异常指标下列出异常的卡及其 `score`（劣化程度）。
+**判定与输出**：某指标某卡空间异常 → 该卡异常。输出按**指标分组**：每个异常指标下列出异常的卡及其 `score`（劣化程度）。
 
 ### 5.2 Profiler 检测（profiling/）
 
@@ -262,8 +263,8 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | 类别 | 数据 | 阈值/方向 | 说明 |
 |------|------|-----------|------|
 | 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向 max/min |
-| 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小的卡为代表，按 PP stage 分桶后 kmeans |
-| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取截尾均值消除节点内差异 |
+| 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小的卡为代表，按 PP stage 分桶后 kmeans，方向 max |
+| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取去 min/max 均值消除节点内差异 |
 | Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
 
 > cal / comm / cpu 三类检测统一走共享 `clustering` 包（kmeans 比例检测），与 KPI 空间 cluster 同一算法；Bubble 走固定阈值直接判定。
@@ -291,9 +292,9 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 }
 ```
 
-- **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键；KPI 失败且无 Profiler → 不写文件。
+- **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键；KPI 检测失败且无 Profiler → 不写文件。
 - `kpi` 段 = KPI 检测结果（summary / anomaly_metrics，指标优先：每个异常指标下列异常卡及空间 score）。
-- `profiler` 段 = 节点聚合结果：`node_result[]` 按物理节点（hostname）分组，`npu[]` 只含异常 NPU（cal/npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
+- `profiler` 段 = 节点聚合结果：`node_result[]` 按物理节点（hostname，缺失回退 hostUid）分组，`npu[]` 只含异常 NPU（cal/npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
 
 **`--debug-output` 调试输出**（不加额外键，直接在现有结果里展示所有数据，仍在 `straggler_output.json`）：
 - **KPI**：`anomaly_metrics` 对**全部 11 个指标**列出其 `cards`（含正常的，`abnormal` 区分是否标异常），正常卡的 `score` 约 1.0，可对照看"为什么某指标没标"。
@@ -309,7 +310,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 |------|------|------|
 | Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel/ZP_Host 排序柱状图、通信域分组对比 |
 
-> KPI 已无文本报告文件（`npu_resource_detection_report.log` 已移除），文本仅打印到 stdout。
+> KPI 已无文本报告文件（`npu_resource_detection_report.log` 已移除），KPI 文本仅打印到 stdout。
 
 ### 6.3 stdout
 
@@ -327,7 +328,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | 字段 | 含义 |
 |------|------|
 | `score` | 空间簇比例（cluster 方法）= 劣化程度；异常条件 `> SpaceRatioThreshold` |
-| `anomaly_metrics[].cards[].abnormal` | 该指标下该卡是否空间异常 |
+| `anomaly_metrics[].cards[].abnormal` | 该指标下该卡是否空间异常（debug 模式才出现） |
 
 ---
 
@@ -335,15 +336,18 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 | 场景 | 处理 |
 |------|------|
-| 空间维度同行点 < 2 卡 | 该节点 Z=0（无法 peer 对比） |
-| 某节点在场卡 < 2 | 该节点 Z=0，其他节点不受影响 |
-| 裁尾后数据不足 | 降级为普通均值 |
+| 空间维度同行点 < 2 卡 | 该节点 score=0（无法 peer 对比） |
+| 某节点在场卡 < 2 | 该节点 score=0，其他节点不受影响 |
+| ≤0 读数（含真实 0） | 钳制到 `zeroFloor=1e-3` 参与聚类（空闲/关闭读数不丢弃）；NaN 排除 |
+| 缺失 / NaN 卡 | 该卡该指标 score=0（无读数，不参与聚类） |
+| 裁尾后数据不足 | 降级为普通均值（桶内样本 < 4）；截尾后不足 2 点 → 中位数兜底 |
 | 计数器回绕 | 自动加 `MaxUint64` 修正 |
 | JSONL 某天文件不存在 | 天然跳过（只读存在的文件） |
 | CSV 列不完整 | 缺失列告警但不阻断，对应 metric dict 为空 |
 | 仅 KPI 无 `path` | 只输出 KPI 结果（`straggler_output.json` 只有 `kpi` 键），不执行 Profiler |
+| KPI 检测失败（有 `path`） | 告警后继续执行 Profiler |
 | Profiler 单节点 | 慢CPU 无法检测，stdout 不显示该行 |
-| `aicore_freq` 轻度降频（<2×） | 空间不标记，交给时间维度（MAD 自对比） |
+| `aicore_freq` 轻度降频（<2×） | 簇比例未超阈值 → 空间不标记（时间维度已移除，无其他兜底） |
 
 ---
 
