@@ -81,6 +81,10 @@ type nodeAccumulator struct {
 // diagnostic scores too.
 func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error) {
 	includeAll := debug != nil
+	// Degraded mode: no parallel topology (group names not registered) — only
+	// cal has input data; comm/CPU/bubble are not judged and must not be
+	// reported as "normal" just because their data is absent.
+	calOnly := len(parallels) == 0
 	var metaRanks []int
 	if includeAll {
 		metaRanks = debug.ValidRanks
@@ -206,7 +210,7 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 		nodeResults = append(nodeResults, nr)
 	}
 
-	printNodeSummary(finalResult)
+	printNodeSummary(finalResult, calOnly)
 	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}, nil
 }
 
@@ -305,20 +309,27 @@ func sortedNpuIDs(npus map[int]*NpuResult) []int {
 // Print helpers
 // ---------------------------------------------------------------------------
 
-func printNodeSummary(finalResult map[string]map[string]float64) {
+func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 	// Slow-CPU needs ≥2 physical nodes to be meaningful: hostUid-based trimming
 	// collapses a single node's ranks to identical values, so no straggler can
 	// be found. Skip its line entirely in that case.
 	cpuDetectable := physicalNodeCount() >= 2
+
+	// Degraded mode (no parallel topology, cal-only): state it explicitly and
+	// only report cal — the other categories have no input data, so "无异常"
+	// would be misleading.
+	if calOnly {
+		fmt.Printf("检测已降级为仅慢计算 (cal): 未注册组名,无并行拓扑;慢通信/慢CPU/Bubble 无数据,不做判定\n")
+	}
 
 	categories := []struct {
 		key, label string
 		skip       bool
 	}{
 		{"cal", "慢计算 (cal)", false},
-		{"comm", "慢通信 (comm)", false},
-		{"cpu", "慢CPU (cpu)", !cpuDetectable},
-		{"npu_bubble", "Bubble (npu_bubble)", false},
+		{"comm", "慢通信 (comm)", calOnly},
+		{"cpu", "慢CPU (cpu)", calOnly || !cpuDetectable},
+		{"npu_bubble", "Bubble (npu_bubble)", calOnly},
 	}
 
 	for _, cat := range categories {

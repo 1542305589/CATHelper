@@ -204,9 +204,12 @@ func main() {
 
 		// 4. Get parallel topology from group_info JSON files.
 		parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
-		if len(parallels) == 0 || len(validRanks) == 0 {
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Failed to get parallel domain info or valid ranks\n")
+		if len(validRanks) == 0 {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Failed to get valid ranks\n")
 			os.Exit(1)
+		}
+		if len(parallels) == 0 {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: no parallel topology (group names not registered), degrading to cal-only detection\n")
 		}
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Valid ranks: %d, Parallel domains: %d\n",
 			len(validRanks), len(parallels))

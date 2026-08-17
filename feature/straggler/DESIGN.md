@@ -16,7 +16,7 @@ func (d DegradationData) AddGroup(category string, ranks []int, degradation floa
 - **Key 编码**：单卡 `strconv.Itoa(rank)`（如 `"0"`），组 `sort + strings.Join(ranks, ",")`（如 `"0,2,4"`）
 - **AddGroup 去重**：已存在 key 时保留**最大**劣化值
 
-### profilingdataparse
+### dataparse（profiling/dataparse）
 ```go
 func DataParsing(folderPath string)                          // 入口：遍历 .db → StartProcess
 func StartProcess(dbFiles []string, outDir string) error     // 信号量（cap=4）+ WaitGroup
@@ -27,8 +27,11 @@ func GetStepTimesFromTASK(db *sql.DB) ([]StepTime, error)
 func TimeDiffForStep(db, xpToGroupName, stepTime) (PerformanceMetrics, error)
 func GetAvgKernelTaskDuration(db *sql.DB, stepTime StepTime) (int, error)
 func WriteResultsToCSV(outputFile string, pMS []PerformanceMetrics) error
-func queryHostUid(db *sql.DB) (string, error)                // 查询 HOST_INFO.hostUid
-func writeHostInfo(outputDir, rankStr, hostUid string)       // 写入 host_info_{N}.json
+func queryHostInfo(db *sql.DB) (hostUid, hostName string, err error) // 查询 HOST_INFO
+func queryNpuID(db *sql.DB) (int, error)                     // 查询 NPU_INFO.id
+func readGroupInfo(db, rankStr, outputDir) (map[string]interface{}, map[string]string, error) // META_DATA → group_info JSON + xpToGroupName
+func writeHostInfo(outputDir, rankStr, hostUid, hostName string) // 写入 host_info_{N}.json
+func writeNpuInfo(outputDir, rankStr string, npuID int)      // 写入 npu_info_{N}.json
 func CalculateMean(values []int) (int, error)
 func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err error)
 ```
@@ -37,31 +40,38 @@ func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err erro
 1. `sql.Open("sqlite", path+"?mode=ro")` + WAL 模式
 2. 创建 3 个索引（IF NOT EXISTS，幂等）
 3. `extractGlobalRankFromFilename` → rank 字符串
-4. `queryHostUid` → 查询 `SELECT hostUid FROM HOST_INFO LIMIT 1`（识别卡所属物理节点）
-5. `readGroupInfo` → META_DATA → group_info JSON（sync.Once 写入）+ xpToGroupName 映射
-6. `GetAllStepTimes` → 合并为单 step（minStart → maxEnd）
-7. `TimeDiffForStep` → 计算所有指标
-8. `WriteResultsToCSV` → 单行 CSV
-9. `writeHostInfo` → 写入 `op_metric/host_info_{N}.json`（rank → hostUid 映射）
+4. `queryHostInfo` → `SELECT hostUid, hostName FROM HOST_INFO LIMIT 1`（识别卡所属物理节点与节点名）
+5. `queryNpuID` → `SELECT id FROM NPU_INFO LIMIT 1`（NPU 编号，节点聚合输出用）
+6. `readGroupInfo` → META_DATA `parallel_group_info` → group_info JSON（sync.Once 写入）+ xpToGroupName 映射（短名 → STRING_IDS 组名字符串，如 `"tp" → "group_name_3"`）
+7. `GetAllStepTimes` → 合并为单 step（minStart → maxEnd）
+8. `TimeDiffForStep` → 计算所有指标
+9. `WriteResultsToCSV` → 单行 CSV
+10. `writeHostInfo` → 写入 `op_metric/host_info_{N}.json`（rank → hostUid/hostName 映射）
+11. `writeNpuInfo` → 写入 `op_metric/npu_info_{N}.json`（rank → NPU id）
 
 **Step 时间降级链**：
 1. `STEP_TIME` 表 → `SELECT id, startNs, endNs ORDER BY id DESC` → 反转升序
-2. `TASK` + `STRING_IDS` + `MSTX_EVENTS` → 正则匹配 `step \d+` → 查 connectionId → 查 TASK 时间
+2. `TASK` + `STRING_IDS` + `MSTX_EVENTS` → 正则匹配 `^step\s+\d+$` → 查 connectionId → 查 TASK 时间
 3. 哨兵：`{ID: -1, StartNs: math.MinInt, EndNs: math.MaxInt}`
 
 **指标计算（TimeDiffForStep）**：
 | 指标 | 计算方式 |
 |------|---------|
-| ZP_Host | 所有通信算子和 KERNEL_AICORE 的 `HEndNs - HStartNs` 均值（HStartNs > 0 && HEndNs ≥ HStartNs） |
-| ZP_Bubble | 所有 `OpStartNs - HostEndNs > 0` 的正值均值 |
+| ZP_Host | 所有通信算子和 KERNEL_AICORE 的 `HEndNs - HStartNs` 均值（HStartNs > 0 && HEndNs ≥ HStartNs）；空 → -99999 |
+| ZP_Bubble | 所有 `OpStartNs - HostEndNs > 0` 的正值均值（HEndNs > 0）；空 → -99999 |
 | ZP_Duration | 收集所有通信区间 → `mergeIntervalsSimple` 合并重叠 → 总跨度 |
 | ZP_Device | `stepDuration - ZP_Duration`（钳位到 0） |
 | ZP_Kernel | `SELECT AVG(endNs - startNs) FROM TASK ... WHERE KERNEL_AICORE` |
 | 各域 Duration/Count | 域内算子 → `CalculateMidMeanPair`（去 min/max 后均值） |
 
+**通信组 Duration 契约（{domain}_Duration 列）**：
+- COMMUNICATION_OP.groupName 是 STRING_IDS 中组名字符串的 id；`parallel_group_info` 的**顶层 key**（长名，如 `"group_name_3"`）即 STRING_IDS 里的组名字符串，而每项的 `group_name` 字段是**短名**（如 `"tp"`）
+- `xpToGroupName` 以短名为键、长名为值；`idToXp` 反向映射为 **STRING_IDS id → 短名**，CSV 的域列以短名命名（`tp_Duration, tp_Count`），与 detector 的域常量一致
+- 某域在 STRING_IDS/COMMUNICATION_OP 中无算子 → 该域无列（正常，无数据可测）
+
 **三种数据缺失场景**：
 - `xpToGroupName` 为空 → 全部填充 -99999，ZP_Kernel/DataLoader 独立查询
-- `groupNameIds` 为空 → 通信指标填充 -99999
+- `groupNameIds` 为空（组名不在 STRING_IDS）→ 通信指标填充 -99999
 - `deviceOps` 为空 → 除 ZP_Host 外的指标填充 -99999，ZP_Host 回退用 KERNEL_AICORE Host 耗时
 
 **区间合并（mergeIntervalsSimple）**：按 Start 排序 → 遍历合并重叠区间 → 累加非重叠部分总长。
@@ -69,24 +79,25 @@ func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err erro
 **并发控制**：
 ```go
 var csvMutex sync.Mutex                    // CSV 写入全局锁
-var fileWriteOnce map[string]*sync.Once    // group_info JSON 去重
+var fileWriteOnce map[string]*sync.Once    // group_info/host_info/npu_info JSON 去重
 var fileWriteOnceMu sync.Mutex             // 保护 fileWriteOnce map
 ```
 - DB 并发：`make(chan struct{}, 4)` 信号量
 - CSV：全局 Mutex（每 goroutine 写不同文件，但保留锁保安全）
-- group_info JSON：`sync.Once` 每文件名（所有卡拓扑相同，只需写一次）
-- host_info JSON：`sync.Once` 每文件名（同机卡 hostUid 相同，只需写一次）
+- group_info/host_info/npu_info JSON：`sync.Once` 每文件名（同机卡拓扑/hostUid/NPU id 相同，只需写一次）
 
-### nodelevel
+### detector（profiling/detector）
 ```go
-func GetCurDetectionInfo(jobPath string) (parallels map[string][][]int, validRanks []int)
-func GetCurJobLastStepData(ranks []int) map[string]map[int]float64
-func GetHostUidMapping(jobPath string, ranks []int) map[int]string  // 读取 host_info_*.json
+func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int)   // parallels + validRanks
+func GetCurJobLastStepData(ranks []int) map[string]map[int]float64    // CSV → 单快照
+func GetHostUidMapping(jobPath string, ranks []int) map[int]string    // 读取 host_info_*.json
 func DelimitDetection(StepData map[string]map[int]float64, parallels map[string][][]int, validRanks []int) config.DegradationData
 func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, [][]int)
+func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[int]map[string]float64   // --debug-output 用
+func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][][]int) map[string]map[string]float64
 ```
 
-**GetCurDetectionInfo**：遍历 `op_metric/group_info_*.json`，收集所有 rank ID 和域名称，对每个域调用 `getDetectionJobParallelInfo` 提取组，过滤 < 2 卡的组，返回 parallels 映射和排序 validRanks。
+**GetCurDetectionInfo**：遍历 `op_metric/group_info_*.json`，收集所有 rank ID 和域名称（`group_name` 字段，短名），对每个域调用 `getDetectionJobParallelInfo` 提取组，过滤 < 2 卡的组，返回 parallels 映射和排序 validRanks。**无 group_info 文件（组名未注册）时**：回退从 `global_rank_*.csv` 文件名收集 rank（该文件无条件写），返回空 parallels → 主流程降级 cal-only。
 
 **GetCurJobLastStepData**：对每个 rank 读 CSV → `map[列名][]float64` → 取倒数第二行（n > 1 时 n-2）→ 跳过 -99999 → 返回 `map[指标名]map[rank]值`。
 
@@ -94,7 +105,7 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
 
 **并行域去重**：`checkRankParallelExist` 通过 `parallelInfo map[int]map[int]bool` 追踪每个 rank 已归属的组，避免同域组重复。
 
-### 检测逻辑
+## 检测逻辑
 
 #### 慢计算（getSlowCalculateRanks → detCalForOneGroup）
 ```
@@ -105,6 +116,7 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
   2. 收集非零值，要求 >= minRanksInGroup(2)
   3. kmeans 比例检测 → AddSingle("cal", rank, degradation)
 ```
+主检测组无可用并行域（组名未注册/仅未知域如 mc2）时，GetCalDetectionGroup 降级为**全体 rank 一组**（default_group），cal 仍可检测；comm/CPU/Bubble 无数据保持静默。
 
 #### 慢通信（detectionAllCommunicationParallel → HomogenizationForSlowCommunication）
 ```
@@ -140,7 +152,7 @@ for npuID, value := range ZP_Bubble:
     if value > 0 && value < 5000:
         AddSingle("npu_bubble", npuID, value)
 ```
-注：使用硬编码 `< 5000`，非 config 中的 `zpBubbleAbnormalBoundary = 50000`。
+注：阈值硬编码 `< 5000`；config 中无对应参数（`zpBubbleAbnormalBoundary` 已移除）。
 
 ### clustering（共享 kmeans 比例检测）
 ```go
@@ -156,7 +168,7 @@ func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
 1. 过滤值 <= 0；不足 2 个 → 无异常退出
 2. Z-score 标准化（std≈0 → 强制 1）
 3. 肘部法选 k（K=2..min(n,10)，取 inertia 二阶差分最大）
-4. kmeans++ 初始化（首个质心 = data[0]，后续 D² 加权采样）
+4. kmeans++ 初始化（首个质心 = data[0]，后续 D² 加权采样，固定种子 kmeansSeed=42）
 5. Lloyd 迭代（≤300 轮，空簇处理，收敛 1e-9）
 6. 基线簇 = 方向极值簇（"max"→最小均值簇，"min"→最大均值簇）
 7. 簇均值比 > threshold → 异常簇
@@ -165,6 +177,8 @@ func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
 8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
 9. 返回最深异常簇；degradation = 对应簇比例
 ```
+
+固定种子（kmeansSeed=42）：kmeans++ 采样确定性，同一数据多次运行结果一致。
 
 时间复杂度：kmeans O(n·k·iter)（n ≤ 64，k ≤ 10，iter ≤ 300），递归深度 ≤ 10；空间复杂度 O(n)。
 
@@ -182,7 +196,7 @@ func ReadFile(filePath string) ([]byte, error)
 2. cal / npu_bubble（逐 rank）→ 按 hostname 分组、按 NPU id 聚合 → `node_result[].npu[]`，只含有异常的节点/NPU
 3. cpu（逐 rank，节点级）→ `node_result[].cpu`（节点内 rank 值相同，取共享值）
 4. comm → 用 `findDomainForRanks` 解析域名 → `comm_domain_result[域名][组key] = score`
-5. stdout 逐类摘要（慢计算/慢通信/慢CPU/Bubble，单节点跳过慢CPU）；JSON 由 main.go 合并写入运行目录 `straggler_output.json`（`{"kpi": ..., "profiler": ...}`）
+5. stdout 逐类摘要（慢计算/慢通信/慢CPU/Bubble，单节点跳过慢CPU）；JSON 由 main.go 合并写入运行目录 `straggler_output.json`（`{"kpi": ..., "profiler": ...}`）。`--debug-output` 时传入 `DebugInfo{ValidRanks, RankScores, CommScores}`，输出全部节点/NPU（含正常）及其诊断分
 
 ### report
 ```go
@@ -214,7 +228,7 @@ type CommunicationOp struct {
     HEndNs        int   // Host 侧结束时间
     Count         int
     ConnectionID  int   // 设备-主机关联键
-    DomainID      int   // 并行域 ID（STRING_IDS ID）
+    DomainID      int   // 并行域 ID（COMMUNICATION_OP.groupName，即 STRING_IDS 中组名字符串的 id）
 }
 
 type PerformanceMetrics struct {
@@ -223,12 +237,12 @@ type PerformanceMetrics struct {
     StepDuration int            // maxEndNs - minStartNs
     ZPDevice     int            // 非通信时间 = stepDuration - ZP_Duration（钳位到 0）
     ZPDuration   int            // 总通信时间（合并区间后）
-    ZPHost       int            // 平均 Host 耗时
-    ZPBubble     int            // 平均 Bubble 时间
-    ZPCount      int            // 未使用
+    ZPHost       int            // 平均 Host 耗时（-99999 表示缺失）
+    ZPBubble     int            // 平均 Bubble 时间（-99999 表示缺失）
+    ZPCount      int            // 未使用（恒为 -99999）
     ZPKernel     int            // 平均 KERNEL_AICORE 耗时
     DataLoader   int            // DataLoader 耗时
-    Durations    map[string]int // 各域通信耗时（按 xp 名称）
+    Durations    map[string]int // 各域通信耗时（按短名，如 "tp"）
     Counts       map[string]int // 各域通信计数
 }
 
@@ -241,10 +255,16 @@ type HostOp struct  { StartNs, EndNs int }
 
 ```sql
 -- 物理节点标识
-SELECT hostUid FROM HOST_INFO LIMIT 1
+SELECT hostUid, hostName FROM HOST_INFO LIMIT 1
+
+-- NPU 编号（节点聚合输出）
+SELECT id FROM NPU_INFO LIMIT 1
 
 -- 并行域配置
 SELECT value FROM META_DATA WHERE name = 'parallel_group_info'
+
+-- 组名字符串 → STRING_IDS id
+SELECT value, id FROM STRING_IDS WHERE value IN (?, ...)
 
 -- 通信算子（step 时间窗口内 + 指定 groupName ID）
 SELECT opName, startNs, endNs, connectionId, count, _rowid_, groupName
@@ -291,6 +311,8 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 | DataLoader 查询失败 | DataLoader = 0 |
 | Kernel 查询无数据 | ZP_Kernel = 0 |
 | 通信耗时 > step 总耗时 | ZP_Device 钳位到 0 + 警告 |
+| 某域在 STRING_IDS/COMMUNICATION_OP 无算子 | 该域无 Durations 列（不参与慢通信检测） |
+| 组名未注册（无并行拓扑） | 降级 cal-only：validRanks 从 global_rank_*.csv 收集，全体 rank 一组检测慢计算；comm/CPU/Bubble 无数据不检测 |
 
 ## 日志前缀
 
