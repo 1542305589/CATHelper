@@ -45,6 +45,22 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 		}
 	}
 
+	// No parallel topology (group names not registered in the profiler data):
+	// fall back to collecting ranks from global_rank_*.csv files (written
+	// unconditionally) so that cal-only detection can still run.
+	if len(rankSet) == 0 {
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, "global_rank_") && strings.HasSuffix(name, ".csv") {
+				trimmed := strings.TrimPrefix(name, "global_rank_")
+				trimmed = strings.TrimSuffix(trimmed, ".csv")
+				if rank, err := strconv.Atoi(trimmed); err == nil {
+					rankSet[rank] = true
+				}
+			}
+		}
+	}
+
 	if len(rankSet) == 0 {
 		return nil, nil
 	}
