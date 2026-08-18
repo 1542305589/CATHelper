@@ -206,7 +206,7 @@ type DetectionConfig struct {
 	MinSamplesForTrim    int     // minimum samples to apply trimming, default 4
 
 	// Space dimension
-	SpaceRatioThreshold float64 // kmeans cluster ratio threshold (cluster mean / baseline mean), default 2.0
+	SpaceRatioThreshold float64 // kmeans cluster ratio threshold (score = cluster mean / baseline mean), default 2.0; max direction flags score > threshold, min direction flags score < 1/threshold
 
 	// Debug
 	EnableDebug bool // --debug-output: include all cards × all metrics in the result

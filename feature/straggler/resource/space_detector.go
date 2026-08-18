@@ -98,21 +98,22 @@ func detectSpaceAnomalies(
 				// run and the flagged COUNT picks the anomaly side.
 				//
 				//   α1 = max-direction flags (baseline = min-mean cluster,
-				//        flags the clusters above it beyond the ratio threshold)
+				//        flags the clusters above it: score > SpaceRatioThreshold)
 				//   α2 = min-direction flags (baseline = max-mean cluster,
-				//        flags the clusters below it beyond the threshold)
+				//        flags the clusters below it: score < 1/SpaceRatioThreshold)
 				//
 				// The side flagging FEWER cards is the minority = the anomaly:
 				// a single card deviating from the majority mode is a straggler,
 				// a majority deviating is just the normal mode. Equal counts
 				// (incl. 0 == 0 healthy) → nothing flagged.
 				//
-				// Every participating card gets its REAL top-level cluster ratio
-				// from the winning direction's Diagnose: baseline members are
-				// exactly 1.0, other non-flagged clusters keep their real ratio
-				// (e.g. 1.2), flagged cards their ratio (> threshold). The FLAG
-				// comes from the recursive Detect decision; Diagnose only fills
-				// the score. Absent / NaN cards stay 0 — no ratio.
+				// Score is UNIFIED for both directions — cluster mean / baseline
+				// mean, from the winning direction's Diagnose: baseline members
+				// are exactly 1.0, other non-flagged clusters keep their real
+				// ratio (e.g. 1.2 on the high side, 0.9 on the low side),
+				// flagged cards their ratio (max side > 2.0, min side < 0.5).
+				// The FLAG comes from the recursive Detect decision; Diagnose
+				// only fills the score. Absent / NaN cards stay 0 — no ratio.
 				posPresent, posVals := filterPositive(present, presentVals)
 				if len(posVals) < 2 {
 					for _, cid := range nodeCardIDs {
@@ -260,10 +261,11 @@ func aggregateScores(space *SpaceDetectionResult, cardIDs []int, cfg DetectionCo
 				score = float64(flaggedCount) / float64(len(zscores))
 				abnormal = score > 0.5
 			} else {
-				// Cluster: score = the real cluster ratio (baseline members are
-				// exactly 1.0, other non-flagged clusters keep their real ratio
-				// e.g. 1.2); abnormal follows the recursive Detect flag, not the
-				// raw ratio.
+				// Cluster: score = the real cluster ratio, unified as cluster
+				// mean / baseline mean (baseline members are exactly 1.0, other
+				// non-flagged clusters keep their real ratio, e.g. 1.2 on the
+				// high side / 0.9 on the low side); abnormal follows the
+				// recursive Detect flag, not the raw ratio.
 				score = sum / float64(len(zscores))
 				abnormal = float64(flaggedCount)/float64(len(zscores)) > 0.5
 			}

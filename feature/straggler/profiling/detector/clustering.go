@@ -23,7 +23,9 @@ import (
 //
 // Returns:
 //   - abnormal rank IDs
-//   - corresponding degradation scores (value / baseline for "max", baseline / value for "min")
+//   - corresponding degradation scores, unified as cluster mean / baseline
+//     mean for both directions ("max": > 1, worse when larger; "min": < 1,
+//     worse when smaller)
 //
 // It shares the KPI resource space detector's clustering algorithm — kmeans
 // with the direction extreme cluster as baseline and cluster-mean-ratio
