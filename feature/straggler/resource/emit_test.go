@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -33,19 +34,15 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	defer srv.Close()
 
 	result := &DetectionResult{
-		Debug: true, // debug-style result: lists every card with its abnormal flag
-		Metrics: []MetricAnomaly{
-			{Metric: MetricTemp, Method: MethodCluster, Cards: []AnomalousCard{
-				{Node: noneNode, CardID: 3, Score: 8.7, Abnormal: true},
-				{Node: noneNode, CardID: 1, Score: 5.1, Abnormal: true},
-			}},
-			{Metric: MetricAICoreUtil, Method: MethodCluster, Cards: []AnomalousCard{
-				{Node: noneNode, CardID: 7, Score: 3.2, Abnormal: true},
-			}},
-			// A normal card (debug-style entry, abnormal=false) is skipped.
-			{Metric: MetricTXBandwidth, Method: MethodCluster, Cards: []AnomalousCard{
-				{Node: noneNode, CardID: 2, Score: 1.0, Abnormal: false},
-			}},
+		Results: []CardDetectionSummary{
+			{CardID: 3, Quadrant: QuadConfirmedAnomaly, AnomalyCategory: CatCompute, CompositeScore: 8.7},
+			{CardID: 1, Quadrant: QuadEarlyDegradation, AnomalyCategory: CatCompute, CompositeScore: 5.1},
+			{CardID: 2, Quadrant: QuadNormal, AnomalyCategory: CatNone, CompositeScore: 0}, // skipped
+			{CardID: 7, Quadrant: QuadIndividualVariance, AnomalyCategory: CatCommunication, CompositeScore: 3.2},
+		},
+		RootCauses: []RootCauseResult{
+			{CardID: 3, Category: RcThermalThrottle, Confidence: ConfHigh, Suggestion: "check fan"},
+			{CardID: 1, Category: RcStraggler, Confidence: ConfMedium},
 		},
 	}
 	EmitToFaultSub(result, EmitConfig{URL: srv.URL, Timeout: 0})
@@ -53,40 +50,37 @@ func TestEmitToFaultSubConfirmsCritical(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(events) != 3 {
-		t.Fatalf("expected 3 events (3 anomalous, normal skipped), got %d", len(events))
+		t.Fatalf("expected 3 events (3 anomalous, 1 normal skipped), got %d", len(events))
 	}
-	// Card 3 → critical (worst space score 8.7 >= 5).
-	ev3 := findEmit(events, noneNode+":3")
+	// Card 3 → critical + thermal_throttle root cause.
+	ev3 := findEmit(events, "3")
 	if ev3 == nil {
 		t.Fatal("missing card 3 event")
 	}
 	if ev3.Type != "straggler_detected" || ev3.Severity != "critical" {
 		t.Errorf("card3 event wrong: %+v", ev3)
 	}
-	if ev3.Detail["temp"] != "8.7" {
+	if ev3.Detail["root_cause"] != "thermal_throttle" || ev3.Detail["quadrant"] != "confirmed_anomaly" {
 		t.Errorf("card3 detail wrong: %+v", ev3.Detail)
 	}
-	// Card 1 → critical (worst 5.1 >= 5).
-	ev1 := findEmit(events, noneNode+":1")
-	if ev1 == nil || ev1.Severity != "critical" {
-		t.Errorf("card1 should be critical (5.1): %+v", ev1)
+	if ev3.Detail["composite_score"] != strconv.FormatFloat(8.7, 'f', -1, 64) {
+		t.Errorf("composite_score wrong: %+v", ev3.Detail)
 	}
-	// Card 7 → warning (worst 3.2 < 5).
-	ev7 := findEmit(events, noneNode+":7")
-	if ev7 == nil || ev7.Severity != "warning" {
-		t.Errorf("card7 should be warning (3.2): %+v", ev7)
+	// Card 1 → warning (early degradation).
+	ev1 := findEmit(events, "1")
+	if ev1 == nil || ev1.Severity != "warning" {
+		t.Errorf("card1 should be warning: %+v", ev1)
 	}
-	// Normal card 2 must not be emitted.
-	if findEmit(events, noneNode+":2") != nil {
-		t.Errorf("normal card 2 should not be emitted")
+	// Card 7 → info (individual variance).
+	ev7 := findEmit(events, "7")
+	if ev7 == nil || ev7.Severity != "info" {
+		t.Errorf("card7 should be info: %+v", ev7)
 	}
 }
 
 func TestEmitToFaultSubEmptyURLNoOp(t *testing.T) {
 	// No URL configured → no panic, no requests.
-	EmitToFaultSub(&DetectionResult{Metrics: []MetricAnomaly{
-		{Metric: MetricTemp, Cards: []AnomalousCard{{Node: noneNode, CardID: 0, Score: 2, Abnormal: true}}},
-	}}, EmitConfig{URL: ""})
+	EmitToFaultSub(&DetectionResult{Results: []CardDetectionSummary{{CardID: 0, Quadrant: QuadConfirmedAnomaly}}}, EmitConfig{URL: ""})
 	EmitToFaultSub(nil, EmitConfig{URL: "http://localhost:9101"})
 }
 
@@ -97,9 +91,7 @@ func TestEmitToFaultSubServerDown(t *testing.T) {
 	}))
 	defer srv.Close()
 	result := &DetectionResult{
-		Metrics: []MetricAnomaly{
-			{Metric: MetricTemp, Cards: []AnomalousCard{{Node: noneNode, CardID: 0, Score: 9, Abnormal: true}}},
-		},
+		Results: []CardDetectionSummary{{CardID: 0, Quadrant: QuadConfirmedAnomaly, AnomalyCategory: CatCompute, CompositeScore: 9}},
 	}
 	EmitToFaultSub(result, EmitConfig{URL: srv.URL, Timeout: 0})
 	// No panic, function returns. (Log lines go to stderr.)
