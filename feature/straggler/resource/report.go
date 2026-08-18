@@ -195,28 +195,8 @@ func WriteReport(result *DetectionResult) string {
 			}
 			parts = append(parts, fmt.Sprintf("node%s:card%d(%.2f)", c.Node, c.CardID, c.Score))
 		}
-	}
-
-	// Early degradation (watch list).
-	earlyCards := filterByQuadrant(result.Results, QuadEarlyDegradation)
-	if len(earlyCards) > 0 {
-		b.WriteString("================================================================================\n")
-		b.WriteString("  早期劣化（关注列表）\n")
-		b.WriteString("================================================================================\n\n")
-		for _, s := range earlyCards {
-			fmt.Fprintf(&b, "  Card %d | score=%.2f\n", s.CardID, s.CompositeScore)
-			for _, d := range s.AnomalyDetails {
-				if d.TimeAbnormal {
-					fmt.Fprintf(&b, "    %-20s time_z=%.1f current=%.1f baseline=%.1f±%.1f\n",
-						d.Metric, d.TimeScore, d.CurrentMean, d.BaselineMean, d.BaselineStd)
-				}
-			}
-			if len(s.TrendFindings) > 0 {
-				for _, t := range s.TrendFindings {
-					fmt.Fprintf(&b, "    [趋势] %s (R²=%.2f)\n", t.Desc, t.RSquared)
-				}
-			}
-			b.WriteString("\n")
+		if len(parts) == 0 {
+			continue
 		}
 		if !printed {
 			b.WriteString("================================================================================\n")

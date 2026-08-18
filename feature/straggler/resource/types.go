@@ -7,11 +7,6 @@
 //   fusion → root-cause bounding → JSON + text report
 package resource
 
-import (
-	"math"
-	"sort"
-)
-
 // =============================================================================
 // Raw Data Types
 // =============================================================================
@@ -134,50 +129,30 @@ type DetectionMethod string
 
 const (
 	MethodAbsolute DetectionMethod = "absolute" // > threshold → anomaly
-	MethodMAD      DetectionMethod = "mad"      // robust median/MAD Z-score
+	MethodCluster  DetectionMethod = "cluster"  // majority-mode clustering
 )
 
 // MetricMeta describes the detection parameters for a single metric.
 type MetricMeta struct {
 	Name         MetricName
 	Category     AnomalyCategory
-	Direction    AnomalyDirection
-	SpaceMethod  DetectionMethod
-	TimeMethod   DetectionMethod
+	Method       DetectionMethod
 	AbsThreshold float64 // for MethodAbsolute
 }
 
 // MetricMetaRegistry maps each metric to its meta-information.
 var MetricMetaRegistry = map[MetricName]MetricMeta{
-	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodZScore, TimeMethod: MethodMAD},
-	MetricPower:          {Name: MetricPower, Category: CatCompute, Direction: DirHigh, SpaceMethod: MethodZScore, TimeMethod: MethodMAD},
-	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodDirect, TimeMethod: MethodMAD},
-	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodMAD},
-	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodMAD},
-	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodZScore},
-	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Direction: DirLow, SpaceMethod: MethodZScore, TimeMethod: MethodZScore},
-	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Direction: DirHigh, SpaceMethod: MethodAbsolute, AbsThreshold: 0, TimeMethod: MethodZScore},
-}
-
-// =============================================================================
-// Baseline
-// =============================================================================
-
-// CardBaseline holds a single card's historical distribution for one metric.
-type CardBaseline struct {
-	CardID int
-	Metric MetricName
-	Mean   float64
-	StdDev float64
-	Median float64 // robust center (50th percentile)
-	Mad    float64 // robust scale: median absolute deviation
-	P50    float64
-	P95    float64
-	P99    float64
-	N      int
+	MetricTemp:           {Name: MetricTemp, Category: CatCompute, Method: MethodCluster},
+	MetricPower:          {Name: MetricPower, Category: CatCompute, Method: MethodCluster},
+	MetricAICoreFreq:     {Name: MetricAICoreFreq, Category: CatCompute, Method: MethodCluster},
+	MetricAICoreUtil:     {Name: MetricAICoreUtil, Category: CatCompute, Method: MethodCluster},
+	MetricHBMBandwidthUtil:        {Name: MetricHBMBandwidthUtil, Category: CatCompute, Method: MethodCluster},
+	MetricHBMUtil:         {Name: MetricHBMUtil, Category: CatCompute, Method: MethodCluster},
+	MetricTXBandwidth:    {Name: MetricTXBandwidth, Category: CatCommunication, Method: MethodCluster},
+	MetricRXPfcPkt:       {Name: MetricRXPfcPkt, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocETxErrPkt:   {Name: MetricRocETxErrPkt, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocEOutOfOrder: {Name: MetricRocEOutOfOrder, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
+	MetricRocENewPktRty:  {Name: MetricRocENewPktRty, Category: CatCommunication, Method: MethodAbsolute, AbsThreshold: 0},
 }
 
 // =============================================================================
@@ -197,17 +172,10 @@ const (
 // on one card (internal detection detail; the output groups anomalies by
 // metric, see MetricAnomaly).
 type MetricAnomalyDetail struct {
-	Metric        MetricName `json:"metric"`
-	SpaceScore    float64    `json:"space_score"`
-	TimeScore     float64    `json:"time_score"`
-	FusionScore   float64    `json:"fusion_score"`
-	SpaceAbnormal bool       `json:"space_abnormal"`
-	TimeAbnormal  bool       `json:"time_abnormal"`
-	Quadrant      Quadrant   `json:"quadrant"`
-	CurrentMean   float64    `json:"current_mean"`
-	BaselineMean  float64    `json:"baseline_mean,omitempty"`
-	BaselineStd   float64    `json:"baseline_std,omitempty"`
-	PeerMean      float64    `json:"peer_mean,omitempty"`
+	Metric        MetricName      `json:"metric"`
+	Score    float64         `json:"score"`
+	Abnormal bool            `json:"abnormal,omitempty"`
+	Method   DetectionMethod `json:"method"`
 }
 
 // AnomalousCard is one card anomalous for a metric, with its space degradation
@@ -293,101 +261,7 @@ type SpaceDetectionResult struct {
 // Helpers
 // =============================================================================
 
-// MeanStd calculates the mean and standard deviation of a float64 slice.
-func MeanStd(values []float64) (mean, std float64) {
-	if len(values) == 0 {
-		return 0, 0
-	}
-	n := float64(len(values))
-	var sum float64
-	for _, v := range values {
-		sum += v
-	}
-	mean = sum / n
-	if len(values) < 2 {
-		return mean, 0
-	}
-	var sqSum float64
-	for _, v := range values {
-		d := v - mean
-		sqSum += d * d
-	}
-	std = math.Sqrt(sqSum / (n - 1))
-	return
-}
-
-// MinMax returns the min and max of a float64 slice.
-func MinMax(values []float64) (min, max float64) {
-	if len(values) == 0 {
-		return 0, 0
-	}
-	min, max = values[0], values[0]
-	for _, v := range values[1:] {
-		if v < min {
-			min = v
-		}
-		if v > max {
-			max = v
-		}
-	}
-	return
-}
-
-// Percentile calculates the p-th percentile (0..1) of sorted values.
-func Percentile(sorted []float64, p float64) float64 {
-	if len(sorted) == 0 {
-		return 0
-	}
-	if p <= 0 {
-		return sorted[0]
-	}
-	if p >= 1 {
-		return sorted[len(sorted)-1]
-	}
-	k := p * float64(len(sorted)-1)
-	f := math.Floor(k)
-	c := math.Ceil(k)
-	if f == c {
-		return sorted[int(k)]
-	}
-	return sorted[int(f)]*(c-k) + sorted[int(c)]*(k-f)
-}
-
-// madToStdFactor converts MAD to a standard-deviation-like scale. For normal
-// data, MAD ≈ 0.6745σ, so MAD × 1.4826 ≈ σ. This keeps a robust Z-score on
-// the same scale as the classic Z-score, so thresholds stay comparable.
-const madToStdFactor = 1.4826
-
-// Median returns the 50th percentile (median) of values. Copies and sorts.
-func Median(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	sorted := make([]float64, len(values))
-	copy(sorted, values)
-	sort.Float64s(sorted)
-	return Percentile(sorted, 0.50)
-}
-
-// Mad returns the median absolute deviation of values: median(|v - median(v)|).
-func Mad(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	med := Median(values)
-	devs := make([]float64, len(values))
-	for i, v := range values {
-		devs[i] = math.Abs(v - med)
-	}
-	return Median(devs)
-}
-
-// HasConfirmedAnomaly reports whether any card has confirmed (dual-dimension) anomaly.
-func HasConfirmedAnomaly(summaries []CardDetectionSummary) bool {
-	for _, s := range summaries {
-		if s.Quadrant == QuadConfirmedAnomaly {
-			return true
-		}
-	}
-	return false
+// HasAnomaly reports whether the result contains any anomalous card.
+func HasAnomaly(result *DetectionResult) bool {
+	return result != nil && result.Summary.Anomalies > 0
 }

@@ -52,8 +52,10 @@
 `--kpi-path` 传一个**目录**，内含多个每节点 CSV + 固定的 `node_config.json`（与 JSONL 多节点布局一致）：
 
 ```
-timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL,NPU_CARD_HBM_BANDWIDTH_UTIL,NPU_CARD_HBM_UTIL,NPU_TX_BANDWIDTH,NPU_RX_PFC_PKT,NPU_ROCE_TX_ERR_PKT,NPU_ROCE_OUT_OF_ORDER,NPU_ROCE_NEW_PKT_RTY,NPU_NIC_RX_ALL_PKG,CPU_average
-1784547926,"{""0"":1628,...,""7"":1688}","{""0"":47,...,""7"":50}",...,"{""cpu1"":""4.26"",...}"
+{dir}/
+├── node-a.csv               # 每节点一个 CSV，单元格为平铺 {cardID: value}
+├── node-b.csv
+└── node_config.json         # {文件名: {node: 节点名, cards: [实际使用卡号]}}
 ```
 
 每个 CSV 的指标单元格为**平铺** `{cardID: value}`，card ID 在**节点内**从 0 编号；`node_config.json` 的 `cards` 之外的卡被过滤。单文件 `ParseCSV`（平铺 → 节点 `"none"`，保留嵌套 JSON 单元格解析）仅内部/测试用，CLI 主路径走目录方式。
@@ -68,7 +70,7 @@ timestamp,NPU_CARD_POWER,NPU_CARD_TEMP,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `NPU_CARD_AICORE_FREQ` | 每卡 AI Core 频率 | MHz | JSON dict[card→float] |
 | `NPU_CARD_AICORE_UTIL` | 每卡 AI Core 利用率 | % | JSON dict[card→float] |
 | `NPU_CARD_HBM_BANDWIDTH_UTIL` | 每卡 HBM 带宽使用率 | % | JSON dict[card→float] |
-| `NPU_CARD_HBM_UTIL` | 每卡 HBM 内存使用率（仅采集跟踪，不参与根因规则） | % | JSON dict[card→float] |
+| `NPU_CARD_HBM_UTIL` | 每卡 HBM 内存使用率（仅采集跟踪） | % | JSON dict[card→float] |
 | `NPU_TX_BANDWIDTH` | 每卡发送带宽 | ? | JSON dict[card→float] |
 | `NPU_RX_PFC_PKT` | 每卡接收 PFC 暂停帧 | 包数 | JSON dict[card→float] |
 | `NPU_ROCE_TX_ERR_PKT` | 每卡 RoCE 发送错误包 | 包数 | JSON dict[card→float] |
@@ -242,7 +244,15 @@ if 增量 > 0: 聚合值 = 增量
 聚合：判定用选中方向递归 Detect 的标记（Flagged 数组）；score 为选中方向的真实簇比值
 ```
 
-适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH
+适用：POWER, TEMP, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TX_BANDWIDTH（在各节点内独立检测）
+
+**设计要点**：
+- **双方向投票**：无需预判异常方向（KPI 难区分小值异常还是大值异常）——两个方向各检一次，标记数少者为异常；单卡降频、升温、冷却都能检出，多卡同向异常一起标记；多数整片偏移只是正常模式，不会被误报；无 mean/std 稀释
+- **比例阈值防误报**：簇均值比需 > 2.0，自然散布（如 54..60°C，最大比 ≈1.1）不会被当作异常
+- **极小值参与（zeroFloor）**：KPI 层在调用共享聚类前把 ≤ 0 读数钳制到 `zeroFloor=1e-3`，真实 0 是有意义的空闲/关闭读数，不再被过滤丢弃——「aicore_util 1 卡 100% 其余 0」「aicore_freq 1 卡 0MHz 其余 1800」这类单卡忙/卡死场景得以检出；钳制在资源层做，共享聚类包保持过滤 ≤0，Profiler 通信路径（缺失 rank 填 0）不受影响
+- **递归精化**：对异常簇递归到最深异常层，避免浅层聚类吞掉深层结构；更深层无异常则保持父层
+- **只判最后一点**：空间检测退化为单个分钟点判定，实时反映最新状态
+- **无历史基线**：kmeans 无需历史噪声尺度，`space_baseline_mean` / `space_scale` 恒为 0；唯一旋钮是 `SpaceRatioThreshold`（`--space-ratio-threshold`）
 
 **方法 B：IQR**
 
@@ -263,58 +273,7 @@ IQR = Q3 - Q1
 
 ### 5.2 时间维度检测（已移除）
 
-```
-对卡 c，指标 m：
-  历史基线值 B = [v_t1, v_t2, ..., v_tN]  （基线窗口内该卡所有值）
-  baseline_mean = avg(B)
-  baseline_std  = stdev(B)
-  baseline_median = median(B)
-  baseline_mad    = MAD(B) = median(|B - baseline_median|)
-
-  检测窗口内的均值 current_mean = avg(检测窗口内的值)
-  时间 Z-Score = |current_mean - baseline_mean| / baseline_std
-
-  if baseline_std == 0 → 跳过（历史无波动）
-  if 时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
-```
-
-**鲁棒 MAD 变体（temp / power / aicore_freq / aicore_util / hbm_bandwidth_util）**：
-这五个指标改用 median + MAD 构造鲁棒 Z-Score，防止基线被历史故障数据污染
-（mean 会被异常拖向异常值、std 被平方放大，导致 Z-Score 缩小而漏报）：
-
-```
-  检测窗口内的中位数 current_median = median(检测窗口内的值)
-  鲁棒时间 Z-Score = |current_median - baseline_median| / (1.4826 * baseline_mad)
-
-  if baseline_mad == 0 → 跳过（历史无波动）
-  if 鲁棒时间 Z-Score > tThreshold (默认 2.0) → 时间维度异常
-```
-
-- `1.4826 = 1/0.6745`：正态分布下 MAD ≈ 0.6745σ，使鲁棒 Z-Score 与经典
-  Z-Score 同尺度，阈值 2.0 的语义不变。
-- median 与 MAD 的崩溃点为 50%：只要基线窗口内正常数据占多数，少量故障
-  时段不会带偏鲁棒统计量（而 mean/StdDev 会被少数极端值拖走）。
-- aicore_util / hbm_bandwidth_util 在工作态占比 ≥50% 时（实际场景几乎 100%），
-  median 和 MAD 同样不会被空闲态（双峰分布的低值尾巴）污染——空闲点只占
-  ≤20% 且落在绝对偏差的上尾，碰不到偏差的中位数。因此这两个指标也采用 MAD。
-- 其余指标（含 4 个网络错误计数器、tx_bandwidth、hbm_util）仍使用经典
-  mean/std Z-Score；每指标方法由 `MetricMetaRegistry.TimeMethod` 决定。
-
-**基线防污染的前提假设**：基线窗口中大部分数据（>50%）是正常的，只有小部分
-（<50%）是异常/故障数据。MAD 的崩溃点为 50%——只要正常数据占比 >50%，median
-和 MAD 就不会被少数异常值污染。如果异常数据过半，则基线本身已失去参考意义，
-此时任何统计方法都无法可靠区分"正常"和"异常"。建议缩短基线窗口或手动剔除
-已知故障时段。
-
-**趋势增强**：对历史基线窗口 + 检测窗口的整体数据做线性回归：
-- `value = slope * timestamp + intercept`
-- 若 `slope > 0` 且 R² > 0.6：该指标在持续恶化
-- 趋势信息作为定界推理的辅助证据
-
-**基线更新策略**：
-- 初始基线：首次运行时用全部历史数据建立
-- 定期更新：每 24 小时用最近 15 天数据重建基线
-- 异常点的值不纳入基线（避免污染）
+时间维度（MAD/经典 Z-Score 自对比、趋势检测）与基线/检测窗口已在本次重构中删除：KPI 异常完全由空间维度（第 5.1 节）判定。`time_detector.go` / `baseline.go` 及相关配置参数（`MinBaselineSamples` / `BaselineHours` / `DetectionHours` / `TimeZThreshold` / `TimeWeight` / `EnableTrend` 等）均已移除。
 
 ### 5.3 指标分类：计算类 vs 通信类
 
@@ -334,44 +293,9 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 | | `ROCE_OUT_OF_ORDER` | 乱序包 | ↑ 网络质量问题 |
 | | `ROCE_NEW_PKT_RTY` | 重传包 | ↑ 网络丢包 |
 
-### 5.4 检测顺序：先计算后通信
+### 5.4 检测顺序（已简化）
 
-**因果逻辑**：计算异常 → 卡无法按时完成计算 → 在集合通信中迟到 → 通信指标也表现为异常。如果先检测通信，会把计算慢导致的通信异常误判为网络问题。
-
-```
-对每张卡：
-  ┌─────────────┐
-  │ 1. 检测计算  │  ← FREQ, AICORE_UTIL, HBM_BANDWIDTH_UTIL, HBM_UTIL, TEMP, POWER
-  └──────┬──────┘
-         │
-    ┌────┴────┐
-    │ 计算异常? │
-    └────┬────┘
-         │
-   ┌─────┴─────┐
-   │ 是         │ 否
-   ▼            ▼
-┌──────────┐  ┌─────────────┐
-│ 输出:     │  │ 2. 检测通信  │  ← TX_BANDWIDTH, ERR_PKT, PFC_PKT, RETRY, OUT_OF_ORDER
-│ 计算类异常 │  └──────┬──────┘
-│ 通信指标   │         │
-│ 标记为     │    ┌────┴────┐
-│ "可能继发" │    │ 通信异常? │
-└──────────┘    └────┬────┘
-                     │
-               ┌─────┴─────┐
-               │ 是         │ 否
-               ▼            ▼
-          ┌──────────┐  ┌──────┐
-          │ 输出:     │  │ 正常  │
-          │ 通信类异常 │  └──────┘
-          │ (独立)    │
-          └──────────┘
-```
-
-**关键规则**：
-- 计算类任一指标异常 → 该卡归类为"计算异常"，通信指标**不独立检测**（标记为"可能继发于计算异常"）
-- 计算类全部正常 → 才检测通信指标 → 通信异常可确认为**独立网络问题**
+先计算后通信的排序与"可能继发"标记已移除：每个指标独立做空间检测，输出按指标分组——某指标异常即列出该指标下异常的卡及空间 score，不做计算/通信的卡级归类。
 
 这个顺序也决定了定界规则的优先级：计算类规则优先匹配，通信类规则仅在计算正常时生效。
 
@@ -379,61 +303,7 @@ KPI 指标天然分属两个层面，且存在**因果依赖**：计算慢的卡
 
 ---
 
-## 6. 根因定界
-
-### 6.1 定界规则表
-
-基于异常指标的组合模式推断根因。规则按**先计算后通信**的顺序排列，且通信类规则仅在计算类指标正常时生效（避免将计算慢导致的继发通信异常误判为网络问题）。
-
-**计算类规则**（优先匹配）：
-
-| # | 模式 | 根因推断 | 置信度 | 建议动作 |
-|---|------|---------|--------|---------|
-| C1 | TEMP↑ + FREQ↓ | **热降频** | 高 | 检查风扇转速/风道堵塞/机房环境温度 |
-| C2 | TEMP↑ + POWER↑ + FREQ— | **散热能力不足** | 高 | 检查散热器接触/硅脂老化/风扇故障 |
-| C3 | FREQ↓ + TEMP— | **强制降频（非热）** | 中 | 检查驱动/固件的频率策略配置 |
-| C4 | POWER↓ + AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL↓ | **Straggler（卡空闲等待）** | 高 | 该卡可能在等通信/等数据，触发 Profiling 精查 |
-| C5 | AICORE_UTIL↓ + HBM_BANDWIDTH_UTIL— | **计算负载不均** | 中 | 检查数据分发策略/模型并行切分是否均衡 |
-| C6 | HBM_BANDWIDTH_UTIL↓ + AICORE_UTIL— | **内存带宽瓶颈** | 低 | 检查 HBM 访问模式/是否有大量 cache miss |
-| C7 | TEMP↑ + POWER— + FREQ— | **温度传感器漂移** | 中 | 交叉验证功率数据（真发热必伴随功率↑） |
-| C8 | 多指标同时异常（≥4个，含计算类） | **板卡综合性硬件故障** | 高 | 建议隔离该卡，安排硬件诊断/更换 |
-| C9 | 单项 TEMP↑ 孤立 | **局部热点/传感器个体差异** | 低 | 持续观察，若升级为双维异常则按 C1 处理 |
-| C10 | 单项 POWER↑ 孤立 | **功耗计量偏差** | 低 | 交叉验证：功率↑应伴随温度↑，否则可能是计量误差 |
-
-**通信类规则**（仅在计算类指标全部正常时生效）：
-
-| # | 模式 | 根因推断 | 置信度 | 建议动作 |
-|---|------|---------|--------|---------|
-| N1 | ERR_PKT↑（持续） | **网络物理链路故障** | 高 | 检查光模块/光纤/交换机端口 CRC 错误 |
-| N2 | PFC_PKT↑（持续） | **网络拥塞（PFC 风暴）** | 高 | 检查交换机 PFC 配置/队列 buffer/ECN 标记 |
-| N3 | OUT_OF_ORDER↑ + RETRY↑ | **RoCE 网络丢包乱序** | 高 | 检查 RoCE 路径 ECN 配置/DCQCN 参数 |
-| N4 | TX_BANDWIDTH↓ + AICORE_UTIL— | **通信带宽受限** | 中 | 检查网卡协商速率/PCIe 带宽/光模块型号 |
-
-> **注意**：若某卡同时命中计算类和通信类规则，以计算类为准，通信异常标记为"可能继发于计算异常"，不独立告警。
-
-### 6.2 定界实现
-
-```
-func BoundRootCause(cardID, anomalyMatrix, trends) RootCauseResult:
-    1. 检查计算类指标异常集
-    2. 若计算类有异常 → 仅匹配计算类规则 C1-C10
-       → 通信类异常标记为"可能继发于计算异常"
-    3. 若计算类全部正常 → 才匹配通信类规则 N1-N4
-    4. 按规则表优先级逐条匹配（精确匹配 + 允许额外指标）
-    5. 匹配成功 → 返回根因类别 + 置信度 + 证据 + 建议
-    6. 无匹配 → "unknown"，输出全量异常指标供人工分析
-```
-
-### 6.3 跨卡关联分析
-
-部分根因会同时影响多张卡：
-
-| 异常卡分布 | 推断 | 示例 |
-|-----------|------|------|
-| 同一物理节点的所有卡 | **服务器级故障**（散热/电源） | 节点 A 的 8 张卡温度同时升高 |
-| 同一通信域的所有卡 | **网络级故障**（交换机端口） | tp 组内 4 张卡 ERR_PKT 同时增加 |
-| 全部卡 | **任务级故障**（训练 hang） | 所有卡 UTIL↓ + POWER↓ |
-| 个别孤立卡 | **板卡级故障** | 单卡 TEMP↑ + FREQ↓ |
+## 6. 输出（根因定界与跨卡关联已移除）
 
 根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。faultsub 事件 detail 为 `{指标: score}`。
 
@@ -705,12 +575,21 @@ func Midmean(values []float64) float64
 // ==================== space_detector.go ====================
 // detectSpaceAnomalies 对最后一个聚合点执行空间 peer 对比（节点内互比）。
 func detectSpaceAnomalies(detectionRows []CSVRow, cardIDs []int, cfg DetectionConfig, nodeOf ...map[int]string) *SpaceDetectionResult
+<<<<<<< HEAD
 
 
 // ==================== report.go ====================
 // buildAnomalyMetrics 以纯空间结果按指标分组异常卡（指标优先输出）。
 func buildAnomalyMetrics(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, nodeOf map[int]string, localID map[int]int, cfg DetectionConfig) ([]MetricAnomaly, int)
 
+=======
+
+
+// ==================== report.go ====================
+// buildAnomalyMetrics 以纯空间结果按指标分组异常卡（指标优先输出）。
+func buildAnomalyMetrics(spaceDetails map[int]map[MetricName]*MetricAnomalyDetail, cardIDs []int, nodeOf map[int]string, localID map[int]int, cfg DetectionConfig) ([]MetricAnomaly, int)
+
+>>>>>>> 6d99aabd9a7b1158e71c378ac645cf1c7d188533
 // HasAnomaly 结果中是否有异常卡。
 func HasAnomaly(result *DetectionResult) bool
 

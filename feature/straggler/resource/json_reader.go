@@ -33,8 +33,8 @@ type KPISample struct {
 // aicore_freq, aicore_util, hbm_bandwidth_util, hbm_util, tx_bandwidth,
 // rx_pfc_pkt, roce_tx_err_pkt, roce_out_of_order, roce_new_pkt_rty), mapped
 // back onto the CSVRow metric dicts.
-func ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error) {
-	dates := dateRange(since, until)
+func ReadKPIFiles(dir string) (*TimeSeriesData, error) {
+	idx := newCardIndexer()
 	var rows []CSVRow
 
 	// Optional node_config.json switches the layout to multi-node: each node has

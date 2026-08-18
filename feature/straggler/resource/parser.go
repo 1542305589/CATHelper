@@ -431,19 +431,19 @@ func parseRow(rec []string, ci columnIndex, idx *cardIndexer) (CSVRow, error) {
 	}
 	row.Timestamp = ts
 
-	// Parse each metric column as JSON dict.
-	row.Power = parseMetricJSON(rec, ci.power, "NPU_CARD_POWER")
-	row.Temp = parseMetricJSON(rec, ci.temp, "NPU_CARD_TEMP")
-	row.AICoreFreq = parseMetricJSON(rec, ci.aicoreFreq, "NPU_CARD_AICORE_FREQ")
-	row.AICoreUtil = parseMetricJSON(rec, ci.aicoreUtil, "NPU_CARD_AICORE_UTIL")
-	row.HBMBandwidthUtil = parseMetricJSON(rec, ci.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL")
-	row.HBMUtil = parseMetricJSON(rec, ci.hbmUtil, "NPU_CARD_HBM_UTIL")
-	row.TXBandwidth = parseMetricJSON(rec, ci.txBandwidth, "NPU_TX_BANDWIDTH")
-	row.RXPfcPkt = parseMetricJSON(rec, ci.rxPfcPkt, "NPU_RX_PFC_PKT")
-	row.RocETxErrPkt = parseMetricJSON(rec, ci.roceTxErrPkt, "NPU_ROCE_TX_ERR_PKT")
-	row.RocEOutOfOrder = parseMetricJSON(rec, ci.roceOutOfOrder, "NPU_ROCE_OUT_OF_ORDER")
-	row.RocENewPktRty = parseMetricJSON(rec, ci.roceNewPktRty, "NPU_ROCE_NEW_PKT_RTY")
-	row.NICRxAllPkg = parseMetricJSON(rec, ci.nicRxAllPkg, "NPU_NIC_RX_ALL_PKG")
+	// Parse each metric column as JSON dict (flat or node-nested).
+	row.Power = parseMetricJSON(rec, ci.power, "NPU_CARD_POWER", idx)
+	row.Temp = parseMetricJSON(rec, ci.temp, "NPU_CARD_TEMP", idx)
+	row.AICoreFreq = parseMetricJSON(rec, ci.aicoreFreq, "NPU_CARD_AICORE_FREQ", idx)
+	row.AICoreUtil = parseMetricJSON(rec, ci.aicoreUtil, "NPU_CARD_AICORE_UTIL", idx)
+	row.HBMBandwidthUtil = parseMetricJSON(rec, ci.hbmBandwidthUtil, "NPU_CARD_HBM_BANDWIDTH_UTIL", idx)
+	row.HBMUtil = parseMetricJSON(rec, ci.hbmUtil, "NPU_CARD_HBM_UTIL", idx)
+	row.TXBandwidth = parseMetricJSON(rec, ci.txBandwidth, "NPU_TX_BANDWIDTH", idx)
+	row.RXPfcPkt = parseMetricJSON(rec, ci.rxPfcPkt, "NPU_RX_PFC_PKT", idx)
+	row.RocETxErrPkt = parseMetricJSON(rec, ci.roceTxErrPkt, "NPU_ROCE_TX_ERR_PKT", idx)
+	row.RocEOutOfOrder = parseMetricJSON(rec, ci.roceOutOfOrder, "NPU_ROCE_OUT_OF_ORDER", idx)
+	row.RocENewPktRty = parseMetricJSON(rec, ci.roceNewPktRty, "NPU_ROCE_NEW_PKT_RTY", idx)
+	row.NICRxAllPkg = parseMetricJSON(rec, ci.nicRxAllPkg, "NPU_NIC_RX_ALL_PKG", idx)
 
 	// CPU_average has string values (e.g. "4.26") so parse separately.
 	row.CPUAvg = parseCPUJSON(rec, ci.cpuAvg)
