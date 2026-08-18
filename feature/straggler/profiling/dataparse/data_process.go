@@ -60,8 +60,10 @@ func ProcessDatabase(dbFilePath string, outputDir string) error {
 		return err
 	}
 
-	// Query HOST_INFO for hostUid (identifies which physical node this card belongs to).
-	hostUid, _ := queryHostUid(db)
+	// Query HOST_INFO for hostUid (physical node id) and hostName (node name).
+	hostUid, hostName, _ := queryHostInfo(db)
+	// Query NPU_INFO for this device's NPU id.
+	npuID, _ := queryNpuID(db)
 
 	// Read parallel group info from META_DATA.
 	groupInfo, xpToGroupName, err := readGroupInfo(db, rankStr, outputDir)
@@ -103,8 +105,10 @@ func ProcessDatabase(dbFilePath string, outputDir string) error {
 		return fmt.Errorf("write CSV %s: %w", csvPath, err)
 	}
 
-	// Write host_info_{N}.json (rank → hostUid mapping for slow-CPU detection).
-	writeHostInfo(outputDir, rankStr, hostUid)
+	// Write host_info_{N}.json (rank → hostUid/hostName for slow-CPU + node output).
+	writeHostInfo(outputDir, rankStr, hostUid, hostName)
+	// Write npu_info_{N}.json (rank → NPU id for node-based output).
+	writeNpuInfo(outputDir, rankStr, npuID)
 
 	_ = groupInfo
 	return nil
@@ -155,25 +159,40 @@ func readGroupInfo(db *sql.DB, rankStr, outputDir string) (map[string]interface{
 	return data, xpToGroupName, nil
 }
 
-// queryHostUid reads the hostUid column from the HOST_INFO table. There is
-// theoretically only one record per device database. Returns empty string if
-// the table does not exist or query fails.
-func queryHostUid(db *sql.DB) (string, error) {
+// queryHostInfo reads the hostUid and hostName columns from the HOST_INFO
+// table. There is theoretically only one record per device database. Returns
+// empty strings if the table does not exist or the query fails.
+func queryHostInfo(db *sql.DB) (hostUid, hostName string, err error) {
 	exists, _ := tableExists(db, "HOST_INFO")
 	if !exists {
-		return "", fmt.Errorf("HOST_INFO table not found")
+		return "", "", fmt.Errorf("HOST_INFO table not found")
 	}
-	var hostUid string
-	err := db.QueryRow("SELECT hostUid FROM HOST_INFO LIMIT 1").Scan(&hostUid)
+	err = db.QueryRow("SELECT hostUid, hostName FROM HOST_INFO LIMIT 1").Scan(&hostUid, &hostName)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return hostUid, nil
+	return hostUid, hostName, nil
 }
 
-// writeHostInfo writes a per-rank JSON file containing the hostUid for slow-CPU
-// detection grouping. Uses sync.Once to avoid duplicate writes.
-func writeHostInfo(outputDir, rankStr, hostUid string) {
+// queryNpuID reads the id column from the NPU_INFO table (one record per
+// device database). Returns 0 if the table does not exist or the query fails.
+func queryNpuID(db *sql.DB) (int, error) {
+	exists, _ := tableExists(db, "NPU_INFO")
+	if !exists {
+		return 0, fmt.Errorf("NPU_INFO table not found")
+	}
+	var id int
+	err := db.QueryRow("SELECT id FROM NPU_INFO LIMIT 1").Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// writeHostInfo writes a per-rank JSON file containing the hostUid and
+// hostName for slow-CPU grouping and node-based output. Uses sync.Once to
+// avoid duplicate writes.
+func writeHostInfo(outputDir, rankStr, hostUid, hostName string) {
 	outDir := filepath.Join(outputDir, "op_metric")
 	os.MkdirAll(outDir, 0755)
 	jsonPath := filepath.Join(outDir, "host_info_"+rankStr+".json")
@@ -186,7 +205,28 @@ func writeHostInfo(outputDir, rankStr, hostUid string) {
 	fileWriteOnceMu.Unlock()
 
 	once.Do(func() {
-		payload := map[string]string{"rank": rankStr, "hostUid": hostUid}
+		payload := map[string]string{"rank": rankStr, "hostUid": hostUid, "hostName": hostName}
+		pretty, _ := json.MarshalIndent(payload, "", "  ")
+		os.WriteFile(jsonPath, pretty, 0644)
+	})
+}
+
+// writeNpuInfo writes a per-rank JSON file containing the NPU id for node-based
+// output. Uses sync.Once to avoid duplicate writes.
+func writeNpuInfo(outputDir, rankStr string, npuID int) {
+	outDir := filepath.Join(outputDir, "op_metric")
+	os.MkdirAll(outDir, 0755)
+	jsonPath := filepath.Join(outDir, "npu_info_"+rankStr+".json")
+
+	fileWriteOnceMu.Lock()
+	if fileWriteOnce[jsonPath] == nil {
+		fileWriteOnce[jsonPath] = &sync.Once{}
+	}
+	once := fileWriteOnce[jsonPath]
+	fileWriteOnceMu.Unlock()
+
+	once.Do(func() {
+		payload := map[string]interface{}{"rank": rankStr, "id": npuID}
 		pretty, _ := json.MarshalIndent(payload, "", "  ")
 		os.WriteFile(jsonPath, pretty, 0644)
 	})

@@ -1,10 +1,10 @@
 // Package resource implements NPU resource KPI anomaly detection using
-// time+space dual-dimension peer comparison with 15-day historical baselines.
+// space-dimension peer comparison.
 //
 // Detection pipeline:
-//   CSV parse → 1-min trimmed-mean aggregation → window split →
-//   time baseline + space detection → compute-first 2D cross-validation →
-//   root-cause bounding → JSON + text report
+//   CSV/JSONL parse → aggregation-window (10s) trimmed-mean aggregation →
+//   space detection (peer comparison, last aggregated point) → compute-first
+//   fusion → root-cause bounding → JSON + text report
 package resource
 
 import (
@@ -36,14 +36,23 @@ type CSVRow struct {
 
 // TimeSeriesData holds the complete parsed time series split into windows.
 type TimeSeriesData struct {
-	Rows    []CSVRow // aggregated rows (1 per minute after aggregation)
-	CardIDs []int    // all card IDs found in the data
+	Rows    []CSVRow // aggregated rows (1 per aggregation window)
+	CardIDs []int    // all global card IDs found in the data
 	RawRows []CSVRow // raw rows before aggregation (for counter calculations)
+	// NodeOf maps each global card ID to its node name; LocalID maps it back to
+	// the per-node card ID (0-based within the node). Flat (single-node) input
+	// assigns every card node "none" and LocalID == global ID.
+	NodeOf map[int]string
+	LocalID map[int]int
 }
 
 // =============================================================================
 // Metric Enumeration
 // =============================================================================
+
+// noneNode is the node name assigned to flat (single-node) inputs, where the
+// metric JSON is {cardID: value} without a node layer.
+const noneNode = "none"
 
 // MetricName enumerates all NPU resource metrics.
 type MetricName string
@@ -115,24 +124,15 @@ func IsCommunicationMetric(m MetricName) bool { return CommunicationMetrics[m] }
 func IsCounterMetric(m MetricName) bool { return CounterMetrics[m] }
 
 // =============================================================================
-// Metric Direction & Detection Method
+// Detection Method
 // =============================================================================
 
-// AnomalyDirection indicates whether abnormal means "too high" or "too low".
-type AnomalyDirection int
-
-const (
-	DirHigh AnomalyDirection = iota // abnormally high
-	DirLow                          // abnormally low
-)
-
 // DetectionMethod selects the statistical method for space-dimension detection.
+// The cluster method's anomaly direction is NOT pre-decided: both directions
+// are run and the side flagging fewer cards is reported (see space_detector.go).
 type DetectionMethod string
 
 const (
-	MethodZScore   DetectionMethod = "zscore"
-	MethodIQR      DetectionMethod = "iqr"
-	MethodDirect   DetectionMethod = "direct"   // direct comparison (e.g. freq)
 	MethodAbsolute DetectionMethod = "absolute" // > threshold → anomaly
 	MethodMAD      DetectionMethod = "mad"      // robust median/MAD Z-score
 )
@@ -193,32 +193,9 @@ const (
 	CatCommunication AnomalyCategory = "communication"
 )
 
-// Quadrant is the 2×2 time×space quadrant.
-type Quadrant int
-
-const (
-	QuadNormal            Quadrant = iota // both normal
-	QuadEarlyDegradation                 // time abnormal, space normal
-	QuadIndividualVariance               // space abnormal, time normal
-	QuadConfirmedAnomaly                 // both abnormal
-)
-
-func (q Quadrant) String() string {
-	switch q {
-	case QuadNormal:
-		return "normal"
-	case QuadEarlyDegradation:
-		return "early_degradation"
-	case QuadIndividualVariance:
-		return "individual_variance"
-	case QuadConfirmedAnomaly:
-		return "confirmed_anomaly"
-	default:
-		return "unknown"
-	}
-}
-
-// MetricAnomalyDetail records the dual-dimension anomaly scores for one metric on one card.
+// MetricAnomalyDetail records the space-dimension anomaly score for one metric
+// on one card (internal detection detail; the output groups anomalies by
+// metric, see MetricAnomaly).
 type MetricAnomalyDetail struct {
 	Metric        MetricName `json:"metric"`
 	SpaceScore    float64    `json:"space_score"`
@@ -233,87 +210,21 @@ type MetricAnomalyDetail struct {
 	PeerMean      float64    `json:"peer_mean,omitempty"`
 }
 
-// CardDetectionSummary is the per-card detection result.
-type CardDetectionSummary struct {
-	CardID                 int                   `json:"card_id"`
-	AnomalyCategory        AnomalyCategory       `json:"anomaly_category"`
-	Quadrant               Quadrant              `json:"quadrant"`
-	AnomalyDetails         []MetricAnomalyDetail `json:"anomaly_details,omitempty"`
-	SecondaryCommAnomalies []MetricAnomalyDetail `json:"secondary_comm_anomalies,omitempty"`
-	TrendFindings          []TrendFinding        `json:"trend_findings,omitempty"`
-	CompositeScore         float64               `json:"composite_score"`
-	Severity               Severity              `json:"severity"`
+// AnomalousCard is one card anomalous for a metric, with its space degradation
+// degree (score).
+type AnomalousCard struct {
+	Node          string  `json:"node"`
+	CardID        int     `json:"card_id"` // node-local card ID (0-based)
+	Score    float64 `json:"score"`
+	Abnormal bool    `json:"abnormal,omitempty"`
 }
 
-// TrendFinding records a linear-trend result for one metric.
-type TrendFinding struct {
-	Metric   MetricName `json:"metric"`
-	Slope    float64    `json:"slope"`
-	RSquared float64    `json:"r_squared"`
-	Desc     string     `json:"desc"`
+// MetricAnomaly groups the anomalous cards of one metric.
+type MetricAnomaly struct {
+	Metric      MetricName      `json:"metric"`
+	Method DetectionMethod `json:"method"`
+	Cards       []AnomalousCard `json:"cards"`
 }
-
-// =============================================================================
-// Root Cause
-// =============================================================================
-
-// RootCauseCategory enumerates diagnosed root causes.
-type RootCauseCategory string
-
-const (
-	RcThermalThrottle     RootCauseCategory = "thermal_throttle"
-	RcCoolingInsufficient RootCauseCategory = "cooling_insufficient"
-	RcTempSensorFault     RootCauseCategory = "temp_sensor_fault"
-	RcForcedDownclock     RootCauseCategory = "forced_downclock"
-	RcStraggler           RootCauseCategory = "straggler"
-	RcLoadImbalance       RootCauseCategory = "load_imbalance"
-	RcMemBottleneck       RootCauseCategory = "memory_bottleneck"
-	RcNetworkLinkIssue    RootCauseCategory = "network_link_issue"
-	RcNetworkCongestion   RootCauseCategory = "network_congestion"
-	RcNetworkPacketLoss   RootCauseCategory = "network_packet_loss"
-	RcBandwidthLimited    RootCauseCategory = "bandwidth_limited"
-	RcHardwareFault       RootCauseCategory = "hardware_fault"
-	RcUnknown             RootCauseCategory = "unknown"
-)
-
-// RootCauseResult is the diagnosed root cause for one anomalous card.
-type RootCauseResult struct {
-	CardID     int                   `json:"card_id"`
-	Category   RootCauseCategory     `json:"category"`
-	Confidence Confidence            `json:"confidence"`
-	Evidence   []MetricAnomalyDetail `json:"evidence"`
-	Suggestion string                `json:"suggestion"`
-}
-
-// CorrelationResult records cross-card correlation findings.
-type CorrelationResult struct {
-	Type        string     `json:"type"` // node_level | network_level | job_level | card_level
-	Description string     `json:"description"`
-	CardIDs     []int      `json:"card_ids"`
-	Confidence  Confidence `json:"confidence"`
-}
-
-// =============================================================================
-// Severity & Confidence Enums
-// =============================================================================
-
-// Severity indicates how urgent the finding is.
-type Severity string
-
-const (
-	SevCritical Severity = "critical"
-	SevWarning  Severity = "warning"
-	SevInfo     Severity = "info"
-)
-
-// Confidence indicates how confident the diagnosis is.
-type Confidence string
-
-const (
-	ConfHigh   Confidence = "high"
-	ConfMedium Confidence = "medium"
-	ConfLow    Confidence = "low"
-)
 
 // =============================================================================
 // Detection Config
@@ -322,66 +233,25 @@ const (
 // DetectionConfig holds all tunable parameters for KPI anomaly detection.
 type DetectionConfig struct {
 	// Preprocessing
-	AggregationWindowSec int     // aggregation window in seconds, default 60
+	AggregationWindowSec int     // aggregation window in seconds, default 10
 	TrimRatio            float64 // trimming ratio, default 0.25 (25% each side)
 	MinSamplesForTrim    int     // minimum samples to apply trimming, default 4
 
-	// Windows
-	BaselineHours  float64 // historical baseline window in hours, default 360 (15 days)
-	DetectionHours float64 // detection window in hours, default 1
-
 	// Space dimension
-	SpaceMethod     DetectionMethod
-	SpaceZThreshold float64 // default 2.5
-	SpaceIQRMult    float64 // default 1.5
+	SpaceRatioThreshold float64 // kmeans cluster ratio threshold (cluster mean / baseline mean), default 2.0
 
-	// Time dimension
-	TimeZThreshold float64 // default 2.0
-
-	// Fusion weights
-	TimeWeight  float64 // α, default 0.6
-	SpaceWeight float64 // β, default 0.4
-
-	// Trend detection
-	EnableTrend      bool
-	TrendMinRSquared float64 // default 0.6
-
-	// Special thresholds
-	FreqDownclockGap float64 // freq downclock detection gap in MHz, default 200
-	NetErrMinThresh  float64 // min threshold for network error metrics, default 0
-
-	// Profiling integration
-	FallbackToProfiling bool
-	AlwaysRunProfiling  bool
+	// Debug
+	EnableDebug bool // --debug-output: include all cards × all metrics in the result
 }
 
 // DefaultDetectionConfig returns a DetectionConfig with sensible defaults.
 func DefaultDetectionConfig() DetectionConfig {
 	return DetectionConfig{
-		AggregationWindowSec: 60,
+		AggregationWindowSec: 10,
 		TrimRatio:            0.25,
 		MinSamplesForTrim:    4,
 
-		BaselineHours:  360, // 15 days
-		DetectionHours: 1,
-
-		SpaceMethod:     MethodZScore,
-		SpaceZThreshold: 2.5,
-		SpaceIQRMult:    1.5,
-
-		TimeZThreshold: 2.0,
-
-		TimeWeight:  0.6,
-		SpaceWeight: 0.4,
-
-		EnableTrend:      true,
-		TrendMinRSquared: 0.6,
-
-		FreqDownclockGap: 200,
-		NetErrMinThresh:  0,
-
-		FallbackToProfiling: true,
-		AlwaysRunProfiling:  false,
+		SpaceRatioThreshold: 2.0,
 	}
 }
 
@@ -389,36 +259,34 @@ func DefaultDetectionConfig() DetectionConfig {
 // Detection Result (top-level)
 // =============================================================================
 
-// DetectionResult is the complete KPI detection output.
+// DetectionResult is the complete KPI detection output. Anomalies are grouped
+// by metric (metric-first), not by card.
 type DetectionResult struct {
-	Summary      DetectionSummary       `json:"summary"`
-	Results      []CardDetectionSummary `json:"results"`
-	RootCauses   []RootCauseResult      `json:"root_causes"`
-	Correlations []CorrelationResult    `json:"correlations"`
+	Summary DetectionSummary `json:"summary"`
+	Metrics []MetricAnomaly  `json:"anomaly_metrics,omitempty"`
+	// Debug marks --debug-output mode (not serialized): in debug every card
+	// appears in anomaly_metrics with the Abnormal flag; otherwise only
+	// anomalous cards are listed and the flag is omitted.
+	Debug bool `json:"-"`
 }
 
 // DetectionSummary is the overview section of the output.
 type DetectionSummary struct {
-	TotalCards         int    `json:"total_cards"`
-	ConfirmedAnomalies int    `json:"confirmed_anomalies"`
-	EarlyDegradation   int    `json:"early_degradation"`
-	IndividualVariance int    `json:"individual_variance"`
-	Normal             int    `json:"normal"`
-	KPICSV             string `json:"kpi_csv"`
-	TotalTimePoints    int    `json:"total_time_points"`
-	BaselineWindow     string `json:"baseline_window"`
-	DetectionWindow    string `json:"detection_window"`
-	DetectionMethod    string `json:"detection_method"`
+	TotalCards          int     `json:"total_cards"`
+	TotalNodes          int     `json:"total_nodes"`
+	Anomalies           int     `json:"anomalies"`
+	Normal              int     `json:"normal"`
+	Source              string  `json:"source"`
+	DataPoints          int     `json:"data_points"`
+	SpaceRatioThreshold float64 `json:"space_ratio_threshold"`
 }
 
-// SpaceDetectionResult holds per-time-point space anomaly scores.
+// SpaceDetectionResult holds per-time-point space anomaly scores plus the
+// flagged decision (parallel to Scores; cluster method uses the recursive
+// Detect flag, absolute uses the sentinel).
 type SpaceDetectionResult struct {
-	Scores map[int]map[MetricName][]float64
-}
-
-// TimeDetectionResult holds per-card time anomaly scores.
-type TimeDetectionResult struct {
-	Scores map[int]map[MetricName]float64
+	Scores  map[int]map[MetricName][]float64
+	Flagged map[int]map[MetricName][]bool
 }
 
 // =============================================================================

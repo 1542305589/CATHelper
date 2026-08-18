@@ -336,7 +336,7 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
   └── DelimitDetection()       → 执行 4 类检测
   │
   ▼
-[utils]  Write_result()       → stdout + straggler_detection_result.json
+[utils]  BuildNodeResult()    → stdout 逐类摘要 + 返回节点聚合结果（并入 straggler_output.json 的 "profiler" 段）
 [report] WriteReport()        → analysis_result/detection_report.log
 ```
 
@@ -397,23 +397,32 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 
 ```json
 {
-  "cal": [
-    {"display_key": "0", "metric_value": 1.5, "is_abnormal": true}
-  ],
-  "comm": [
-    {"display_key": "tp[0, 1, 2, 3]", "metric_value": 3.2, "is_abnormal": true}
-  ],
-  "cpu": [
-    {"display_key": "2", "metric_value": 1.4, "is_abnormal": true}
-  ],
-  "npu_bubble": [
-    {"display_key": "3", "metric_value": 3200.0, "is_abnormal": true}
-  ]
+  "profiler": {
+    "node_result": [
+      {
+        "hostname": "<hostName>",
+        "npu": [
+          {
+            "id": 0,
+            "cal":        { "score": 1.5 },
+            "npu_bubble": { "score": 3200.0 }
+          }
+        ],
+        "cpu": { "score": 1.4 }
+      }
+    ],
+    "comm_domain_result": {
+      "tp": {
+        "0,1,2,3": 3.2
+      }
+    }
+  }
 }
 ```
 
-排序：`npu_bubble` 升序（越小越异常），其余降序（越大越异常）。
-display_key：`comm` 为 `域名[排序后的 rank 列表]`，其余为 rank 字符串。
+- `node_result[]`：每个异常节点一条，含 `hostname`（HOST_INFO.hostName，缺失回退 hostUid）、`npu[]`（只含异常的 NPU，`id` 来自 NPU_INFO.id，`cal`/`npu_bubble` score 仅在异常时出现）、`cpu`（节点级，慢节点的共享值）
+- `comm_domain_result`：key = 通信域名字（可读域名，如 tp），value = 组内 rank 集（逗号连接）→ score
+- 顶层 `straggler_output.json`：KPI 结果在 `kpi` 键，Profiler 结果在 `profiler` 键；只跑 KPI 则只有 `kpi`，只跑 Profiler 则只有 `profiler`
 
 #### detection_report.log
 
