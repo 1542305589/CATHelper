@@ -210,7 +210,20 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 		nodeResults = append(nodeResults, nr)
 	}
 
-	printNodeSummary(finalResult, calOnly)
+	// Build comm group display labels ("tp[0,1]") so the stdout summary shows
+	// which parallel domain a slow group belongs to, not just its rank list.
+	commLabels := make(map[string]string, len(finalResult["comm"]))
+	for groupKey := range finalResult["comm"] {
+		ranks := stringToRanks(groupKey)
+		domain := findDomainForRanks(ranks, parallels)
+		if domain == "" {
+			commLabels[groupKey] = "[" + groupKey + "]"
+		} else {
+			commLabels[groupKey] = domain + "[" + groupKey + "]"
+		}
+	}
+
+	printNodeSummary(finalResult, calOnly, commLabels)
 	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}, nil
 }
 
@@ -309,7 +322,7 @@ func sortedNpuIDs(npus map[int]*NpuResult) []int {
 // Print helpers
 // ---------------------------------------------------------------------------
 
-func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
+func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool, commLabels map[string]string) {
 	// Slow-CPU needs ≥2 physical nodes to be meaningful: hostUid-based trimming
 	// collapses a single node's ranks to identical values, so no straggler can
 	// be found. Skip its line entirely in that case.
@@ -348,7 +361,15 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 		sort.Strings(keys)
 		var parts []string
 		for _, k := range keys {
-			parts = append(parts, fmt.Sprintf("%s: %.2fx", k, data[k]))
+			label := k
+			if cat.key == "comm" {
+				// Show the parallel domain (e.g. "tp[0,1]") instead of a bare
+				// rank list like "0,1" — the group key alone is opaque.
+				if l, ok := commLabels[k]; ok {
+					label = l
+				}
+			}
+			parts = append(parts, fmt.Sprintf("%s: %.2fx", label, data[k]))
 		}
 		fmt.Printf("%s: 异常 (%d) %s\n", cat.label, len(data), strings.Join(parts, "; "))
 	}
