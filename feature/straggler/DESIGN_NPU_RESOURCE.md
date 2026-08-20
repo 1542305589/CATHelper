@@ -392,7 +392,7 @@ func main() {
 
     // ── 合并输出 ──
     if kpiResult != nil || profilerOut != nil {
-        writeCombinedJSON(kpiResult, profilerOut, "straggler_output.json") // 运行目录
+        daemon.WriteCombinedJSON(kpiResult, profilerOut, "straggler_output.json") // 运行目录
     }
 }
 ```
