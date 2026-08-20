@@ -7,21 +7,33 @@
 // Optionally, a KPI resource CSV can be provided for lightweight NPU resource
 // anomaly detection before the heavy Profiler analysis.
 //
-// Usage:
+// Two modes:
+//   - one-shot:  go run . path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs]
+//   - daemon:    go run . --daemon --profiler-dir=/dir --kpi-dir=/dir [...]
+//     The daemon periodically triggers profiler collection (dynolog/dyno),
+//     converts and analyses the data, and exposes results + control over HTTP.
 //
-//	go run . path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs]
+// Build (daemon mode needs the dyno/dynolog binaries first):
+//
+//	bash build.sh && CGO_ENABLED=0 go build -o slowNodeDetection .
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"embed"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/daemon"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/dataparse"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/detector"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/report"
@@ -29,27 +41,13 @@ import (
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
 )
 
-// combinedOutput is the single output JSON: the KPI resource result and the
-// Profiler result under two keys. Either section is omitted when that dimension
-// did not run (e.g. KPI-only → only "kpi"; Profiler-only → only "profiler").
-type combinedOutput struct {
-	KPI      *resource.DetectionResult `json:"kpi,omitempty"`
-	Profiler *utils.NodeOutput         `json:"profiler,omitempty"`
-}
-
-// writeCombinedJSON marshals the combined KPI+Profiler result into one JSON
-// file at path (the current working directory).
-func writeCombinedJSON(kpi *resource.DetectionResult, profiler *utils.NodeOutput, path string) error {
-	out := combinedOutput{KPI: kpi, Profiler: profiler}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal combined output: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write combined output: %w", err)
-	}
-	return nil
-}
+// dynoBinaries embeds the dyno/dynolog collectors fetched by build.sh. They
+// are compiled into the binary and unpacked to a temp dir at daemon start.
+// Run build.sh before `go build` — the embed pattern fails to compile when the
+// files are absent.
+//
+//go:embed 3rdparty/bin/dyno 3rdparty/bin/dynolog
+var dynoBinaries embed.FS
 
 func main() {
 	// 1. Parse CLI arguments.
@@ -61,10 +59,23 @@ func main() {
 	spaceRatioThreshold := 0.0 // 0 = use the default SpaceRatioThreshold (2.0)
 	debugOutput := false       // --debug-output: include all normal+abnormal data (kpi.debug / profiler.debug) in straggler_output.json
 
+	// Daemon-mode flags.
+	daemonMode := false
+	daemonPort := 8080
+	intervalSec := 600
+	collectWait := 60
+	historySize := 50
+	profilerDir := ""
+	kpiDir := ""
+
 	for _, arg := range os.Args[1:] {
 		// Bare boolean flag (no "=value").
 		if arg == "--debug-output" {
 			debugOutput = true
+			continue
+		}
+		if arg == "--daemon" {
+			daemonMode = true
 			continue
 		}
 		parts := strings.SplitN(arg, "=", 2)
@@ -75,6 +86,34 @@ func main() {
 		switch key {
 		case "--debug-output":
 			debugOutput = val == "true" || val == "1"
+		case "--daemon-port":
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+				daemonPort = parsed
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --daemon-port value, using default 8080\n")
+			}
+		case "--interval":
+			if parsed, err := strconv.Atoi(val); err == nil && parsed >= 60 {
+				intervalSec = parsed
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --interval value (>=60), using default 600\n")
+			}
+		case "--collect-wait":
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+				collectWait = parsed
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --collect-wait value, using default 60\n")
+			}
+		case "--history":
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+				historySize = parsed
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --history value, using default 50\n")
+			}
+		case "--profiler-dir":
+			profilerDir = val
+		case "--kpi-dir":
+			kpiDir = val
 		case "path":
 			inputPath = val
 		case "degradation":
@@ -106,7 +145,59 @@ func main() {
 	}
 
 	// ─────────────────────────────────────────────────────────────────
-	// First line of defense: KPI resource anomaly detection (lightweight)
+	// Daemon mode: resident service (dynolog/dyno collection + HTTP).
+	// ─────────────────────────────────────────────────────────────────
+	if daemonMode {
+		if profilerDir == "" || kpiDir == "" {
+			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir --kpi-dir=/dir [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--history=50]\n")
+			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir and --kpi-dir\n")
+			os.Exit(1)
+		}
+
+		// Unpack the embedded dyno/dynolog binaries to a temp dir.
+		tmpDir, err := os.MkdirTemp("", "straggler-daemon-")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: create temp dir: %v\n", err)
+			os.Exit(1)
+		}
+		dynoBin, err := extractBinary(dynoBinaries, "3rdparty/bin/dyno", tmpDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: extract dyno: %v (run build.sh first)\n", err)
+			os.Exit(1)
+		}
+		dynologBin, err := extractBinary(dynoBinaries, "3rdparty/bin/dynolog", tmpDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: extract dynolog: %v (run build.sh first)\n", err)
+			os.Exit(1)
+		}
+
+		cfg := daemon.DefaultConfig()
+		cfg.ProfilerDir = profilerDir
+		cfg.KpiDir = kpiDir
+		cfg.Port = daemonPort
+		cfg.Interval = time.Duration(intervalSec) * time.Second
+		cfg.CollectWait = time.Duration(collectWait) * time.Second
+		cfg.HistorySize = historySize
+		cfg.DynoBin = dynoBin
+		cfg.DynologBin = dynologBin
+		cfg.Degradation = degradation
+		cfg.DebugOutput = debugOutput
+
+		d := daemon.New(cfg, detectFromParsedData)
+		d.SetTempDir(tmpDir)
+
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Daemon Mode (profiler=%s kpi=%s) ===\n", profilerDir, kpiDir)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := d.Run(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] daemon failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// ─────────────────────────────────────────────────────────────────
+	// One-shot mode: first line of defense is KPI resource detection
 	// ─────────────────────────────────────────────────────────────────
 	// KPI input: --kpi-jsonl-dir (CATMonitor straggler_output JSONL) takes
 	// precedence over --kpi-path (legacy kpi_collect.sh CSV directory). Either is optional.
@@ -178,7 +269,7 @@ func main() {
 	}
 
 	// ─────────────────────────────────────────────────────────────────
-	// Second line of defense: Profiler slow-node detection (deep analysis)
+	// One-shot mode: second line of defense is Profiler detection
 	// ─────────────────────────────────────────────────────────────────
 	if inputPath != "" {
 		// Validate required path.
@@ -190,64 +281,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Input path: %s\n", inputPath)
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Degradation: %.2f\n", degradation)
 
-		// 2. Initialize global configuration.
-		config.FilePath = inputPath
-		config.CalThreshold = 1 + degradation
-		config.CommThreshold = 1 + degradation*5
-
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] CalThreshold: %.2f, CommThreshold: %.2f\n",
-			config.CalThreshold, config.CommThreshold)
-
-		// 3. Data parsing: SQLite → CSV + JSON intermediates.
+		// Data parsing: SQLite → CSV + JSON intermediates.
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Starting data parsing...\n")
 		dataparse.DataParsing(inputPath)
 
-		// 4. Get parallel topology from group_info JSON files.
-		parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
-		if len(validRanks) == 0 {
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Failed to get valid ranks\n")
+		// Shared detection pipeline (steps 4-8); os.Exit on fatal conditions.
+		profilerOut, derr := detectFromParsedData(inputPath, degradation, debugOutput)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: %v\n", derr)
 			os.Exit(1)
 		}
-		if len(parallels) == 0 {
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: no parallel topology (group names not registered), degrading to cal-only detection\n")
-		}
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Valid ranks: %d, Parallel domains: %d\n",
-			len(validRanks), len(parallels))
-
-		// 5. Get single-snapshot step data from CSV files.
-		stepData := detector.GetCurJobLastStepData(validRanks)
-		if len(stepData) == 0 {
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: No valid step data\n")
-			os.Exit(1)
-		}
-
-		// 6. Run detection pipeline.
-		result := detector.DelimitDetection(stepData, parallels, validRanks)
-		if result == nil {
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: Detection returned no results\n")
-			os.Exit(1)
-		}
-
-		// 7. Build node-aggregated result (stdout summary; the JSON goes into the
-		//    combined output written at the end of main). With --debug-output, all
-		//    nodes (even normal) are included with their diagnostic scores.
-		var buildErr error
-		if debugOutput {
-			debug := &utils.DebugInfo{
-				ValidRanks: validRanks,
-				RankScores: detector.DebugRankScores(stepData, validRanks),
-				CommScores: detector.DebugCommScores(stepData, parallels),
-			}
-			profilerOut, buildErr = utils.BuildNodeResult(result, parallels, debug)
-		} else {
-			profilerOut, buildErr = utils.BuildNodeResult(result, parallels, nil)
-		}
-		if buildErr != nil {
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to build node result: %v\n", buildErr)
-		}
-
-		// 8. Generate text report.
-		report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath, degradation)
 	}
 
 	// ─────────────────────────────────────────────────────────────────
@@ -257,7 +300,7 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────
 	if kpiResult != nil || profilerOut != nil {
 		const combinedPath = "straggler_output.json"
-		if err := writeCombinedJSON(kpiResult, profilerOut, combinedPath); err != nil {
+		if err := daemon.WriteCombinedJSON(kpiResult, profilerOut, combinedPath); err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write combined output: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Result written to %s\n", combinedPath)
@@ -267,4 +310,95 @@ func main() {
 	if inputPath != "" {
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Detection complete.\n")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared profiler detection pipeline (one-shot and daemon both call this)
+// ---------------------------------------------------------------------------
+
+// detectFromParsedData runs the detection stage after the op_metric
+// intermediates are ready (the one-shot mode's steps 4-8): parallel topology →
+// step data snapshot → detection → node aggregation → text report. It sets the
+// config globals (FilePath / CalThreshold / CommThreshold) and returns the
+// node output, per-category anomaly counts, and the report text.
+//
+// The parsing stage (step 3) is NOT inside this function: one-shot calls
+// dataparse.DataParsing (full rescan, os.Exit on zero files), while the daemon
+// calls dataparse.StartProcess (error return, survives a bad dump).
+func detectFromParsedData(inputPath string, degradation float64, debugOutput bool) (*daemon.DetectResult, error) {
+	config.FilePath = inputPath
+	config.CalThreshold = 1 + degradation
+	config.CommThreshold = 1 + degradation*5
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] CalThreshold: %.2f, CommThreshold: %.2f\n",
+		config.CalThreshold, config.CommThreshold)
+
+	// 4. Get parallel topology from group_info JSON files.
+	parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
+	if len(validRanks) == 0 {
+		return nil, fmt.Errorf("failed to get valid ranks")
+	}
+	if len(parallels) == 0 {
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: no parallel topology (group names not registered), degrading to cal-only detection\n")
+	}
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Valid ranks: %d, Parallel domains: %d\n",
+		len(validRanks), len(parallels))
+
+	// 5. Get single-snapshot step data from CSV files.
+	stepData := detector.GetCurJobLastStepData(validRanks)
+	if len(stepData) == 0 {
+		return nil, fmt.Errorf("no valid step data")
+	}
+
+	// 6. Run detection pipeline.
+	result := detector.DelimitDetection(stepData, parallels, validRanks)
+	if result == nil {
+		return nil, fmt.Errorf("detection returned no results")
+	}
+
+	// 7. Build node-aggregated result (the JSON goes into the combined output).
+	var profilerOut *utils.NodeOutput
+	if debugOutput {
+		debug := &utils.DebugInfo{
+			ValidRanks: validRanks,
+			RankScores: detector.DebugRankScores(stepData, validRanks),
+			CommScores: detector.DebugCommScores(stepData, parallels),
+		}
+		profilerOut, _ = utils.BuildNodeResult(result, parallels, debug)
+	} else {
+		profilerOut, _ = utils.BuildNodeResult(result, parallels, nil)
+	}
+
+	// 8. Text report (written to <inputPath>/analysis_result/detection_report.log;
+	//    the text is also returned so the daemon can serve it over HTTP).
+	report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath, degradation)
+	reportText := report.GenerateReport(stepData, parallels, validRanks, result, inputPath, degradation)
+
+	return &daemon.DetectResult{
+		NodeOutput: profilerOut,
+		Summary:    summarizeProfiler(result),
+		Report:     reportText,
+	}, nil
+}
+
+// summarizeProfiler counts anomalies per category from the detection result.
+func summarizeProfiler(result config.DegradationData) map[string]int {
+	return map[string]int{
+		"cal":        len(result["cal"]),
+		"comm":       len(result["comm"]),
+		"cpu":        len(result["cpu"]),
+		"npu_bubble": len(result["npu_bubble"]),
+	}
+}
+
+// extractBinary writes one embedded binary to dir with executable permission.
+func extractBinary(fs embed.FS, name, dir string) (string, error) {
+	data, err := fs.ReadFile(name)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, filepath.Base(name))
+	if err := os.WriteFile(path, data, 0o755); err != nil {
+		return "", err
+	}
+	return path, nil
 }

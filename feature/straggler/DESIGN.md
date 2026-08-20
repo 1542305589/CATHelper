@@ -316,4 +316,328 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 
 ## 日志前缀
 
-`[SLOWNODE ALGO]` 算法通用 | `[DATA PROCESS]` 数据解析 | `[WARN]` 警告 | `[REPORT]` 报告生成
+`[SLOWNODE ALGO]` 算法通用 | `[DATA PROCESS]` 数据解析 | `[WARN]` 警告 | `[REPORT]` 报告生成 | `[DAEMON]` 守护进程
+
+---
+
+## 守护进程模式（daemon）
+
+### 概述
+
+一次性模式（`path=...` 单次运行后退出）之外，提供常驻守护进程：周期性**触发采集（dyno）-> 转换（python analyse）-> 解析 -> 分析** profiler 数据，并同时**读取 KPI 数据联合检测**，合并结果 JSON 落盘并通过 HTTP 查询；守护进程本身通过 HTTP 控制（启动/暂停/改周期）。
+
+```
+┌────────────────────────── daemon 包 ──────────────────────────┐
+│                                                               │
+│  HTTP Server (net/http)          Runner (goroutine)           │
+│  ├ GET  /status                  │  ticker ──> runCycle       │
+│  ├ GET  /straggler/results/latest │  ├ dyno 触发采集           │
+│  ├ GET  /straggler/results/history│  ├ wait + 定位 dump 目录   │
+│  ├ GET  /straggler/report/latest  │  ├ python analyse -> .db  │
+│  ├ POST /daemon/start             │  ├ StartProcess 解析       │
+│  ├ POST /daemon/pause             │  ├ KPI 读取 + 检测         │
+│  ├ POST /daemon/interval          │  └ detect + report         │
+│  └ POST /daemon/trigger           │        │                   │
+│         │                         │        v                   │
+│         └──── 控制命令 ───────────>│  结果 JSON 落盘            │
+│                                   │  （查询接口的数据源）       │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### CLI 与启动
+
+```bash
+# 一次性模式（现状，不变）
+go run . path=/data/dir [degradation=0.3] ...
+
+# 守护进程模式（无需 path=，数据目录来自每周期采集）
+go run . --daemon \
+    [--daemon-port=8080] \          # HTTP 监听端口
+    [--interval=600] \              # 循环周期（秒），默认 600
+    --profiler-dir=/home/nf/data \  # profiler 采集落盘根目录（必填；即传给 dyno 的 --log-file）
+    --kpi-dir=/home/nf/kpi \        # KPI 数据目录（必填；CATMonitor JSONL，同 --kpi-jsonl-dir 语义）
+    [--collect-wait=60] \           # dyno 触发成功后的等待秒数，默认 60
+    [--history=50]                  # 历史保留周期数，默认 50
+```
+
+`--daemon` 进入常驻模式：解包内嵌二进制并拉起 dynolog、启动 HTTP 服务，随后立即执行**首个周期**（不等待第一个 tick），再按 interval 循环。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
+
+### 采集链路（dynolog / dyno）
+
+profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSMONITOR_USE_DAEMON=1` 接入（该环境变量由**服务侧**设置，守护进程不负责）。守护进程负责完整链路：
+
+```
+1. 启动 dynolog（daemon 启动时执行一次，见「3rdparty 二进制管理」）：
+   dynolog --enable-ipc-monitor --certs-dir NO_CERTS
+
+2. 发起采集（每周期）：
+   dyno --certs-dir NO_CERTS nputrace \
+        --start-step -1 --iterations 5 \
+        --activities NPU,CPU --profiler-level Level0 \
+        --msprof-tx --export-type Db --log-file <profiler-dir>
+   # dyno 自身的参数名就是 --log-file；守护进程 CLI 用 --profiler-dir 指同一路径
+
+3. 解析 dyno stdout 中的 JSON（形如 "response = {...}"）：
+   {"activityProfilersBusy":0,
+    "activityProfilersTriggered":[2503,124212],
+    "commandStatus":"effective",
+    "eventProfilersBusy":0,
+    "eventProfilersTriggered":[],
+    "processesMatched":[2503,124212]}
+
+   commandStatus == "effective"   -> 采集已触发，继续
+   commandStatus == "ineffective" -> 本周期失败
+   processesMatched 为空          -> 目标进程未匹配（vllm 未运行或未设
+                                      MSMONITOR_USE_DAEMON=1），周期失败并提示
+
+4. 固定等待 --collect-wait（默认 60s），让 --iterations 个迭代完成落盘
+
+5. 定位本次产物：扫描 --profiler-dir 根目录，取「触发时间戳之后修改」的最新
+   目录作为 profiler_path
+   （dyno 响应不含落盘路径；首次联调时实测确认落盘目录结构）
+
+6. 转换为 .db（依赖 PATH 上的 python 已安装 torch_npu）：
+   python -c "from torch_npu.profiler.profiler import analyse; \
+              analyse(profiler_path='<profiler_path>', export_type=['db'])"
+
+7. 对该目录执行现有检测管线；结果 JSON 落盘，作为查询接口的数据源
+```
+
+### 3rdparty 二进制管理（embed）
+
+dyno / dynolog 二进制**不进版本库**（仓库 `3rdparty/bin/` 下当前仅为存在性验证）。
+
+**build.sh 构建流程**（aarch64 主机，一次性执行）：
+
+1. **架构检查**：`uname -m` != `aarch64` -> 报错退出
+2. **取 dyno / dynolog**：wget 下载 msmonitor 8.1.0 包
+   `https://ptdbg.obs.cn-north-4.myhuaweicloud.com/profiler/msmonitor/8.1.0/aarch64_8.1.0.zip`
+   -> 解压 -> 从解压目录 `bin/` 取出 `dyno` / `dynolog` 放入 `3rdparty/bin/` -> 删除中间文件
+3. **Python 版本检查**：须为 3.9 / 3.10 / 3.11 / 3.12，否则报错退出
+4. **安装 mindstudio_monitor**：wget 下载
+   `https://mindstudio-pkg.obs.cn-north-4.myhuaweicloud.com/tag/26.2.0/B025/aarch64/mindstudio_monitor-26.2.0-cp<python>-cp<python>-linux_aarch64.whl`
+   （`<python>` 按第 3 步版本映射为 cp39/cp310/cp311/cp312）-> `pip install` -> 清理中间文件
+5. **go build**：`CGO_ENABLED=0 go build -o slowNodeDetection .`
+
+**编译期**：main 包 embed 编入（embed 只能引用包目录以下的路径，故必须放在 `package main`，运行时注入 daemon）：
+  ```go
+  //go:embed 3rdparty/bin/dyno 3rdparty/bin/dynolog
+  var dynoBinaries embed.FS
+  ```
+
+**运行期**：daemon 启动时解包到 `os.MkdirTemp` 目录（`0o755`）：
+- spawn dynolog（`--enable-ipc-monitor --certs-dir NO_CERTS`）作为子进程并持有；启动失败（端口/IPC 已被占用）-> 记日志复用现有实例，首个周期即验证连通
+- dyno 每周期经 `exec.Command` 调用
+- 优雅退出：终止自己拉起的 dynolog，清理临时目录
+
+注意：`go build` 前必须先跑 `build.sh`（embed 缺文件在编译期即报错，提示明确）。
+
+### 检测循环（runCycle）
+
+每周期的数据是**本次采集产生的独立 dump 目录**，周期之间互不共享状态：
+
+```
+1. 执行采集链路步骤 2-6：dyno 触发 -> 校验 commandStatus -> 等待
+   -> 定位 dump 目录 -> python analyse 转 .db
+2. walk 该 dump 目录发现 ascend_pytorch_profiler_*.db
+   为空 -> 周期失败（collect 成功但无 .db = analyse 失败或落盘结构变化）
+3. dataparse.StartProcess(dbFiles, dumpDir)   ← 不走 DataParsing
+   （DataParsing 零文件时 os.Exit 会杀死 daemon；dump 目录每周期全新，
+   也无需增量状态）
+4. KPI 检测：读 --kpi-dir 最新数据（resource.RunDetectionFromData，
+   与一次性模式 --kpi-jsonl-dir 同源）；目录为空 -> 该维度本轮跳过
+5. detectFromParsedData(dumpDir, ...)（与一次性模式共用，见下节）
+6. 合并结果 JSON（{"kpi": ..., "profiler": ...}）落盘到该 dump 目录
+```
+
+`config.FilePath` / `CalThreshold` / `CommThreshold` 全局量按周期设置（FilePath 每周期 = 当次 dump 目录）。
+
+### 与一次性模式的代码复用（main.go 重构点）
+
+main.go 第 3-8 步抽取为共用函数，一次性模式与 daemon 调用同一实现：
+
+```go
+// detectFromParsedData 在 op_metric 中间产物就绪后执行检测阶段
+// （原 main.go 步骤 4-8：拓扑 -> step data -> 检测 -> 节点聚合 -> 报告）。
+// 解析阶段（步骤 3）不在此函数内：一次性模式调 DataParsing（全量+os.Exit），
+// daemon 调 StartProcess（错误返回，不退出进程）。
+func detectFromParsedData(inputPath string, degradation float64, debugOutput bool) (*utils.NodeOutput, error)
+```
+
+错误处理差异：一次性模式检测失败 -> `os.Exit(1)`；daemon 检测失败 -> 周期错误记入历史，**守护进程继续运行**。
+
+KPI 检测无需重构：一次性模式与 daemon 都走 `resource.RunDetectionFromData`；差别只在输入——一次性读整个目录一次，daemon 每周期重读 `--kpi-dir` 取最新数据，无额外状态。
+
+### 状态机与并发控制
+
+```
+状态: running | paused（初始 running）
+
+ticker 触发 ──> if paused: 跳过
+             └─> if 上个周期仍在运行: 跳过本 tick（single-flight，不排队）
+
+POST /daemon/pause  -> paused = true（进行中的周期自然跑完，不再调度新周期）
+POST /daemon/start  -> paused = false + 重置 ticker（interval 后触发下一周期）
+POST /daemon/interval -> 校验 [60, 86400] 秒 -> 更新 interval + 重置 ticker
+POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
+```
+
+- 所有状态变更经同一把 mutex；周期执行本身不持锁（长任务不阻塞 HTTP）
+- 优雅退出：SIGINT/SIGTERM -> `http.Server.Shutdown` + 停止 ticker + 等待进行中周期结束（超时 10 分钟）
+
+### HTTP API
+
+路径不带 `/api/v1` 版本前缀（内网诊断工具，按资源直白命名）。JSON 响应，无鉴权（内网工具，绑定地址即边界）。控制接口均为幂等。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/healthz` | 存活检查，恒 200 |
+| GET | `/status` | 守护进程状态 |
+| GET | `/straggler/results/latest` | 最近周期的落盘结果 JSON |
+| GET | `/straggler/results/history?limit=10` | 最近 N 个周期摘要（元数据） |
+| GET | `/straggler/results/{id}` | 指定周期的落盘结果 JSON |
+| GET | `/straggler/report/latest` | 最近周期文本报告（`text/plain`） |
+| POST | `/daemon/start` | 恢复循环 |
+| POST | `/daemon/pause` | 暂停循环 |
+| POST | `/daemon/interval` | 修改循环周期 |
+| POST | `/daemon/trigger` | 立即触发一个周期 |
+
+查询接口以**落盘 JSON 为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 直接返回对应周期 dump 目录中落盘的结果 JSON（与一次性模式输出同构，含 `kpi` 与 `profiler` 两段）；`/straggler/results/history` 扫描各周期 dump 目录的 `daemon_meta.json` 元数据（daemon 重启不丢历史）。
+
+**GET /status 响应**：
+```json
+{
+  "state": "running",
+  "interval_sec": 600,
+  "profiler_dir": "/home/nf/data",
+  "kpi_dir": "/home/nf/kpi",
+  "cycles_total": 12,
+  "cycles_failed": 1,
+  "history_size": 50,
+  "last_cycle": {
+    "id": 12,
+    "started_at": "2026-08-18T10:00:00+08:00",
+    "finished_at": "2026-08-18T10:00:08+08:00",
+    "duration_ms": 8123,
+    "dbs": 8,
+    "summary": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0},
+    "error": null
+  },
+  "next_run_at": "2026-08-18T10:10:00+08:00"
+}
+```
+
+**GET /straggler/results/history 响应**（周期元数据摘要）：
+```json
+{
+  "cycles": [
+    {
+      "id": 12,
+      "started_at": "2026-08-18T10:00:00+08:00",
+      "finished_at": "2026-08-18T10:01:30+08:00",
+      "dbs": 8,
+      "dump_dir": "/home/nf/data/2026_0818_...",
+      "summary": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0},
+      "error": null
+    }
+  ]
+}
+```
+
+**POST /daemon/interval 请求**：`{"interval_sec": 300}`；越界（<60 或 >86400）返回 400。响应：`{"interval_sec": 300}`。
+
+**周期失败示例**（history 中 error 非 null）：
+```json
+{ "id": 11, ..., "dbs": 0,
+  "error": "dyno commandStatus=ineffective, processesMatched=[]" }
+```
+
+### 数据结构
+
+```go
+// daemon/types.go
+type DaemonConfig struct {
+    ProfilerDir string        // profiler 采集落盘根目录（CLI --profiler-dir=，必填；传给 dyno 的 --log-file）
+    KpiDir      string        // KPI 数据目录（CLI --kpi-dir=，必填；CATMonitor JSONL）
+    Interval    time.Duration // 循环周期，默认 600s
+    Port        int           // HTTP 端口，默认 8080
+    CollectWait time.Duration // dyno 触发成功后的等待秒数，默认 60s
+    DynoBin     string        // 内嵌二进制解包后的 dyno 路径
+    DynologBin  string        // 内嵌二进制解包后的 dynolog 路径
+    HistorySize int           // 环形历史容量，默认 50
+    Degradation float64       // 阈值参数透传
+    DebugOutput bool
+}
+
+// CycleResult 单个周期的元数据 + 结果。本周期数据源是独立的 dump 目录，
+// 周期之间无跨周期的增量状态，故不需要 daemonState 之类的游标结构。
+type CycleResult struct {
+    ID         int                   // 自增周期号（进程内从 1 起）
+    StartedAt  time.Time
+    FinishedAt time.Time
+    DurationMs int64
+    DBs        int                   // 本周期解析的 .db 数
+    DumpDir    string                // 本周期采集+解析所在目录（含 .db / op_metric / 结果 JSON）
+    JSONPath   string                // 本周期结果 JSON 落盘路径（查询接口的数据源）
+    KPI        *resource.DetectionResult // KPI 检测结果（nil = 本轮无 KPI 数据）
+    Result     *utils.NodeOutput     // profiler 检测结果（nil = 周期失败或无新数据）
+    Summary    map[string]int        // cal/comm/cpu/npu_bubble -> 异常数
+    Report     string                // 文本报告（供 /report/latest）
+    Error      string                // 空 = 成功
+}
+
+// dynoResponse 是 dyno 触发命令响应中内嵌的 JSON 片段（形如 "response = {...}"），
+// 据此判断本次采集是否生效。processesMatched 是命中的 vllm 进程 PID（数字），
+// 空 = 没有进程接入（未设置 MSMONITOR_USE_DAEMON=1）。
+type dynoResponse struct {
+    CommandStatus    string `json:"commandStatus"`    // "effective" / "ineffective"
+    ProcessesMatched []int  `json:"processesMatched"` // 命中的 vllm 进程 PID
+}
+```
+
+### 文件布局与产物
+
+```
+daemon/
+├── daemon.go    // Daemon 结构：生命周期、状态机、runCycle
+├── dyno.go      // dynolog 拉起 + dyno 触发采集 + 等待 + python analyse 调用
+├── store.go     // 环形历史（mutex 保护）
+├── server.go    // HTTP handlers（net/http 标准库，不引第三方框架）
+└── types.go     // DaemonConfig / CycleResult / dynoResponse / API 载荷
+
+3rdparty/bin/                 # 构建期由 build.sh 下载（dyno / dynolog），embed 编入 main 包
+
+运行期产物：
+├── <kpi-dir>/                # KPI 数据目录（外部 CATMonitor 写入，daemon 只读）
+├── <profiler-dir>/           # profiler 采集落盘根目录（--profiler-dir=）
+│   └── <按触发时间戳定位的 dump 目录>/   # 每周期全新，周期之间互不共享
+│       ├── ascend_pytorch_profiler_*.db  # python analyse 转换后，每 rank 一个
+│       ├── op_metric/                    # StartProcess 中间产物（CSV/JSON）
+│       ├── daemon_meta.json              # 周期元数据（/straggler/results/history 数据源）
+│       └── straggler_output.json         # 本周期结果 JSON（含 kpi + profiler；latest/{id} 数据源）
+└── straggler_output.json                 # 运行目录副本 = 最近周期结果（与一次性模式输出同构）
+```
+
+### 错误处理
+
+| 场景 | 处理 |
+|------|------|
+| dyno 触发失败（命令执行错误/超时） | 记 error，本周期失败，daemon 存活 |
+| dyno commandStatus=ineffective（无 vllm 进程接入） | 记 error（processesMatched 为空），本周期失败，daemon 存活 |
+| python analyse 转换失败 | 记 error，本周期失败，daemon 存活（下周期重新触发） |
+| dynolog 已被占用（端口/IPC 冲突） | 复用现有实例不重启，首个周期即验证连通 |
+| 新 .db 单文件解析失败 | 沿用 StartProcess 语义：日志 + 继续其余文件；全部失败 -> 周期失败 |
+| 检测阶段失败（拓扑/step data 为空等） | 周期失败，daemon 存活（对比一次性模式的 os.Exit） |
+| 周期超时 | 无强制超时（周期长度 = 解析+检测自然时长）；下个 tick 被 single-flight 跳过 |
+| HTTP 请求 body 非法 | 400 + 错误信息 |
+| 端口占用 | 启动失败，退出码 1 |
+
+### 设计取舍
+
+- **不引 Web 框架**：接口少且无中间件需求，`net/http` 标准库足够，与项目零额外依赖的风格一致
+- **结果以落盘 JSON 为数据源而非内存**：每周期结果 JSON 与 `daemon_meta.json` 落在该周期 dump 目录，`/straggler/results/*` 直接读文件——daemon 重启不丢历史；进程内 50 周期环形历史仅作摘要缓存
+- **采集走 dynolog/dyno 而非 watch/exec 插件**：vllm 经 dynolog IPC 接入（`MSMONITOR_USE_DAEMON=1` 由服务侧设置，守护进程不管）；工具侧统一以 `dyno nputrace` 触发，不绑定部署侧脚本
+- **二进制用 embed 而非仓库分发**：dyno/dynolog 不进版本库（`3rdparty/bin/` 仅构建期产物），build.sh 下载、embed 编入、运行时解包到临时目录调用——仓库不携带第三方制品，产物单二进制可自包含交付
+- **固定等待而非轮询就绪**：dyno 响应不含落盘路径，采集完成时间无法获知；按联调实测默认等待 60s（`--collect-wait` 可调）
+- **无鉴权**：内网诊断工具，控制接口的风险面与绑定地址相同；如需暴露再补 token
+
