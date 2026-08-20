@@ -286,11 +286,14 @@ func main() {
 		dataparse.DataParsing(inputPath)
 
 		// Shared detection pipeline (steps 4-8); os.Exit on fatal conditions.
-		profilerOut, derr := detectFromParsedData(inputPath, degradation, debugOutput)
+		detectResult, derr := detectFromParsedData(inputPath, degradation, debugOutput)
 		if derr != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: %v\n", derr)
 			os.Exit(1)
 		}
+		// Keep the node output for the combined JSON below; detectResult also
+		// carries the summary/report used by daemon mode only.
+		profilerOut = detectResult.NodeOutput
 	}
 
 	// ─────────────────────────────────────────────────────────────────
