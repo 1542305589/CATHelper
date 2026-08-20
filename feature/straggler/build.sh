@@ -130,17 +130,29 @@ fi
 GO_VERSION_REQ=$(grep -E '^go ' go.mod | awk '{print $2}' | head -n 1 || true)
 [ -z "$GO_VERSION_REQ" ] && GO_VERSION_REQ="1.23.4"
 
+# Locate go: PATH first, then the install dirs build.sh itself uses
+# (/usr/local/go, ~/.local/go). Probing known dirs makes a previous run's
+# install visible even when the PATH export below is not persisted in the
+# current shell, so an adequate go is never re-downloaded.
+GO_CANDS=()
+if command -v go >/dev/null 2>&1; then GO_CANDS+=("$(command -v go)"); fi
+GO_CANDS+=(/usr/local/go/bin/go "$HOME/.local/go/bin/go")
+
 GO_OK=0
-if command -v go >/dev/null 2>&1; then
-    GO_INSTALLED=$(go version 2>/dev/null | grep -oE 'go[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | sed 's/^go//' || true)
-    if [ -n "$GO_INSTALLED" ] && ver_ge "$GO_INSTALLED" "$GO_VERSION_REQ"; then
-        echo "[build] 5/6 go $GO_INSTALLED >= $GO_VERSION_REQ OK"
-        GO_OK=1
-    else
-        echo "[build] 5/6 go $GO_INSTALLED < required $GO_VERSION_REQ, downloading from Aliyun"
+GO_BIN=""
+GO_INSTALLED=""
+for c in "${GO_CANDS[@]}"; do
+    [ -x "$c" ] || continue
+    v=$("$c" version 2>/dev/null | grep -oE 'go[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 | sed 's/^go//' || true)
+    if [ -n "$v" ] && ver_ge "$v" "$GO_VERSION_REQ"; then
+        GO_BIN="$c"; GO_INSTALLED="$v"; break
     fi
+done
+if [ -n "$GO_BIN" ]; then
+    echo "[build] 5/6 go $GO_INSTALLED >= $GO_VERSION_REQ OK ($GO_BIN)"
+    GO_OK=1
 else
-    echo "[build] 5/6 go not found, downloading from Aliyun"
+    echo "[build] 5/6 no go >= $GO_VERSION_REQ (PATH / /usr/local/go / ~/.local/go), downloading from Aliyun"
 fi
 
 if [ "$GO_OK" -ne 1 ]; then
@@ -171,6 +183,29 @@ if [ "$GO_OK" -ne 1 ]; then
     fi
     export PATH="$GO_ROOT/bin:$PATH"
     echo "[build]     go $(go version | grep -oE 'go[0-9]+\.[0-9]+(\.[0-9]+)?')"
+
+    # Persist the PATH export in the user's shell rc so future interactive
+    # shells also find go. Marked and guarded: appended only once. build.sh
+    # itself does not rely on this — the known-dir probe above already finds
+    # the freshly installed go on the next run.
+    case "${SHELL:-}" in
+        *zsh*) RC="$HOME/.zshrc" ;;
+        *bash*) RC="$HOME/.bashrc" ;;
+        *) RC="$HOME/.profile" ;;
+    esac
+    if [ -w "$HOME" ] && ! grep -qs 'CATHelper/straggler build.sh: Go PATH' "$RC"; then
+        {
+            echo ""
+            echo "# >>> CATHelper/straggler build.sh: Go PATH >>>"
+            echo "export PATH=\"$GO_ROOT/bin:\$PATH\""
+            echo "# <<< CATHelper/straggler build.sh: Go PATH <<<"
+        } >> "$RC" 2>/dev/null || true
+        if grep -qs 'CATHelper/straggler build.sh: Go PATH' "$RC"; then
+            echo "[build]     persisted 'export PATH=$GO_ROOT/bin:\$PATH' to $RC"
+        else
+            echo "[build]     WARNING: could not persist PATH to $RC" >&2
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------
