@@ -360,14 +360,14 @@ go run . --daemon \
     [--history=50]                  # 历史保留周期数，默认 50
 ```
 
-`--daemon` 进入常驻模式：解包内嵌二进制并拉起 dynolog、启动 HTTP 服务，随后等待一个 interval 再开始周期循环（首个周期不在启动时立即执行）。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
+`--daemon` 进入常驻模式：从 PATH 解析 dyno/dynolog 并拉起 dynolog、启动 HTTP 服务，随后等待一个 interval 再开始周期循环（首个周期不在启动时立即执行）。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
 
 ### 采集链路（dynolog / dyno）
 
 profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSMONITOR_USE_DAEMON=1` 接入（该环境变量由**服务侧**设置，守护进程不负责）。守护进程负责完整链路：
 
 ```
-1. 启动 dynolog（daemon 启动时执行一次，见「3rdparty 二进制管理」）：
+1. 启动 dynolog（daemon 启动时执行一次，见「dyno / dynolog 安装」）：
    dynolog --enable-ipc-monitor --certs-dir NO_CERTS
 
 2. 发起采集（每周期）：
@@ -403,34 +403,29 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
 7. 对该目录执行现有检测管线；结果 JSON 落盘，作为查询接口的数据源
 ```
 
-### 3rdparty 二进制管理（embed）
+### dyno / dynolog 安装（build.sh，系统包管理器 .deb）
 
-dyno / dynolog 二进制**不进版本库**（仓库 `3rdparty/bin/` 下当前仅为存在性验证）。
+dyno / dynolog 二进制**不进版本库**，也不随 Go 二进制 embed——由 build.sh 用系统包管理器把 `dynolog_*.deb` 装到系统，二者直接可从 PATH 调用。
 
 **build.sh 构建流程**（aarch64 主机，一次性执行）：
 
 1. **架构检查**：`uname -m` != `aarch64` -> 报错退出
-2. **取 dyno / dynolog**：wget 下载 msmonitor 8.1.0 包
+2. **安装 dyno / dynolog**：wget 下载 msmonitor 8.1.0 包
    `https://ptdbg.obs.cn-north-4.myhuaweicloud.com/profiler/msmonitor/8.1.0/aarch64_8.1.0.zip`
-   -> 解压 -> 从解压目录 `bin/` 取出 `dyno` / `dynolog` 放入 `3rdparty/bin/` -> 删除中间文件
+   -> 解压 -> 从解压目录**根**取出 `dynolog_*.deb` -> 检测包管理器安装（dpkg 原生安装 .deb；rpm 系需 `alien` 转换；权限不足经 sudo）-> 使 `dyno` / `dynolog` 直接可调用；二者已在 PATH 上则跳过
 3. **Python 版本检查**：须为 3.9 / 3.10 / 3.11 / 3.12，否则报错退出
 4. **安装 mindstudio_monitor**：wget 下载
    `https://mindstudio-pkg.obs.cn-north-4.myhuaweicloud.com/tag/26.2.0/B025/aarch64/mindstudio_monitor-26.2.0-cp<python>-cp<python>-linux_aarch64.whl`
    （`<python>` 按第 3 步版本映射为 cp39/cp310/cp311/cp312）-> `pip install` -> 清理中间文件
-5. **go build**：`CGO_ENABLED=0 go build -o slowNodeDetection .`
+5. **Go 工具链**：需 >= go.mod 版本；缺失/过旧时从阿里云镜像下载（`/usr/local/go`，不可写则 `~/.local/go`）并持久化 PATH
+6. **go build**：`CGO_ENABLED=0 go build -o slowNodeDetection .`
 
-**编译期**：main 包 embed 编入（embed 只能引用包目录以下的路径，故必须放在 `package main`，运行时注入 daemon）：
-  ```go
-  //go:embed 3rdparty/bin/dyno 3rdparty/bin/dynolog
-  var dynoBinaries embed.FS
-  ```
-
-**运行期**：daemon 启动时解包到 `os.MkdirTemp` 目录（`0o755`）：
+**运行期**：Go 编译完全不依赖 dyno/dynolog（已无 embed）；daemon 启动时用 `exec.LookPath("dyno")` / `exec.LookPath("dynolog")` 从 PATH 解析出二者路径，注入 `Config.DynoBin / DynologBin`（解析失败 -> 报错退出，提示先跑 build.sh）：
 - spawn dynolog（`--enable-ipc-monitor --certs-dir NO_CERTS`）作为子进程并持有；启动失败（端口/IPC 已被占用）-> 记日志复用现有实例，dyno 经 IPC 复用其连通
 - dyno 每周期经 `exec.Command` 调用
-- 优雅退出：终止自己拉起的 dynolog，清理临时目录
+- 优雅退出：终止自己拉起的 dynolog
 
-注意：`go build` 前必须先跑 `build.sh`（embed 缺文件在编译期即报错，提示明确）。
+注意：daemon 机器上先跑一次 `build.sh`（或等价地 `dpkg -i dynolog_*.deb`）装好 dyno/dynolog，否则 daemon 启动即报错。
 
 ### 检测循环（runCycle）
 
@@ -562,8 +557,8 @@ type DaemonConfig struct {
     Interval    time.Duration // 循环周期，默认 600s
     Port        int           // HTTP 端口，默认 8080
     CollectWait time.Duration // dyno 触发成功后的等待秒数，默认 60s
-    DynoBin     string        // 内嵌二进制解包后的 dyno 路径
-    DynologBin  string        // 内嵌二进制解包后的 dynolog 路径
+    DynoBin     string        // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
+    DynologBin  string        // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
     HistorySize int           // 环形历史容量，默认 50
     Degradation float64       // 阈值参数透传
     DebugOutput bool
@@ -605,7 +600,7 @@ daemon/
 ├── server.go    // HTTP handlers（net/http 标准库，不引第三方框架）
 └── types.go     // DaemonConfig / CycleResult / dynoResponse / API 载荷
 
-3rdparty/bin/                 # 构建期由 build.sh 下载（dyno / dynolog），embed 编入 main 包
+（dyno / dynolog 由 build.sh 装到系统 PATH，仓库不携带、不 embed）
 
 运行期产物：
 ├── <kpi-dir>/                # KPI 数据目录（外部 CATMonitor 写入，daemon 只读）
@@ -637,7 +632,7 @@ daemon/
 - **不引 Web 框架**：接口少且无中间件需求，`net/http` 标准库足够，与项目零额外依赖的风格一致
 - **结果以落盘 JSON 为数据源而非内存**：每周期结果 JSON 与 `daemon_meta.json` 落在该周期 dump 目录，`/straggler/results/*` 直接读文件——daemon 重启不丢历史；进程内 50 周期环形历史仅作摘要缓存
 - **采集走 dynolog/dyno 而非 watch/exec 插件**：vllm 经 dynolog IPC 接入（`MSMONITOR_USE_DAEMON=1` 由服务侧设置，守护进程不管）；工具侧统一以 `dyno nputrace` 触发，不绑定部署侧脚本
-- **二进制用 embed 而非仓库分发**：dyno/dynolog 不进版本库（`3rdparty/bin/` 仅构建期产物），build.sh 下载、embed 编入、运行时解包到临时目录调用——仓库不携带第三方制品，产物单二进制可自包含交付
+- **dyno/dynolog 用系统包管理器安装而非 embed/仓库分发**：仓库不携带第三方制品；build.sh 从 msmonitor 包取 `dynolog_*.deb` 用系统包管理器安装（dpkg 原生 / rpm 系 alien 转换），二者走 PATH 调用。代价是 daemon 运行机器必须先装好（否则启动即报错），换来编译与交付简单：Go 产物与采集工具解耦，任何平台都能出包
 - **固定等待而非轮询就绪**：dyno 响应不含落盘路径，采集完成时间无法获知；按联调实测默认等待 60s（`--collect-wait` 可调）
 - **无鉴权**：内网诊断工具，控制接口的风险面与绑定地址相同；如需暴露再补 token
 

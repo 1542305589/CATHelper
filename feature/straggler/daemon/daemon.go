@@ -32,7 +32,6 @@ type Daemon struct {
 	cycleID       int           // per-process id, starting from 1
 	cycleInFlight bool
 	dynolog       *exec.Cmd     // dynolog child to kill on shutdown (nil = reusing existing)
-	tmpDir        string        // extracted-binaries dir, removed on shutdown
 }
 
 // New creates a Daemon. detect is the shared profiler pipeline
@@ -59,10 +58,6 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		interval: cfg.Interval,
 	}
 }
-
-// SetTempDir records the directory holding the extracted binaries so it can be
-// removed on graceful shutdown (call after New, before Run).
-func (d *Daemon) SetTempDir(dir string) { d.tmpDir = dir }
 
 // Run starts the HTTP server and dynolog, then cycles on the interval ticker
 // until ctx is cancelled (SIGINT/SIGTERM) or the HTTP server fails. The first
@@ -236,7 +231,7 @@ func (d *Daemon) finishCycle(cr *CycleResult) {
 }
 
 // shutdown stops the HTTP server, waits for an in-flight cycle (max 10 min),
-// kills the dynolog child we spawned, and removes the extracted-binaries dir.
+// and kills the dynolog child we spawned.
 func (d *Daemon) shutdown(srv *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -260,9 +255,6 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 	if d.dynolog != nil {
 		_ = d.dynolog.Process.Kill()
 		_, _ = d.dynolog.Process.Wait()
-	}
-	if d.tmpDir != "" {
-		os.RemoveAll(d.tmpDir)
 	}
 	d.logf("daemon stopped")
 	return nil
