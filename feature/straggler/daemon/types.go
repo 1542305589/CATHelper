@@ -36,10 +36,12 @@ func DefaultConfig() Config {
 	}
 }
 
-// CycleResult is one cycle's metadata + result. The data source is the
-// --profiler-dir root (dyno writes one master_<pid>_<ts>_ascend_pt subdir per
-// rank under it); the root is removed at the end of the cycle and the small
-// result artifacts live in ./daemon_results/<start>/. Serialized (minus the
+// CycleResult is one cycle's metadata + result. The transient raw dump source
+// is the --profiler-dir root (dyno writes one master_<pid>_<ts>_ascend_pt
+// subdir per rank under it); the root is removed at the end of the cycle and
+// the small result artifacts live in ./daemon_results/<start>/. DumpDir is
+// that result archive dir — the actual post-analysis drop location — NOT the
+// profiler root (which is deleted at every cycle's end). Serialized (minus the
 // heavy fields) into daemon_meta.json inside the archive dir as a durable
 // record; the query API reads the in-memory store, not this file.
 type CycleResult struct {
