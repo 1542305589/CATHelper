@@ -56,7 +56,6 @@ func main() {
 	var inputPath string
 	var kpiPath string
 	var kpiJSONLDir string
-	var faultsubURL string
 	degradation := 0.3
 	spaceRatioThreshold := 0.0 // 0 = use the default SpaceRatioThreshold (2.0)
 	debugOutput := false       // --debug-output: include all normal+abnormal data (kpi.debug / profiler.debug) in straggler_output.json
@@ -94,8 +93,6 @@ func main() {
 			kpiPath = val
 		case "--kpi-jsonl-dir":
 			kpiJSONLDir = val
-		case "--faultsub-url":
-			faultsubURL = val
 		case "--space-ratio-threshold":
 			if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
 				spaceRatioThreshold = parsed
@@ -117,7 +114,7 @@ func main() {
 
 	// No input at all → usage error before anything runs.
 	if inputPath == "" && kpiInput == "" {
-		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--space-ratio-threshold=2.0]\n")
+		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0]\n")
 		fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
 		os.Exit(1)
 	}
@@ -156,12 +153,6 @@ func main() {
 		} else {
 			// KPI text report (stdout only; no file is written).
 			fmt.Print(resource.WriteReport(kpiResult))
-
-			// Emit anomalous cards back to CATMonitor faultsub (closed loop).
-			if faultsubURL != "" {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Emitting straggler_detected events to faultsub: %s\n", faultsubURL)
-				resource.EmitToFaultSub(kpiResult, resource.EmitConfig{URL: faultsubURL})
-			}
 
 			// Cross-validation decision messages (the combined JSON is written at
 			// the end of main, after the Profiler step, when this is the only

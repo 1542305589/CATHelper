@@ -300,7 +300,7 @@ KPI 指标天然分属两个层面（分类用于文档/注册表语义，检测
 
 ## 6. 输出（根因定界与跨卡关联已移除）
 
-根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。faultsub 事件 detail 为 `{指标: score}`。
+根因定界（C1-C10 / N1-N4 规则）与跨卡关联已删除：输出只保留**异常指标及其空间 score（劣化程度）**。
 
 ---
 
@@ -326,8 +326,7 @@ KPI 指标天然分属两个层面（分类用于文档/注册表语义，检测
                │ 2. 10秒聚合          │
                │ 3. 空间检测（最后一点 │
                │    peer，指标独立）   │
-               │ 4. stdout 报告 +     │
-               │    faultsub 回注     │
+               │ 4. stdout 报告       │
                └──────────┬─────────┘
                           │
                           ▼
@@ -352,7 +351,7 @@ KPI 指标天然分属两个层面（分类用于文档/注册表语义，检测
 // main.go 实际流程（简化）
 func main() {
     // 1. CLI 解析：path / degradation / --kpi-path / --kpi-jsonl-dir /
-    //    --faultsub-url / --space-ratio-threshold / --debug-output
+    //    --space-ratio-threshold / --debug-output
     //    KPI 输入优先 --kpi-jsonl-dir；两个输入都没有 → 用法提示退出
 
     // ── 第一道防线：KPI 资源指标检测 ──
@@ -367,9 +366,6 @@ func main() {
             // 告警；有 path 则继续 Profiler，无则最终无输出文件
         } else {
             fmt.Print(resource.WriteReport(kpiResult))       // stdout 文本报告
-            if faultsubURL != "" {                            // 闭环回注
-                resource.EmitToFaultSub(kpiResult, resource.EmitConfig{URL: faultsubURL})
-            }
             // 交叉验证决策消息（不阻断流程）：
             //   有异常 + 无 path → "Done."
             //   有异常 + 有 path → 继续 Profiler 交叉验证
@@ -427,8 +423,7 @@ feature/straggler/
   │   ├── json_reader.go      # CATMonitor straggler_kpi JSONL 读取
   │   ├── aggregator.go       # 10秒截尾均值聚合
   │   ├── space_detector.go   # 空间维度检测（peer 对比，最后一点）
-  │   ├── report.go           # 管线编排 + stdout 文本报告
-  │   └── emit.go             # faultsub 闭环回传
+  │   └── report.go           # 管线编排 + stdout 文本报告
   ├── clustering/             # 共享 kmeans 比例检测（与 Profiler 共用）
   │   └── kmeans.go
   └── config/                 # Profiler 共享配置（KPI 配置在 resource 包内）
@@ -572,10 +567,6 @@ func HasAnomaly(result *DetectionResult) bool
 // WriteReport 生成 KPI 文本报告（仅 stdout，不落盘）。
 func WriteReport(result *DetectionResult) string
 
-// ==================== emit.go ====================
-// EmitToFaultSub 逐异常卡 POST straggler_detected 事件到 faultsub ingest。
-func EmitToFaultSub(result *DetectionResult, cfg EmitConfig)
-
 // ==================== clustering/kmeans.go ====================
 // Detect 递归 kmeans 比例检测（过滤 ≤0；不足 2 个 → nil）。
 func Detect(values []float64, ratioThreshold float64, highIsAnomaly bool) []Result
@@ -601,7 +592,6 @@ slowNodeDetection path=/data/dir [degradation=0.3]
 KPI 检测专用选项:
   --kpi-path=<dir>                KPI 模式：每节点 CSV + node_config.json 的目录
   --kpi-jsonl-dir=<dir>           KPI 模式：CATMonitor straggler_kpi_{date}.jsonl 目录（优先于 --kpi-path）
-  --faultsub-url=<url>            FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环）
   --space-ratio-threshold=<float> 空间簇比例阈值，默认 2.0（独立旋钮，不随 degradation 变化）
   --debug-output                  输出全量数据：KPI 全部指标×全部卡；Profiler 全部节点/通信组
 ```
