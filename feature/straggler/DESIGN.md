@@ -395,8 +395,10 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
 
 4. 固定等待 --collect-wait（默认 60s），让 --iterations 个迭代完成落盘
 
-5. 定位本次产物：扫描 --profiler-dir 根目录，取「触发时间戳之后修改」的最新
-   目录作为 profiler_path
+5. 定位本次产物：内容驱动——递归扫 --profiler-dir，找「触发时间戳之后有文件
+   被修改」的顶层子目录（取含最新文件者）作为 profiler_path；不用目录自身 mtime
+   （新数据落入既有深层子目录时顶层 mtime 不更新）。找不到时错误信息列出顶层
+   各条目的 mtime + 名字便于核对实际落盘结构
    （dyno 响应不含落盘路径；首次联调时实测确认落盘目录结构）
 
 6. 转换为 .db（依赖 PATH 上的 python 已安装 torch_npu）：
