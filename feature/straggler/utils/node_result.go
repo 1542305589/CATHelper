@@ -267,13 +267,28 @@ func readRankMeta(rank int) rankMeta {
 			}
 		}
 	}
+	npuOK := false
 	if raw, err := os.ReadFile(filepath.Join(metricDir, "npu_info_"+strconv.Itoa(rank)+".json")); err == nil {
 		var ni struct {
 			ID int `json:"id"`
 		}
 		if json.Unmarshal(raw, &ni) == nil {
 			m.npuID = ni.ID
+			npuOK = true
 		}
+	}
+
+	// No host metadata (HOST_INFO table missing or empty in the source .db):
+	// fall back to a synthetic per-rank node identity so detected anomalies
+	// still appear in node_result instead of being silently dropped. Per-rank
+	// keys never merge distinct physical nodes incorrectly.
+	if m.hostname == "" {
+		m.hostname = fmt.Sprintf("node-%d", rank)
+	}
+	// No NPU metadata (NPU_INFO missing): use the rank as the NPU id so
+	// per-rank entries on the same node do not collide on id 0.
+	if !npuOK {
+		m.npuID = rank
 	}
 	return m
 }

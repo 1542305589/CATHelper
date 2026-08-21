@@ -155,9 +155,10 @@ func metricSection(metricName string, data map[int]float64, abnormalRanks map[in
 	sb.WriteString(sepLine(metricName, 80))
 
 	top := sorted
-	bottom := sorted[max(0, len(sorted)-bottomN):]
+	var bottom []kv
 	if len(sorted) > topN+bottomN {
 		top = sorted[:topN]
+		bottom = sorted[len(sorted)-bottomN:]
 	}
 
 	var values []float64
@@ -192,10 +193,9 @@ func metricSection(metricName string, data map[int]float64, abnormalRanks map[in
 
 	if len(sorted) > topN+bottomN {
 		sb.WriteString(fmt.Sprintf("  ...  (省略 %d 个)\n", len(sorted)-topN-bottomN))
-	}
-
-	for i, kv := range bottom {
-		printRank(len(sorted)-len(bottom)+i, kv)
+		for i, kv := range bottom {
+			printRank(len(sorted)-len(bottom)+i, kv)
+		}
 	}
 
 	return sb.String()
