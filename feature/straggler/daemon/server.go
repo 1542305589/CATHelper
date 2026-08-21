@@ -60,7 +60,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleResultsLatest serves the most recent cycle's combined result JSON
-// (the query API data source). Falls back to the newest dump on disk so a
+// (the query API data source). Falls back to the newest archive on disk so a
 // daemon restart does not lose the last result.
 func (d *Daemon) handleResultsLatest(w http.ResponseWriter, r *http.Request) {
 	if c := d.st.latest(); c != nil && c.JSONPath != "" && fileExists(c.JSONPath) {
@@ -78,8 +78,8 @@ func (d *Daemon) handleResultsLatest(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "no result yet", http.StatusNotFound)
 }
 
-// handleResultsHistory lists cycle summaries, newest first, scanning each dump
-// directory's daemon_meta.json (survives restart). ?limit=N caps the list.
+// handleResultsHistory lists cycle summaries, newest first, scanning each
+// archive directory's daemon_meta.json (survives restart). ?limit=N caps the list.
 func (d *Daemon) handleResultsHistory(w http.ResponseWriter, r *http.Request) {
 	limit := 10
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -179,10 +179,11 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 // Disk metadata helpers (daemon_meta.json in each dump directory)
 // ---------------------------------------------------------------------------
 
-// listMetaFiles parses daemon_meta.json from every dump directory under
-// ProfilerDir, newest first. This is the restart-surviving history source.
+// listMetaFiles parses daemon_meta.json from every cycle's archive directory
+// (./daemon_results/<started-at>), newest first. This is the restart-surviving
+// history source; the heavy dump dirs are removed after each cycle.
 func (d *Daemon) listMetaFiles() []*CycleResult {
-	entries, err := os.ReadDir(d.cfg.ProfilerDir)
+	entries, err := os.ReadDir("daemon_results")
 	if err != nil {
 		return nil
 	}
@@ -191,7 +192,7 @@ func (d *Daemon) listMetaFiles() []*CycleResult {
 		if !e.IsDir() {
 			continue
 		}
-		raw, rerr := os.ReadFile(filepath.Join(d.cfg.ProfilerDir, e.Name(), "daemon_meta.json"))
+		raw, rerr := os.ReadFile(filepath.Join("daemon_results", e.Name(), "daemon_meta.json"))
 		if rerr != nil {
 			continue
 		}

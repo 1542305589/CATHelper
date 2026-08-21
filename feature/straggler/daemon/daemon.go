@@ -133,20 +133,26 @@ func (d *Daemon) startCycle() {
 // CycleResult (success or error) into the store.
 func (d *Daemon) runCycle(id int) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now()}
+	var dumpDir string // heavy profiler dump dir, removed when the cycle ends
 	defer func() {
 		cr.FinishedAt = time.Now()
 		cr.DurationMs = cr.FinishedAt.Sub(cr.StartedAt).Milliseconds()
+		// Results are stored in daemon_results/<start>/ during the cycle; the
+		// heavy dump dir is removed at the end of every cycle, success or
+		// failure, so profiler data never accumulates across cycles and a stale
+		// dump from a failed cycle can't be picked up as "newest" by a later one.
+		d.cleanupDump(cr, dumpDir)
 		d.finishCycle(cr)
 	}()
 
 	// 1. Collect: dyno trigger -> verify commandStatus -> wait -> locate dump dir.
-	triggerAt := time.Now()
 	if err := d.triggerCollection(); err != nil {
 		cr.Error = err.Error()
 		return
 	}
 	time.Sleep(d.cfg.CollectWait)
-	dumpDir, err := d.locateLatestDumpDir(triggerAt)
+	var err error
+	dumpDir, err = d.locateLatestDumpDir()
 	if err != nil {
 		cr.Error = err.Error()
 		return
@@ -186,19 +192,40 @@ func (d *Daemon) runCycle(id int) {
 	cr.Summary = res.Summary
 	cr.Report = res.Report
 
-	// 7. Write the combined result JSON (query API data source) + cycle meta.
-	jsonPath := filepath.Join(dumpDir, "straggler_output.json")
+	// 7. Write the combined result JSON + cycle meta into the per-cycle archive
+	//    dir (./daemon_results/<start>/), OUTSIDE the dump dir. Keeping results
+	//    out of the dump dir is what lets the cycle's end delete the heavy
+	//    profiler folder without touching the query data source.
+	archive := filepath.Join("daemon_results", cr.StartedAt.Format("20060102-150405"))
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		cr.Error = fmt.Sprintf("mkdir archive: %v", err)
+		return
+	}
+	jsonPath := filepath.Join(archive, "straggler_output.json")
 	if err := WriteCombinedJSON(cr.KPI, cr.Result, jsonPath); err != nil {
 		cr.Error = fmt.Sprintf("write result JSON: %v", err)
 		return
 	}
+	cr.DumpDir = archive
 	cr.JSONPath = jsonPath
-	if err := writeMeta(dumpDir, cr); err != nil {
+	if err := writeMeta(archive, cr); err != nil {
 		d.logf("write daemon_meta.json: %v", err)
 	}
 	// Running-dir copy of the latest combined result (same shape as one-shot).
 	if err := copyFile(jsonPath, filepath.Join(".", "straggler_output.json")); err != nil {
 		d.logf("copy result to run dir: %v", err)
+	}
+
+	// 8. The text report is written inside the dump dir (report.WriteReport
+	//    derives its path from the input dir); copy it into the archive before
+	//    the dump dir is removed so /report/latest survives a restart. Best
+	//    effort — cr.Report already holds the text in memory for this session.
+	if src := filepath.Join(dumpDir, "analysis_result", "detection_report.log"); fileExists(src) {
+		if err := os.MkdirAll(filepath.Join(archive, "analysis_result"), 0o755); err != nil {
+			d.logf("cycle %d copy report: %v", cr.ID, err)
+		} else if err := copyFile(src, filepath.Join(archive, "analysis_result", "detection_report.log")); err != nil {
+			d.logf("cycle %d copy report: %v", cr.ID, err)
+		}
 	}
 }
 
@@ -346,4 +373,20 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0644)
+}
+
+// cleanupDump removes the heavy dump dir at the end of every cycle, success or
+// failure, so profiler data never accumulates across cycles and a stale dump
+// from a failed cycle can't be picked up as "newest" by a later one. The result
+// artifacts already live in daemon_results/<start>/, so removing the dump dir
+// loses nothing queryable. Failures are logged, never fatal.
+func (d *Daemon) cleanupDump(cr *CycleResult, dumpDir string) {
+	if dumpDir == "" {
+		return
+	}
+	if err := os.RemoveAll(dumpDir); err != nil {
+		d.logf("cycle %d cleanup failed, kept %s: %v", cr.ID, dumpDir, err)
+		return
+	}
+	d.logf("cycle %d cleaned: removed %s", cr.ID, dumpDir)
 }
