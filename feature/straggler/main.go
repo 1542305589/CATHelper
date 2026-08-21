@@ -13,18 +13,17 @@
 //     The daemon periodically triggers profiler collection (dynolog/dyno),
 //     converts and analyses the data, and exposes results + control over HTTP.
 //
-// Build (daemon mode needs the dyno/dynolog binaries first):
+// Build:
 //
 //	bash build.sh && CGO_ENABLED=0 go build -o slowNodeDetection .
 package main
 
 import (
 	"context"
-	"embed"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,14 +39,6 @@ import (
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/resource"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
 )
-
-// dynoBinaries embeds the dyno/dynolog collectors fetched by build.sh. They
-// are compiled into the binary and unpacked to a temp dir at daemon start.
-// Run build.sh before `go build` — the embed pattern fails to compile when the
-// files are absent.
-//
-//go:embed 3rdparty/bin/dyno 3rdparty/bin/dynolog
-var dynoBinaries embed.FS
 
 func main() {
 	// 1. Parse CLI arguments.
@@ -151,20 +142,17 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Unpack the embedded dyno/dynolog binaries to a temp dir.
-		tmpDir, err := os.MkdirTemp("", "straggler-daemon-")
+		// dyno/dynolog are installed system-wide by build.sh (a .deb installed
+		// via the host package manager); resolve them from PATH instead of
+		// embedding them in the binary.
+		dynoBin, err := exec.LookPath("dyno")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: create temp dir: %v\n", err)
+			fmt.Fprintf(os.Stderr, "ERROR: dyno not found in PATH (run build.sh to install it)\n")
 			os.Exit(1)
 		}
-		dynoBin, err := extractBinary(dynoBinaries, "3rdparty/bin/dyno", tmpDir)
+		dynologBin, err := exec.LookPath("dynolog")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: extract dyno: %v (run build.sh first)\n", err)
-			os.Exit(1)
-		}
-		dynologBin, err := extractBinary(dynoBinaries, "3rdparty/bin/dynolog", tmpDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: extract dynolog: %v (run build.sh first)\n", err)
+			fmt.Fprintf(os.Stderr, "ERROR: dynolog not found in PATH (run build.sh to install it)\n")
 			os.Exit(1)
 		}
 
@@ -181,7 +169,6 @@ func main() {
 		cfg.DebugOutput = debugOutput
 
 		d := daemon.New(cfg, detectFromParsedData)
-		d.SetTempDir(tmpDir)
 
 		if kpiDir != "" {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Daemon Mode (profiler=%s kpi=%s) ===\n", profilerDir, kpiDir)
@@ -388,15 +375,3 @@ func summarizeProfiler(result config.DegradationData) map[string]int {
 	}
 }
 
-// extractBinary writes one embedded binary to dir with executable permission.
-func extractBinary(fs embed.FS, name, dir string) (string, error) {
-	data, err := fs.ReadFile(name)
-	if err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, filepath.Base(name))
-	if err := os.WriteFile(path, data, 0o755); err != nil {
-		return "", err
-	}
-	return path, nil
-}

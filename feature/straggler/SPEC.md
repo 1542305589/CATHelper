@@ -513,7 +513,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 - 首个周期在启动 **`interval` 之后**运行（不等启动即跑）；`POST /daemon/trigger` 手动补跑；已有周期在跑时 tick 跳过（single-flight）。
 - `config.FilePath` 每周期设为当次 dump 目录；KPI 每周期重读 `--kpi-dir` 取最新数据，无跨周期状态。
 - 未提供 `--kpi-dir`：步骤 6 跳过，合并 JSON 不含 `kpi` 键，周期仍成功（仅 Profiler）。
-- 退出：SIGINT/SIGTERM → 停 HTTP → 等 in-flight 周期（≤10min）→ 杀掉自己拉起的 dynolog → 清理解包临时目录。
+- 退出：SIGINT/SIGTERM → 停 HTTP → 等 in-flight 周期（≤10min）→ 杀掉自己拉起的 dynolog。
 
 ### 3.2 HTTP 接口契约
 
@@ -589,11 +589,11 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 失败的周期照常写 `daemon_meta.json`（error 非空），history 可查。
 
-### 3.5 二进制 embed 与构建
+### 3.5 dyno/dynolog 安装与构建
 
-- `main.go` `//go:embed 3rdparty/bin/dyno 3rdparty/bin/dynolog`（embed 只能引用包目录以下路径 → 必须放 `package main`）；daemon 启动 `os.MkdirTemp` 解包（0o755）。
-- `3rdparty/bin/` 不进版本库（gitignore）；`go build` 前必须保证两个文件存在（`build.sh` 负责下载）。
-- `build.sh`：架构检查(aarch64) → 下载 msmonitor zip 取 dyno/dynolog → Python 版本检查(3.9–3.12) → pip 装 mindstudio_monitor wheel → `CGO_ENABLED=0 go build -o slowNodeDetection .`。详见 README「九、构建与部署」或 build.sh 注释。
+- dyno/dynolog **不进版本库、不 embed**：build.sh 从 msmonitor daily bucket 直接下载 `dynolog_0.3.2_1.aarch64.deb`（`https://ascend-package.obs.cn-north-4.myhuaweicloud.com/msmonitor/daily/2026040207/deb/aarch64/`），用系统包管理器安装（dpkg 原生；rpm 系需 `alien` 转换；权限不足经 sudo），二者直接可从 PATH 调用。`go build` 完全不依赖它们。
+- daemon 启动时 `exec.LookPath("dyno")` / `exec.LookPath("dynolog")` 从 PATH 解析路径注入 `Config`；解析失败 → 报错退出，提示先跑 build.sh。
+- `build.sh`：架构检查(aarch64) → 下载 msmonitor zip 装 dyno/dynolog(.deb) → Python 版本检查(3.9–3.12) → pip 装 mindstudio_monitor wheel → Go 工具链检查（缺失/过旧时从阿里云下载并持久化 PATH）→ `CGO_ENABLED=0 go build -o slowNodeDetection .`。详见 README「九、构建与部署」或 build.sh 注释。
 
 ---
 
@@ -601,7 +601,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 | 包 | 职责 |
 |------|--------|
-| `main` | CLI 参数解析、双模式编排（KPI → Profiler 降级链）、合并 JSON 输出、embed 二进制 |
+| `main` | CLI 参数解析、双模式编排（KPI → Profiler 降级链）、合并 JSON 输出、daemon 启动时 PATH 解析 dyno/dynolog |
 | `daemon` | 守护进程：周期调度（dynolog/dyno 采集）、runCycle 编排、HTTP 查询/控制、结果落盘 |
 | `resource` | KPI 检测引擎：解析 → 聚合 → 空间检测 → 指标分组 → 报告 → JSON 导出 |
 | `clustering` | 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 均质化聚类共用） |
@@ -629,7 +629,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 - **单一检测管线**：daemon 与一次性模式共用 `detectFromParsedData`（main 以 `DetectFunc` 注入 daemon，避免 import cycle）。
 - **每周期独立 dump 目录**：周期之间无增量状态；历史 = 各 dump 目录的 `daemon_meta.json`（重启不丢）。
 - **落盘 JSON 为查询数据源**：HTTP 查询读 dump 目录落盘文件，进程内 store 只是最新周期的快速路径。
-- **embed 二进制**：dyno/dynolog 编译进 main 包（embed 不能跨包），daemon 启动解包到临时目录，退出清理。
+- **采集工具走系统安装而非 embed**：dyno/dynolog 由 build.sh 用系统包管理器安装（`dynolog_*.deb`），走 PATH 调用，仓库不携带第三方制品；代价是 daemon 机器须先装好，换来编译与交付简单（Go 产物与采集工具解耦，任何平台可出包）。
 - **KPI 复用**：daemon 的 KPI 检测与一次性模式同一实现（`resource.RunDetectionFromData`），输入换成每周期重读 `--kpi-dir`，无额外状态。
 
 ---
@@ -640,12 +640,12 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 ```bash
 cd feature/straggler
-bash build.sh   # 架构检查 → 下载 dyno/dynolog → Python 版本检查 → 装 wheel → go build
+bash build.sh   # 架构检查 → 装 dyno/dynolog(.deb) → Python 版本检查 → 装 wheel → Go 工具链 → go build
 ```
 
-`go build` 编译期校验 `3rdparty/bin/dyno`、`3rdparty/bin/dynolog` 存在（`//go:embed`，缺失即报错）；build.sh 负责下载，目录已被 gitignore。
+`go build` 不依赖 dyno/dynolog（无 embed），任何平台均可直接编译；daemon 模式运行时才要求目标 aarch64 主机已装好二者（跑一次 build.sh）。
 
-**跨平台出包**（一次性模式；需先有 embed 文件）：
+**跨平台出包**（一次性模式）：
 
 ```bash
 # Linux ARM64（目标平台）
