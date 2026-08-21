@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional, Tuple
-
 import numpy as np
 import yaml
 
@@ -232,17 +231,17 @@ class ILLDetector:
     # 乱码检测
     def _detect_garbled(
         self,
-        window_topk_logprobs: List[Dict[int, float]],
+        window_token_ids: np.ndarray,
         window_logprobs: np.ndarray,
         tk2cat: Dict[str, int],
         vocab_size: int,
     ) -> bool:
-        seq_len = len(window_topk_logprobs)  # 当前序列长度
+        seq_len = len(window_logprobs)  # 当前序列长度
 
         # 1) 如果有词表信息,使用生僻字的检测方法
         if tk2cat is not None:
             flag, rare_character_count = self._detect_rare_character(
-                window_topk_logprobs, window_logprobs, tk2cat, vocab_size
+                window_token_ids, window_logprobs, tk2cat, vocab_size
             )
             if flag and rare_character_count / seq_len > self.garbled_window_ratio:
                 return True
@@ -271,7 +270,7 @@ class ILLDetector:
     # 生僻字检测
     def _detect_rare_character(
         self,
-        window_topk_logprobs: List[Dict[int, float]],
+        window_token_ids: np.ndarray,
         window_logprobs: np.ndarray,
         tk2cat: Dict[str, int],
         vocab_size: int,
@@ -292,7 +291,7 @@ class ILLDetector:
         cat_hit_count = 0
         for dim in dims:
             categories = set(
-                tk2cat[str(item)] for item in list(window_topk_logprobs[dim].keys()) if item <= vocab_size
+                tk2cat[str(int(item))] for item in window_token_ids[dim] if int(item) <= vocab_size
             )  # 统计topk的token-id对应的类别
             # 剔除一些类别
             if len(categories.intersection(self._FILTER_CATEGORIES)) == 2:
@@ -365,43 +364,61 @@ class ILLDetector:
             return True, count_res
         return False, count_res
 
-    def _sort_and_truncate_topk(self, topk_logprobs, topk):
-        return [
-            dict(sorted(topk_logprob.items(), key=lambda x: x[1], reverse=True)[:topk])
-            for topk_logprob in topk_logprobs
-        ]
+    def _sort_and_truncate_topk(
+        self,
+        logprobs: np.ndarray,
+        token_ids: np.ndarray,
+        topk: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """按 logprob 降序排序（stable）并截断到 topk 列。
+
+        返回 (sorted_logprobs, sorted_token_ids)，形状均为 (num_tokens, topk)。
+        """
+        if logprobs.size == 0:
+            return logprobs, token_ids
+        # stable sort 保证 tie-breaking 与 Python sorted() 一致
+        order = np.argsort(-logprobs, axis=1, kind="stable")
+        lp_sorted = np.take_along_axis(logprobs, order, axis=1)[:, :topk]
+        tid_sorted = np.take_along_axis(token_ids, order, axis=1)[:, :topk]
+        return lp_sorted, tid_sorted
 
     # 主流程
     def detector(
         self,
-        topk_logprobs: List[Dict[int, float]],
-        tokens: List[int],
+        logprobs: np.ndarray,
+        token_ids: np.ndarray,
         topk_n: Optional[int] = None,
     ) -> DetectionResult:
         """
         单个请求的检测入口
 
+        Args:
+            logprobs: shape=(num_tokens, topk_actual), float32
+            token_ids: shape=(num_tokens, topk_actual), int32
+            topk_n: top-K 截断值；None 时用全部列
+
         Return:
             DetectionResult 包含 is_ill 和 ill_type
         """
-        # 当 topk_logprobs 或 tokens 为空时，直接返回
-        if not (topk_logprobs and tokens):
+        # 当数据为空时，直接返回
+        if logprobs.size == 0 or token_ids.size == 0:
             return DetectionResult()
 
-        tk2cat, vocab_size = self.get_tk2cat()  # 获取token ids to cagetory
+        tk2cat, vocab_size = self.get_tk2cat()  # 获取token ids to category
 
-        topk = topk_n if topk_n is not None else min(len(logp) for logp in topk_logprobs)
-        # 对 topk_logprobs 降序排列，并取 topk 数据
-        topk_logprobs = self._sort_and_truncate_topk(topk_logprobs, topk)
-        # 包含排序后 topk logprobs数据
-        logprobs = np.array([list(item.values()) for item in topk_logprobs])
+        topk = topk_n if topk_n is not None else logprobs.shape[1]
+        # 按 logprob 降序排列（stable），截断到 topk 列
+        logprobs, token_ids = self._sort_and_truncate_topk(logprobs, token_ids, topk)
+
+        # tokens = top-1 token_id（排序后）作为输出 token 序列
+        tokens = token_ids[:, 0].tolist()
 
         # 如果logp为 nan/inf 时，直接返回 NaN Value
         if np.isnan(logprobs).any() or np.isinf(logprobs).any():
             return DetectionResult(is_ill=True, ill_type=4)
 
         if len(tokens) < self.stride:  # 只检测生僻字
-            rare_flag, _ = self._detect_rare_character(topk_logprobs, logprobs, tk2cat, vocab_size)
+            rare_flag, _ = self._detect_rare_character(token_ids, logprobs, tk2cat, vocab_size)
             if rare_flag:
                 return DetectionResult(is_ill=True, ill_type=1)
             return DetectionResult()
@@ -414,17 +431,17 @@ class ILLDetector:
         # 滑窗检测
         for start, window_tokens in self.sliding_window(tokens):
             end = start + len(window_tokens)
-            window_topk_logprobs = topk_logprobs[start:end]
+            window_token_ids = token_ids[start:end]
 
             window_logprobs = logprobs[start:end]  # 包含 topk logprobs数据
             window_top1_logprobs = window_logprobs[:, 0]  # 包含 top1 logprobs数据
 
             # 1) 生僻字
-            rare_in_window, _ = self._detect_rare_character(window_topk_logprobs, window_logprobs, tk2cat, vocab_size)
+            rare_in_window, _ = self._detect_rare_character(window_token_ids, window_logprobs, tk2cat, vocab_size)
             rare_flag = rare_in_window or rare_flag  # 即使检出生僻字，也不停止
 
             # 2） 乱码
-            garbled = self._detect_garbled(window_topk_logprobs, window_logprobs, tk2cat, vocab_size)
+            garbled = self._detect_garbled(window_token_ids, window_logprobs, tk2cat, vocab_size)
             if self._update_garbled_state(garbled):
                 return DetectionResult(is_ill=True, ill_type=2)
 
@@ -445,14 +462,17 @@ class ILLDetector:
     # 批量处理多个请求
     def run(
         self,
-        topk_logprobs: List[List[Dict[int, float]]],
-        tokens: List[List[int]],
+        logprobs: List[np.ndarray],
+        token_ids: List[np.ndarray],
         topk_n: Optional[int] = None,
     ) -> List[List]:
         """
+        Args:
+            logprobs: per choice 数组列表, 每个 shape=(num_tokens, topk_actual)
+            token_ids: per choice 数组列表, 同上
         return:
             二维列表, 多请求下输出结果, 如:[[False,0],[True,1]] 表示第1个请求推理正常, 第2个请求推理异常,存在生僻字
         """
-        nums = len(tokens)
-        results = [self.detector(topk_logprobs[i], tokens[i], topk_n=topk_n) for i in range(nums)]
+        nums = len(logprobs)
+        results = [self.detector(logprobs[i], token_ids[i], topk_n=topk_n) for i in range(nums)]
         return [[res.is_ill, res.ill_type] for res in results]

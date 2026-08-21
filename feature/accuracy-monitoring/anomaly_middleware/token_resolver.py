@@ -1,13 +1,11 @@
 """TokenTextResolver + tokenizer 获取（spec §4 / plan Task 2）。
 
 同进程部署（--middleware）：vLLM 已缓存模型 tokenizer，本地 from_pretrained 命中、零外网。
-model_hint（请求体 model 字段）解析失败 → loopback GET /v1/models 取 served id 兜底。
-裸 served 名（如 Qwen3-0.6B，HF 缓存键为 Qwen/Qwen3-0.6B）→ HF 缓存扫描补全完整 repo id。
-均失败 → None（软降级，strip 退回 null/bytes）。
+启动期同步加载：env → argv(--tokenizer) → argv(--model) → HF 缓存扫描。
+均失败 → raise（启动期 fail-fast）。
 """
 from __future__ import annotations
 
-import json
 import sys
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
@@ -29,52 +27,6 @@ def _from_pretrained(path: str, **kwargs: Any) -> Any:
     return AutoTokenizer.from_pretrained(path, **kwargs)
 
 
-async def _fetch_model_info(
-    server: Optional[Tuple],
-) -> Tuple[Optional[str], Optional[str]]:
-    """loopback GET /v1/models → 返回 (root, served_model_id)。
-
-    `root` 即 `vllm serve <model>` 传入的真实模型路径（本地目录 / HF repo id），
-    与启动命令完全一致；`id` 为 served 名。失败返回 (None, None)。
-    """
-    if not server:
-        return (None, None)
-    try:
-        host, port = server[0], int(server[1])
-    except (TypeError, ValueError, IndexError):
-        return (None, None)
-    url = f"http://{host}:{port}/v1/models"
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as c:
-            r = await c.get(url)
-        if r.status_code != 200:
-            return (None, None)
-        data = r.json()
-    except Exception as exc:
-        logger.warning("loopback /v1/models 失败: %s", exc)
-        return (None, None)
-    items = data.get("data") if isinstance(data, dict) else None
-    if isinstance(items, list) and items:
-        first = items[0]
-        if isinstance(first, dict):
-            root = first.get("root")
-            if not isinstance(root, str) or not root:
-                root = None
-            mid = first.get("id")
-            if not isinstance(mid, str) or not mid:
-                mid = None
-            return (root, mid)
-    return (None, None)
-
-
-async def _fetch_served_model_id(server: Optional[Tuple]) -> Optional[str]:
-    """兼容封装：仅返回首个 served model id；失败 None。"""
-    _, mid = await _fetch_model_info(server)
-    return mid
-
-
 @dataclass
 class VllmArgvInfo:
     """`vllm serve` 命令行解析结果。"""
@@ -88,7 +40,7 @@ class VllmArgvInfo:
 # vLLM serve 中常见的需要消费下一个参数的 flag（非穷举）。
 # 未列出的 --flag 视为布尔开关（不消费值），其后的非 - 开头参数仍可被识别为 model。
 # 如果某个带值 flag 未在此集合中，其值可能被误认为 model 位置参数——
-# argv 解析失败时仍有 HTTP root 兜底。
+# argv 解析失败时仍有 HF 缓存兜底。
 _VALUE_FLAGS = frozenset({
     "--served-model-name", "--middleware", "--download-dir",
     "--dtype", "--quantization", "--revision", "--tokenizer-revision",
@@ -175,123 +127,6 @@ def parse_vllm_argv(argv: Optional[List[str]] = None) -> Optional[VllmArgvInfo]:
     return info
 
 
-def parse_vllm_server_from_argv(
-    argv: Optional[List[str]] = None,
-) -> Optional[Tuple[str, int]]:
-    """向后兼容封装：仅返回 (host, port) 或 None。"""
-    info = parse_vllm_argv(argv)
-    if info is None:
-        return None
-    return (info.host, info.port)
-
-
-def poll_model_root(
-    server: Tuple[str, int], timeout: float = 60.0, delay: float = 2.0
-) -> Optional[str]:
-    """同步轮询 loopback /v1/models 直至返回 root（vLLM 启动后 HTTP 才就绪）。
-
-    预热线程在服务监听前运行，/v1/models 尚未可达，须轮询等待。
-    返回 `vllm serve <model>` 的真实模型路径；超时返回 None（首请求慢路径兜底）。
-    """
-    import time
-    import urllib.request
-
-    host, port = server
-    url = f"http://{host}:{port}/v1/models"
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            with urllib.request.urlopen(url, timeout=2.0) as r:
-                if r.status == 200:
-                    data = json.loads(r.read().decode("utf-8"))
-                    items = data.get("data") if isinstance(data, dict) else None
-                    if isinstance(items, list) and items:
-                        root = items[0].get("root")
-                        if isinstance(root, str) and root:
-                            return root
-        except Exception:
-            pass
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(delay)
-    return None
-
-
-async def acquire_tokenizer(
-    model_hint: str, server: Optional[Tuple], explicit: Optional[str] = None
-) -> Optional[Any]:
-    """返回 tokenizer 对象或 None。
-
-    优先级：explicit(env) → --tokenizer(argv) → --model(argv) → model_hint
-           → /v1/models root → /v1/models served → HF 缓存扫描 → None。
-
-    argv 解析在测试环境（sys.argv 无 `serve`）返回 None，不影响后续 HTTP/缓存策略。
-    """
-    candidates: List[Tuple[str, str]] = []
-
-    # 1. 显式 env
-    if explicit:
-        candidates.append((explicit, "explicit(env)"))
-
-    # 2-3. argv: --tokenizer → --model
-    info = parse_vllm_argv()
-    if info is not None:
-        if info.tokenizer:
-            candidates.append((info.tokenizer, "--tokenizer(argv)"))
-        if info.model:
-            candidates.append((info.model, "serve <model>(argv)"))
-
-    # 4. model_hint（请求体 model 字段）
-    if model_hint:
-        candidates.append((model_hint, "model_hint"))
-
-    # 5-6. HTTP /v1/models
-    root = mid = None
-    if server:
-        try:
-            root, mid = await _fetch_model_info(server)
-        except Exception as exc:
-            logger.warning("获取 /v1/models 信息失败: %s", exc)
-        if root:
-            candidates.append((root, "/v1/models root"))
-        if mid:
-            candidates.append((mid, "/v1/models served"))
-
-    # 逐个尝试（去重）
-    seen: set = set()
-    for path, label in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        try:
-            logger.info("尝试加载 tokenizer (%s): %r", label, path)
-            return _from_pretrained(path, local_files_only=True)
-        except Exception as exc:
-            logger.info("from_pretrained(%s %r) 失败: %s", label, path, exc)
-
-    # 7. HF 缓存扫描兜底
-    for hint in (model_hint, root, mid):
-        if not hint:
-            continue
-        for repo_id in _scan_hf_cache_candidates(hint):
-            if repo_id in seen:
-                continue
-            seen.add(repo_id)
-            logger.info("cache scan: %r -> %r", hint, repo_id)
-            try:
-                return _from_pretrained(repo_id, local_files_only=True)
-            except Exception as exc:
-                logger.warning("from_pretrained(cache %r) 失败: %s", repo_id, exc)
-
-    logger.error(
-        "无法自动发现 tokenizer 路径。"
-        "请显式设置环境变量 VLLM_ANOMALY_TOKENIZER_MODEL 为 "
-        "`vllm serve --model` 的实际值"
-        "（或 `--tokenizer` 的值，如使用独立 tokenizer）。"
-    )
-    return None
-
-
 def _scan_hf_cache_candidates(hint: str) -> List[str]:
     """扫描 HF 缓存，返回 repo_id 以 /<hint> 结尾或等于 <hint> 的候选（短优先）。
 
@@ -317,6 +152,63 @@ def _scan_hf_cache_candidates(hint: str) -> List[str]:
             candidates.append(rid)
     candidates.sort(key=len)
     return candidates
+
+
+def acquire_tokenizer_sync(explicit: Optional[str] = None) -> Any:
+    """返回 tokenizer 对象。启动期同步调用。
+
+    优先级：explicit(env) → --tokenizer(argv) → --model(argv) → HF 缓存扫描
+    → 全部失败 raise（提示设置 VLLM_ANOMALY_TOKENIZER_MODEL）。
+    """
+    candidates: List[Tuple[str, str]] = []
+
+    # 1. 显式 env
+    if explicit:
+        candidates.append((explicit, "explicit(env)"))
+
+    # 2-3. argv: --tokenizer → --model
+    info = parse_vllm_argv()
+    if info is not None:
+        if info.tokenizer:
+            candidates.append((info.tokenizer, "--tokenizer(argv)"))
+        if info.model:
+            candidates.append((info.model, "serve <model>(argv)"))
+
+    # 逐个尝试（去重）
+    seen: set = set()
+    for path, label in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            logger.info("尝试加载 tokenizer (%s): %r", label, path)
+            return _from_pretrained(path, local_files_only=True)
+        except Exception as exc:
+            logger.info("from_pretrained(%s %r) 失败: %s", label, path, exc)
+
+    # 4. HF 缓存扫描兜底
+    hints = [explicit]
+    if info is not None and info.model:
+        hints.append(info.model)
+    for hint in hints:
+        if not hint:
+            continue
+        for repo_id in _scan_hf_cache_candidates(hint):
+            if repo_id in seen:
+                continue
+            seen.add(repo_id)
+            logger.info("cache scan: %r -> %r", hint, repo_id)
+            try:
+                return _from_pretrained(repo_id, local_files_only=True)
+            except Exception as exc:
+                logger.warning("from_pretrained(cache %r) 失败: %s", repo_id, exc)
+
+    raise RuntimeError(
+        "tokenizer 加载失败: 无法从 env/argv/HF 缓存路径加载 tokenizer，"
+        "请显式设置环境变量 VLLM_ANOMALY_TOKENIZER_MODEL 为 "
+        "`vllm serve <model>` 的实际值"
+        "（或 `--tokenizer` 的值，如使用独立 tokenizer）。"
+    )
 
 
 class TokenTextResolver:

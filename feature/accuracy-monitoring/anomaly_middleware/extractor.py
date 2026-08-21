@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
 TOKEN_ID_PREFIX = "token_id:"
 
 
@@ -59,17 +61,23 @@ def inject_params(body: Any, is_chat: bool, n_detect: int) -> bytes:
 
     chat：logprobs=True、top_logprobs=max(客户端,N)、return_tokens_as_token_ids=True
     completions：logprobs=max(客户端,N)、return_tokens_as_token_ids=True
+
+    中间件不做客户端参数合法性判断：按规则注入后透传，接受 vLLM 原生结果。
     """
     nb = dict(body) if isinstance(body, dict) else {}
     if is_chat:
         client_top = body.get("top_logprobs") if isinstance(body, dict) else None
-        injected = max(client_top, n_detect) if client_top is not None else n_detect
+        if client_top is not None:
+            nb["top_logprobs"] = max(client_top, n_detect)
+        else:
+            nb["top_logprobs"] = n_detect
         nb["logprobs"] = True
-        nb["top_logprobs"] = injected
     else:
         client_logp = body.get("logprobs") if isinstance(body, dict) else None
-        injected = max(client_logp, n_detect) if client_logp is not None else n_detect
-        nb["logprobs"] = injected
+        if client_logp is not None:
+            nb["logprobs"] = max(client_logp, n_detect)
+        else:
+            nb["logprobs"] = n_detect
     nb["return_tokens_as_token_ids"] = True
     return json.dumps(nb, ensure_ascii=False).encode("utf-8")
 
@@ -111,6 +119,20 @@ def _decode_bytes(b: Any) -> Optional[str]:
     return None
 
 
+def _restore_token_bytes(text: Optional[str], current: Any) -> Any:
+    """将 bytes 与恢复后的 token 文本对齐。
+
+    vLLM 在 return_tokens_as_token_ids=True 时把 bytes 置为 "token_id:NNN" 的 ASCII 字节；
+    strip 恢复 token 文本后，bytes 必须同步恢复为文本的 UTF-8 字节，否则向客户端泄漏 token_id:。
+    """
+    if text is None:
+        return None
+    cur = _decode_bytes(current)
+    if cur is not None and cur == text and not cur.startswith(TOKEN_ID_PREFIX):
+        return current
+    return list(text.encode("utf-8"))
+
+
 def _token_text(
     token_id_value: Any,
     bytes_value: Any,
@@ -144,12 +166,29 @@ def _token_text(
     return None
 
 
-def _truncate_topk(d: Dict[int, float], n: Optional[int]) -> Dict[int, float]:
-    """按 logprob 降序取前 n 项（供检测，截断到 N）。"""
+def _truncate_topk(d: Dict[int, float], n: Optional[int]) -> Tuple[List[float], List[int]]:
+    """按 logprob 降序取前 n 项（供检测，截断到 N）。
+
+    返回 (logprobs, token_ids) 列表，不足 n 项时用 (-100.0, 0) 填充。
+    """
     if not n or n <= 0 or not d:
-        return {}
+        return [-100.0] * max(n or 0, 1), [0] * max(n or 0, 1)
     items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:n]
-    return dict(items)
+    logprobs = [v for _, v in items]
+    token_ids = [k for k, _ in items]
+    while len(logprobs) < n:
+        logprobs.append(-100.0)
+        token_ids.append(0)
+    return logprobs, token_ids
+
+
+def _build_arrays(
+    lp_list: List[List[float]], tid_list: List[List[int]]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """将 per-position 列表构建为 2D numpy 数组。"""
+    if not lp_list:
+        return np.empty((0, 0), dtype=np.float32), np.empty((0, 0), dtype=np.int32)
+    return np.array(lp_list, dtype=np.float32), np.array(tid_list, dtype=np.int32)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,9 +196,9 @@ def _truncate_topk(d: Dict[int, float], n: Optional[int]) -> Dict[int, float]:
 # --------------------------------------------------------------------------- #
 def extract_chat_response(
     data: Any, n_detect: int
-) -> List[Tuple[List[Dict[int, float]], List[int]]]:
-    """chat 非流式：choices[].logprobs.content[]。返回 per choice (topk_list, tokens_list)。"""
-    results: List[Tuple[List[Dict[int, float]], List[int]]] = []
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """chat 非流式：choices[].logprobs.content[]。返回 per choice (logprobs, token_ids) 数组。"""
+    results: List[Tuple[np.ndarray, np.ndarray]] = []
     if not isinstance(data, dict):
         return results
     choices = data.get("choices")
@@ -169,15 +208,14 @@ def extract_chat_response(
         if not isinstance(choice, dict):
             continue
         lp = choice.get("logprobs")
-        topk_list: List[Dict[int, float]] = []
-        tokens_list: List[int] = []
+        lp_list: List[List[float]] = []
+        tid_list: List[List[int]] = []
         if isinstance(lp, dict):
             content = lp.get("content")
             if isinstance(content, list):
                 for entry in content:
                     if not isinstance(entry, dict):
                         continue
-                    tokens_list.append(parse_token_id(entry.get("token")))
                     tps = entry.get("top_logprobs")
                     if not isinstance(tps, list):
                         tps = []
@@ -191,16 +229,19 @@ def extract_chat_response(
                                 d[tid] = float(tp.get("logprob"))
                             except (TypeError, ValueError):
                                 pass
-                    topk_list.append(_truncate_topk(d, n_detect))
-        results.append((topk_list, tokens_list))
+                    lps, tids = _truncate_topk(d, n_detect)
+                    lp_list.append(lps)
+                    tid_list.append(tids)
+        logprobs, token_ids = _build_arrays(lp_list, tid_list)
+        results.append((logprobs, token_ids))
     return results
 
 
 def extract_completions_response(
     data: Any, n_detect: int
-) -> List[Tuple[List[Dict[int, float]], List[int]]]:
+) -> List[Tuple[np.ndarray, np.ndarray]]:
     """completions 非流式：choices[].logprobs{tokens[],token_logprobs[],top_logprobs[]}。"""
-    results: List[Tuple[List[Dict[int, float]], List[int]]] = []
+    results: List[Tuple[np.ndarray, np.ndarray]] = []
     if not isinstance(data, dict):
         return results
     choices = data.get("choices")
@@ -210,17 +251,16 @@ def extract_completions_response(
         if not isinstance(choice, dict):
             continue
         lp = choice.get("logprobs")
-        topk_list: List[Dict[int, float]] = []
-        tokens_list: List[int] = []
+        lp_list: List[List[float]] = []
+        tid_list: List[List[int]] = []
         if isinstance(lp, dict):
-            toks = lp.get("tokens")
-            if isinstance(toks, list):
-                tokens_list = [parse_token_id(t) for t in toks]
             top_logprobs = lp.get("top_logprobs")
             if isinstance(top_logprobs, list):
                 for pos in top_logprobs:
                     if not isinstance(pos, dict):
-                        topk_list.append({})
+                        lps, tids = _truncate_topk({}, n_detect)
+                        lp_list.append(lps)
+                        tid_list.append(tids)
                         continue
                     d: Dict[int, float] = {}
                     for k, v in pos.items():
@@ -230,15 +270,38 @@ def extract_completions_response(
                                 d[tid] = float(v)
                             except (TypeError, ValueError):
                                 pass
-                    topk_list.append(_truncate_topk(d, n_detect))
-        results.append((topk_list, tokens_list))
+                    lps, tids = _truncate_topk(d, n_detect)
+                    lp_list.append(lps)
+                    tid_list.append(tids)
+        logprobs, token_ids = _build_arrays(lp_list, tid_list)
+        results.append((logprobs, token_ids))
     return results
 
 
 # --------------------------------------------------------------------------- #
 # 恢复（供客户端，按原始参数）
 # --------------------------------------------------------------------------- #
-def strip_chat_response(data: Any, orig: OriginalParams, resolver: Any = None) -> None:
+def _recompute_text_offset(tokens: List[Any]) -> List[int]:
+    """text_offset 按恢复后的真实 token 文本重算（字符级前缀和）。
+
+    vLLM 在 return_tokens_as_token_ids=True 时按 "token_id:NNN" 代理串长度计算
+    text_offset（非流式）；strip 恢复真实文本后必须重算，否则泄漏代理串长度（TC-004 v2）。
+    仅非流式适用：流式逐事件时 vLLM 按真实文本计算 offset，无需重算。
+    """
+    out: List[int] = []
+    total = 0
+    for t in tokens:
+        out.append(total)
+        if isinstance(t, str):
+            total += len(t)
+    return out
+
+
+def strip_chat_response(
+    data: Any,
+    orig: OriginalParams,
+    resolver: Any = None,
+) -> None:
     """chat 响应恢复（原位修改 data）。"""
     if not isinstance(data, dict):
         return
@@ -282,6 +345,9 @@ def strip_chat_response(data: Any, orig: OriginalParams, resolver: Any = None) -
                         resolver,
                         fallback_to_id=fallback_to_id,
                     )
+                    entry["bytes"] = _restore_token_bytes(
+                        entry["token"], entry.get("bytes")
+                    )
                     for tp in tps:
                         if isinstance(tp, dict):
                             tp["token"] = _token_text(
@@ -290,10 +356,19 @@ def strip_chat_response(data: Any, orig: OriginalParams, resolver: Any = None) -
                                 resolver,
                                 fallback_to_id=fallback_to_id,
                             )
+                            tp["bytes"] = _restore_token_bytes(
+                                tp["token"], tp.get("bytes")
+                            )
                 entry["top_logprobs"] = tps
 
 
-def strip_completions_response(data: Any, orig: OriginalParams, resolver: Any = None) -> None:
+def strip_completions_response(
+    data: Any,
+    orig: OriginalParams,
+    resolver: Any = None,
+    *,
+    recompute_text_offset: bool = False,
+) -> None:
     """completions 响应恢复（原位修改 data）。
 
     resolver 可用时 tokens[] / top_logprobs[] 还原为真实文本（resolver 优先）；
@@ -351,6 +426,8 @@ def strip_completions_response(data: Any, orig: OriginalParams, resolver: Any = 
                     _token_text(t, None, resolver, fallback_to_id=fallback_to_id)
                     for t in toks
                 ]
+                if recompute_text_offset:
+                    lp["text_offset"] = _recompute_text_offset(lp["tokens"])
 
 
 # --------------------------------------------------------------------------- #
@@ -495,21 +572,25 @@ class SSEStreamProcessor:
 
     def _strip_streaming(self, parsed: Dict[str, Any]) -> None:
         if self._is_chat:
-            strip_chat_response(parsed, self._orig, self._resolver)
+            strip_chat_response(
+                parsed, self._orig, self._resolver
+            )
         else:
-            strip_completions_response(parsed, self._orig, self._resolver)
+            strip_completions_response(
+                parsed, self._orig, self._resolver
+            )
 
     # ---- 检测数据 ---- #
     def get_detection_data(
         self,
-    ) -> Tuple[List[List[Dict[int, float]]], List[List[int]]]:
-        topk_all: List[List[Dict[int, float]]] = []
-        tokens_all: List[List[int]] = []
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        logprobs_all: List[np.ndarray] = []
+        token_ids_all: List[np.ndarray] = []
         if self._is_chat:
             for ci in sorted(self._chat_acc.keys()):
                 content = self._chat_acc[ci]
-                topk_list: List[Dict[int, float]] = []
-                tokens_list: List[int] = []
+                lp_list: List[List[float]] = []
+                tid_list: List[List[int]] = []
                 for entry in content:
                     tps = entry.get("top_logprobs")
                     if not isinstance(tps, list):
@@ -524,19 +605,23 @@ class SSEStreamProcessor:
                                 d[tid] = float(tp.get("logprob"))
                             except (TypeError, ValueError):
                                 pass
-                    topk_list.append(_truncate_topk(d, self._n_detect))
-                    tokens_list.append(parse_token_id(entry.get("token")))
-                topk_all.append(topk_list)
-                tokens_all.append(tokens_list)
+                    lps, tids = _truncate_topk(d, self._n_detect)
+                    lp_list.append(lps)
+                    tid_list.append(tids)
+                logprobs, token_ids = _build_arrays(lp_list, tid_list)
+                logprobs_all.append(logprobs)
+                token_ids_all.append(token_ids)
         else:
             for ci in sorted(self._comp_acc.keys()):
                 acc = self._comp_acc[ci]
-                toks = acc["tokens"]
                 tlp = acc["top_logprobs"]
-                topk_list = []
+                lp_list: List[List[float]] = []
+                tid_list: List[List[int]] = []
                 for pos in tlp:
                     if not isinstance(pos, dict):
-                        topk_list.append({})
+                        lps, tids = _truncate_topk({}, self._n_detect)
+                        lp_list.append(lps)
+                        tid_list.append(tids)
                         continue
                     d = {}
                     for k, v in pos.items():
@@ -546,11 +631,13 @@ class SSEStreamProcessor:
                                 d[tid] = float(v)
                             except (TypeError, ValueError):
                                 pass
-                    topk_list.append(_truncate_topk(d, self._n_detect))
-                tokens_list = [parse_token_id(t) for t in toks]
-                topk_all.append(topk_list)
-                tokens_all.append(tokens_list)
-        return topk_all, tokens_all
+                    lps, tids = _truncate_topk(d, self._n_detect)
+                    lp_list.append(lps)
+                    tid_list.append(tids)
+                logprobs, token_ids = _build_arrays(lp_list, tid_list)
+                logprobs_all.append(logprobs)
+                token_ids_all.append(token_ids)
+        return logprobs_all, token_ids_all
 
 
 def _entry_token(entry: Any) -> Any:

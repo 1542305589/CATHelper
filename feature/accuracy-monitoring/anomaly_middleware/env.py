@@ -12,7 +12,7 @@ from typing import Optional
 METRICS_PATH_DEFAULT = "/anomaly/metrics"
 TOP_LOGPROBS_DEFAULT = 20
 MONITOR_RATE_DEFAULT = 1.0
-DETECTOR_WORKERS_DEFAULT = 1
+DETECTOR_WORKERS_DEFAULT = 4
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -75,8 +75,10 @@ class PluginConfig:
                 f"VLLM_ANOMALY_MONITOR_RATE 必须为 0.0-1.0, 当前值: {monitor_rate}"
             )
         workers = _env_int("VLLM_ANOMALY_DETECTOR_WORKERS", DETECTOR_WORKERS_DEFAULT)
-        if workers < 1:
-            workers = DETECTOR_WORKERS_DEFAULT
+        if not isinstance(workers, int) or workers < 1:
+            raise ValueError(
+                f"VLLM_ANOMALY_DETECTOR_WORKERS 必须为正整数, 当前值: {workers}"
+            )
         return cls(
             enabled=_env_bool("VLLM_ANOMALY_ENABLED", True),
             top_logprobs=top_logprobs,
@@ -87,14 +89,16 @@ class PluginConfig:
         )
 
 
-def resolve_config_path() -> Optional[str]:
+def resolve_config_path() -> str:
     """返回固定的检测器配置路径 configs/detector.yaml。
 
     路径固定为项目根目录下的 configs/detector.yaml，不可通过 env 覆盖。
-    文件不存在 → None（触发降级）。
+    文件不存在 → raise（启动期 fail-fast）。
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
     cfg = os.path.join(os.path.dirname(base_dir), "configs", "detector.yaml")
     if os.path.isfile(cfg):
         return cfg
-    return None
+    raise FileNotFoundError(
+        f"检测器配置文件缺失: {cfg} 不存在，请确认部署目录结构完整"
+    )

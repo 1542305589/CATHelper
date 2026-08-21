@@ -1,102 +1,197 @@
-"""检测运行器（design §4.4 / §6.1 / §6.2 / §6.3 / §6.5）。
+"""检测运行器（design §4.4 / §6.2）。
 
-两段式懒加载：
-- 廉价阶段（请求路径，_ensure_runner）：仅 ThreadPoolExecutor + Lock + config 路径，无 numpy/文件 I/O。
-- 重阶段（worker 线程内，首次检测）：懒构造 ILLDetector（numpy），不阻塞 event loop。
-检测串行化：单 worker 线程池 + threading.Lock；run_sync 在锁内调 detector.run。
-检测任务：fire-and-forget asyncio.create_task，异常全捕获计 error，不影响客户端。
-
-重构后：DetectorRunner 仅持 config_path（无 mtype/tk2cat 路径）；topk 由 topk_n 参数传入；
-tk2cat 映射由 set_vocabulary 注入（运行时生成），_get_detector 懒构造时同步注入。
+多进程并行检测：
+- ProcessPoolExecutor + 共享内存零拷贝数据传递。
+- 模块级 _worker_init（每进程构造 ILLDetector + 注入 tk2cat）。
+- 模块级 _detect_sync（从共享内存零拷贝读取 → 逐候选检测 → 返回结果）。
+- 检测任务：fire-and-forget asyncio.create_task，异常全捕获计 error，不影响客户端。
+- 进程池崩溃：BrokenProcessPool → 重建 + 计 error + log。
 """
 from __future__ import annotations
 
 import asyncio
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from multiprocessing import shared_memory
 from typing import List, Optional, Set
+
+import numpy as np
 
 from .logging import get_logger
 from .metrics import Metrics
 
 logger = get_logger()
 
+# 模块级 worker 状态（每进程独立）
+_worker_state = {}
+
+
+def _worker_init(config_path: str, tk2cat, vocab_size: int, topk_n: int):
+    """每进程初始化：构造检测器 + 注入词表。"""
+    from .detector import ILLDetector
+
+    det = ILLDetector(config_path)
+    if tk2cat is not None:
+        det.set_vocabulary(tk2cat, vocab_size)
+    _worker_state["detector"] = det
+    _worker_state["topk_n"] = topk_n
+
+
+def _detect_sync(metadata: dict):
+    """worker 检测入口：从共享内存零拷贝读取 → 逐候选检测 → 返回结果。"""
+    shm = shared_memory.SharedMemory(name=metadata["shm_name"])
+    try:
+        off = metadata["offsets"]
+        shapes = metadata["shapes"]
+        logprobs = np.ndarray(
+            shapes["logprobs"], buffer=shm.buf,
+            offset=off["logprobs"], dtype=np.float32,
+        )
+        token_ids = np.ndarray(
+            shapes["token_ids"], buffer=shm.buf,
+            offset=off["token_ids"], dtype=np.int32,
+        )
+        det = _worker_state["detector"]
+        topk_n = _worker_state["topk_n"]
+        results = []
+        for i in range(metadata["num_choices"]):
+            n = metadata["choice_lengths"][i]
+            res = det.detector(logprobs[i][:n], token_ids[i][:n], topk_n=topk_n)
+            results.append([res.is_ill, res.ill_type])
+        return results
+    finally:
+        shm.close()
+
+
+def _build_shared_memory(
+    logprobs_list: List[np.ndarray],
+    token_ids_list: List[np.ndarray],
+):
+    """将 per-choice numpy 数组写入 SharedMemory，返回 (metadata, shm)。"""
+    num_choices = len(logprobs_list)
+    if num_choices == 0:
+        raise ValueError("no choices to detect")
+
+    choice_lengths = [len(lp) for lp in logprobs_list]
+    max_tokens = max(choice_lengths) if choice_lengths else 0
+    if max_tokens == 0:
+        raise ValueError("no tokens to detect")
+
+    topk_n = logprobs_list[0].shape[1] if logprobs_list[0].ndim > 1 else 1
+
+    # 变长候选 padding 到 max_tokens
+    logprobs_padded = np.full(
+        (num_choices, max_tokens, topk_n), -100.0, dtype=np.float32,
+    )
+    token_ids_padded = np.zeros(
+        (num_choices, max_tokens, topk_n), dtype=np.int32,
+    )
+    for i, (lp, tid) in enumerate(zip(logprobs_list, token_ids_list)):
+        n = choice_lengths[i]
+        if n > 0 and lp.ndim > 1:
+            cols = min(lp.shape[1], topk_n)
+            logprobs_padded[i, :n, :cols] = lp[:, :cols]
+            token_ids_padded[i, :n, :cols] = tid[:, :cols]
+
+    # 分配 SharedMemory（对齐 token_ids 起始地址）
+    lp_bytes = logprobs_padded.nbytes
+    alignment = 16
+    lp_aligned = (lp_bytes + alignment - 1) // alignment * alignment
+    total_bytes = lp_aligned + token_ids_padded.nbytes
+
+    shm = shared_memory.SharedMemory(create=True, size=total_bytes)
+
+    # 写入数组
+    np.ndarray(
+        logprobs_padded.shape, buffer=shm.buf, dtype=np.float32,
+    )[:] = logprobs_padded
+    np.ndarray(
+        token_ids_padded.shape, buffer=shm.buf,
+        offset=lp_aligned, dtype=np.int32,
+    )[:] = token_ids_padded
+
+    metadata = {
+        "shm_name": shm.name,
+        "num_choices": num_choices,
+        "topk_n": topk_n,
+        "choice_lengths": choice_lengths,
+        "shapes": {
+            "logprobs": logprobs_padded.shape,
+            "token_ids": token_ids_padded.shape,
+        },
+        "offsets": {
+            "logprobs": 0,
+            "token_ids": lp_aligned,
+        },
+    }
+    return metadata, shm
+
 
 class DetectorRunner:
     def __init__(
         self,
         config_path: str,
-        max_workers: int = 1,
+        max_workers: int = 4,
         topk_n: Optional[int] = None,
+        tk2cat=None,
+        vocab_size: Optional[int] = None,
     ) -> None:
         self._config_path = config_path
         self._topk_n = topk_n
-        # 运行时 tk2cat 映射缓存（由 set_vocabulary 注入）
-        self._tk2cat = None
-        self._vocab_size: Optional[int] = None
-        self._executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
-        self._lock = threading.Lock()
-        self._detector = None  # worker 线程内懒构造
-        self._unusable = False
-        self._unusable_reason: Optional[str] = None
-
-    def set_vocabulary(self, tk2cat, vocab_size) -> None:
-        """注入运行时生成的 tk2cat 映射（幂等，覆盖）。供 middleware 预热/慢路径调用。"""
         self._tk2cat = tk2cat
         self._vocab_size = vocab_size
-        # 已构造的检测器也同步注入（懒构造尚未发生时由 _get_detector 兜底注入）
-        if self._detector is not None:
-            self._detector.set_vocabulary(tk2cat, vocab_size)
-
-    def _get_detector(self):
-        """在 run_sync 内（锁内、worker 线程）调用。失败则标记 unusable，后续快速失败。"""
-        if self._unusable:
-            raise RuntimeError(f"detector unusable: {self._unusable_reason}")
-        if self._detector is None:
-            try:
-                from .detector import ILLDetector
-
-                self._detector = ILLDetector(self._config_path)
-                if self._tk2cat is not None:
-                    self._detector.set_vocabulary(self._tk2cat, self._vocab_size)
-            except Exception as exc:  # 构造失败（numpy/配置损坏等）
-                self._unusable = True
-                self._unusable_reason = f"{type(exc).__name__}: {exc}"
-                logger.error("ILLDetector 构造失败, 后续检测将快速失败计 error: %s", exc)
-                raise
-        return self._detector
-
-    def run_sync(
-        self,
-        topk: List[List[dict]],
-        tokens: List[List[int]],
-    ):
-        with self._lock:
-            detector = self._get_detector()
-            return detector.run(topk, tokens, topk_n=self._topk_n)
+        self._max_workers = max(1, max_workers)
+        self._executor = ProcessPoolExecutor(
+            max_workers=self._max_workers,
+            initializer=_worker_init,
+            initargs=(config_path, tk2cat, vocab_size, topk_n),
+        )
 
     async def run_async(
         self,
-        topk: List[List[dict]],
-        tokens: List[List[int]],
+        logprobs_list: List[np.ndarray],
+        token_ids_list: List[np.ndarray],
     ):
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._executor, self.run_sync, topk, tokens
+        metadata, shm = _build_shared_memory(logprobs_list, token_ids_list)
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._executor, _detect_sync, metadata,
+            )
+        except BrokenProcessPool:
+            self._rebuild_pool()
+            raise
+        finally:
+            shm.close()
+            shm.unlink()
+
+    def _rebuild_pool(self) -> None:
+        """进程池崩溃后重建。"""
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        self._executor = ProcessPoolExecutor(
+            max_workers=self._max_workers,
+            initializer=_worker_init,
+            initargs=(
+                self._config_path, self._tk2cat,
+                self._vocab_size, self._topk_n,
+            ),
         )
+        logger.warning("检测进程池已重建")
 
     def shutdown(self) -> None:
         try:
             self._executor.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            # Python<3.9 无 cancel_futures
-            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 def schedule_detection(
     runner: DetectorRunner,
-    topk: List[List[dict]],
-    tokens: List[List[int]],
+    logprobs_list: List[np.ndarray],
+    token_ids_list: List[np.ndarray],
     *,
     request_id: str,
     model: str,
@@ -108,11 +203,19 @@ def schedule_detection(
     async def _run() -> None:
         with metrics.detection_duration.time():
             try:
-                results = await runner.run_async(topk, tokens)
+                results = await runner.run_async(logprobs_list, token_ids_list)
                 metrics.record_detection(results, model)
+            except BrokenProcessPool:
+                runner._rebuild_pool()
+                logger.error(
+                    "检测进程池崩溃, 已重建, request_id=%s 该请求检测失败",
+                    request_id,
+                )
+                metrics.record_error()
             except Exception as exc:
                 logger.error(
-                    "检测失败 request_id=%s model=%s: %s", request_id, model, exc
+                    "检测失败 request_id=%s model=%s: %s",
+                    request_id, model, exc,
                 )
                 metrics.record_error()
 
@@ -121,7 +224,6 @@ def schedule_detection(
 
     def _done(t: asyncio.Task) -> None:
         pending_tasks.discard(t)
-        # 吞掉未检索异常，避免 "Task exception was never retrieved"
         try:
             t.exception()
         except asyncio.CancelledError:
