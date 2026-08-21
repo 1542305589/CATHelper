@@ -508,7 +508,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 | POST | `/daemon/interval` | 修改循环周期 |
 | POST | `/daemon/trigger` | 立即触发一个周期 |
 
-查询接口以**落盘 JSON 为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 直接返回对应周期归档 `daemon_results/<start>/` 中的结果 JSON（与一次性模式输出同构，含 `kpi` 与 `profiler` 两段）；`/straggler/results/history` 扫描各周期归档目录的 `daemon_meta.json` 元数据（daemon 重启不丢历史）。
+查询接口以**本次会话的进程内记录为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 返回内存 store 里对应周期的结果 JSON（经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 读取）；`/straggler/results/history` 列出本次会话各周期摘要（daemon 重启即空，不读磁盘历史）。
 
 **GET /status 响应**：
 ```json
@@ -617,10 +617,10 @@ daemon/
 ├── <kpi-dir>/                # KPI 数据目录（外部 CATMonitor 写入，daemon 只读）
 ├── <profiler-dir>/           # profiler 采集落盘根目录（--profiler-dir=）
 │                             # 整个 profiler-dir 在周期结束后被删除(dyno 采集时重建)
-├── daemon_results/<start>/   # 每周期结果直接落盘于此（查询 API 的持久数据源）
-│   ├── straggler_output.json # 本周期结果 JSON（含 kpi + profiler；latest/{id} 数据源）
-│   ├── daemon_meta.json      # 周期元数据（/straggler/results/history 数据源）
-│   └── analysis_result/detection_report.log  # 文本报告（report/latest 重启后兜底）
+├── daemon_results/<start>/   # 每周期结果直接落盘于此（归档记录；查询走内存 store）
+│   ├── straggler_output.json # 本周期结果 JSON（含 kpi + profiler；latest/{id} 经 JSONPath 读）
+│   ├── daemon_meta.json      # 周期元数据（归档记录，查询不读）
+│   └── analysis_result/detection_report.log  # 文本报告（归档记录，report/latest 走内存）
 └── straggler_output.json     # 运行目录副本 = 最近周期结果（与一次性模式输出同构）
 ```
 
@@ -641,7 +641,7 @@ daemon/
 ### 设计取舍
 
 - **不引 Web 框架**：接口少且无中间件需求，`net/http` 标准库足够，与项目零额外依赖的风格一致
-- **结果以落盘 JSON 为数据源而非内存**：每周期结果 JSON 与 `daemon_meta.json` 直接落盘到运行目录 `daemon_results/<start>/`（dump 目录之外），`/straggler/results/*` 直接读文件——daemon 重启不丢历史；进程内 50 周期环形历史仅作摘要缓存
+- **查询以本次会话内存记录为数据源**：`/straggler/results/*` 从进程内 50 周期环形 store 读（重启即空，看不到历史）；每周期结果 JSON 落盘到 `daemon_results/<start>/`（`--profiler-dir` 之外）供 latest/{id} 经 `JSONPath` ServeFile 读取，`daemon_meta.json` 仅作归档记录
 - **每周期清理 profiler 数据**：周期结束时删除整个 `--profiler-dir`（重量的原始 profiler / .db / 中间产物都在其下），成功与失败都删（防半截数据干扰后续周期定位）——只留 `--profiler-dir` 之外的小结果文件；存结果与删数据相互独立
 - **采集走 dynolog/dyno 而非 watch/exec 插件**：vllm 经 dynolog IPC 接入（`MSMONITOR_USE_DAEMON=1` 由服务侧设置，守护进程不管）；工具侧统一以 `dyno nputrace` 触发，不绑定部署侧脚本
 - **dyno/dynolog 用系统包管理器安装而非 embed/仓库分发**：仓库不携带第三方制品；build.sh 从 msmonitor 包取 `dynolog_*.deb` 用系统包管理器安装（dpkg 原生 / rpm 系 alien 转换），二者走 PATH 调用。代价是 daemon 运行机器必须先装好（否则启动即报错），换来编译与交付简单：Go 产物与采集工具解耦，任何平台都能出包

@@ -212,10 +212,9 @@ func (d *Daemon) runCycle(id int) {
 		d.logf("copy result to run dir: %v", err)
 	}
 
-	// 8. The text report is written inside the dump dir (report.WriteReport
-	//    derives its path from the input dir); copy it into the archive before
-	//    the dump dir is removed so /report/latest survives a restart. Best
-	//    effort — cr.Report already holds the text in memory for this session.
+	// 8. The text report is written inside the root (report.WriteReport derives
+	//    its path from the input dir); copy it into the archive as a durable
+	//    record. Best effort — cr.Report already holds the text in memory.
 	if src := filepath.Join(root, "analysis_result", "detection_report.log"); fileExists(src) {
 		if err := os.MkdirAll(filepath.Join(archive, "analysis_result"), 0o755); err != nil {
 			d.logf("cycle %d copy report: %v", cr.ID, err)

@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 )
 
@@ -59,24 +57,18 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// handleResultsLatest serves the most recent cycle's combined result JSON
-// (the query API data source). Falls back to the newest archive on disk so a
-// daemon restart does not lose the last result.
+// handleResultsLatest serves the most recent cycle's combined result JSON,
+// from this session only (no disk history).
 func (d *Daemon) handleResultsLatest(w http.ResponseWriter, r *http.Request) {
 	if c := d.st.latest(); c != nil && c.JSONPath != "" && fileExists(c.JSONPath) {
 		http.ServeFile(w, r, c.JSONPath)
 		return
 	}
-	metas := d.listMetaFiles()
-	if len(metas) > 0 && metas[0].JSONPath != "" && fileExists(metas[0].JSONPath) {
-		http.ServeFile(w, r, metas[0].JSONPath)
-		return
-	}
 	http.Error(w, "no result yet", http.StatusNotFound)
 }
 
-// handleResultsHistory lists cycle summaries, newest first, scanning each
-// archive directory's daemon_meta.json (survives restart). ?limit=N caps the list.
+// handleResultsHistory lists this session's cycle summaries, newest first.
+// ?limit=N caps the list.
 func (d *Daemon) handleResultsHistory(w http.ResponseWriter, r *http.Request) {
 	limit := 10
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -84,19 +76,19 @@ func (d *Daemon) handleResultsHistory(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	metas := d.listMetaFiles()
-	if len(metas) > limit {
-		metas = metas[:limit]
+	cycles := d.st.list()
+	if len(cycles) > limit {
+		cycles = cycles[:limit]
 	}
-	resp := historyResponse{Cycles: make([]*cycleSummary, 0, len(metas))}
-	for _, m := range metas {
-		resp.Cycles = append(resp.Cycles, toCycleSummary(m))
+	resp := historyResponse{Cycles: make([]*cycleSummary, 0, len(cycles))}
+	for _, c := range cycles {
+		resp.Cycles = append(resp.Cycles, toCycleSummary(c))
 	}
 	writeJSON(w, resp)
 }
 
-// handleResultsByID serves one cycle's combined result JSON, by id (session
-// cache first, then disk meta files).
+// handleResultsByID serves one cycle's combined result JSON by id, from this
+// session only.
 func (d *Daemon) handleResultsByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
@@ -107,29 +99,16 @@ func (d *Daemon) handleResultsByID(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, c.JSONPath)
 		return
 	}
-	for _, m := range d.listMetaFiles() {
-		if m.ID == id && m.JSONPath != "" && fileExists(m.JSONPath) {
-			http.ServeFile(w, r, m.JSONPath)
-			return
-		}
-	}
 	http.NotFound(w, r)
 }
 
-// handleReportLatest serves the most recent cycle's text report (text/plain).
+// handleReportLatest serves the most recent cycle's text report (text/plain),
+// from this session only.
 func (d *Daemon) handleReportLatest(w http.ResponseWriter, r *http.Request) {
 	if c := d.st.latest(); c != nil && c.Report != "" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, c.Report)
 		return
-	}
-	metas := d.listMetaFiles()
-	if len(metas) > 0 && metas[0].JSONPath != "" {
-		p := filepath.Join(filepath.Dir(metas[0].JSONPath), "analysis_result", "detection_report.log")
-		if fileExists(p) {
-			http.ServeFile(w, r, p)
-			return
-		}
 	}
 	http.Error(w, "no report yet", http.StatusNotFound)
 }
@@ -167,39 +146,6 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "triggered"})
-}
-
-// ---------------------------------------------------------------------------
-// Disk metadata helpers (daemon_meta.json in each archive directory)
-// ---------------------------------------------------------------------------
-
-// listMetaFiles parses daemon_meta.json from every cycle's archive directory
-// (./daemon_results/<started-at>), newest first. This is the restart-surviving
-// history source; the heavy --profiler-dir root is removed after each cycle.
-func (d *Daemon) listMetaFiles() []*CycleResult {
-	entries, err := os.ReadDir("daemon_results")
-	if err != nil {
-		return nil
-	}
-	var metas []*CycleResult
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		raw, rerr := os.ReadFile(filepath.Join("daemon_results", e.Name(), "daemon_meta.json"))
-		if rerr != nil {
-			continue
-		}
-		var cr CycleResult
-		if json.Unmarshal(raw, &cr) != nil {
-			continue
-		}
-		metas = append(metas, &cr)
-	}
-	sort.Slice(metas, func(i, j int) bool {
-		return metas[i].StartedAt.After(metas[j].StartedAt)
-	})
-	return metas
 }
 
 func toCycleSummary(c *CycleResult) *cycleSummary {

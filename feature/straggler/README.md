@@ -292,7 +292,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 | `GET /healthz` | 存活探针 | — |
 | `GET /status` | 状态总览：state / interval_sec / 两个数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at | — |
 | `GET /straggler/results/latest` | 最近一轮合并结果 JSON（数据源 = `daemon_results` 归档文件） | — |
-| `GET /straggler/results/history?limit=10` | 历史周期摘要（含失败的 error），按时间倒序 | — |
+| `GET /straggler/results/history?limit=10` | 本次会话各周期摘要（含失败的 error），按时间倒序 | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
 | `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告（text/plain） | — |
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
@@ -352,15 +352,15 @@ curl -s -X POST localhost:8080/daemon/start
 ├── op_metric/                       # dataparse 中间产物（写根下）
 └── analysis_result/detection_report.log
 
-daemon_results/<start>/           # 每轮结果直接落盘于此（查询接口的数据源，重启不丢）
-├── straggler_output.json          # 本轮合并结果（latest/{id} 数据源）
-├── daemon_meta.json               # 周期元数据（history 数据源）
-└── analysis_result/detection_report.log   # report/latest 重启后兜底
+daemon_results/<start>/           # 每轮结果直接落盘于此（归档记录；查询走内存 store）
+├── straggler_output.json          # 本轮合并结果（latest/{id} 经 JSONPath 读）
+├── daemon_meta.json               # 周期元数据（归档记录，查询不读）
+└── analysis_result/detection_report.log   # 文本报告（归档记录，report/latest 走内存）
 ```
 
 运行目录另有一份最新的 `straggler_output.json`（与一次性模式同形状，覆盖写）。
 
-**重启不丢历史**：`/status` 的 `cycles_total`/`cycles_failed` 是进程内累计（重启归零），但 `/straggler/results/history` 与 `/straggler/results/{id}` 直接扫描各归档 `daemon_results/<start>/daemon_meta.json`——daemon 重启后依然可查所有历史周期。
+**查询只看本次会话**：所有查询接口（latest/history/{id}/report）都从进程内 store 读，daemon 重启后清空，不读磁盘历史；`/status` 的 `cycles_total`/`cycles_failed` 同样是本进程内累计（重启归零）。
 
 ### 5.5 常见问题
 
