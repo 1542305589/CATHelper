@@ -22,6 +22,7 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("GET /straggler/results/history", d.handleResultsHistory)
 	mux.HandleFunc("GET /straggler/results/{id}", d.handleResultsByID)
 	mux.HandleFunc("GET /straggler/report/latest", d.handleReportLatest)
+	mux.HandleFunc("GET /straggler/report/{id}", d.handleReportByID)
 	mux.HandleFunc("POST /daemon/start", d.handleDaemonStart)
 	mux.HandleFunc("POST /daemon/pause", d.handleDaemonPause)
 	mux.HandleFunc("POST /daemon/interval", d.handleDaemonInterval)
@@ -110,6 +111,27 @@ func (d *Daemon) handleReportLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "no report yet", http.StatusNotFound)
+}
+
+// handleReportByID serves one cycle's text report (text/plain) by id, from
+// this session only (the same in-memory store as /straggler/results/{id}).
+func (d *Daemon) handleReportByID(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	c := d.st.get(id)
+	if c == nil {
+		http.Error(w, fmt.Sprintf("cycle %d not found", id), http.StatusNotFound)
+		return
+	}
+	if c.Report == "" {
+		http.Error(w, fmt.Sprintf("no report for cycle %d (cycle failed before detection)", id), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, c.Report)
 }
 
 func (d *Daemon) handleDaemonStart(w http.ResponseWriter, r *http.Request) {
