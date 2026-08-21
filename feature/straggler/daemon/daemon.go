@@ -138,10 +138,10 @@ func (d *Daemon) runCycle(id int) {
 		cr.FinishedAt = time.Now()
 		cr.DurationMs = cr.FinishedAt.Sub(cr.StartedAt).Milliseconds()
 		// Results are stored in daemon_results/<start>/ during the cycle; the
-		// heavy dump dir is removed at the end of every cycle, success or
-		// failure, so profiler data never accumulates across cycles and a stale
-		// dump from a failed cycle can't be picked up as "newest" by a later one.
-		d.cleanupDump(cr, dumpDir)
+		// whole --profiler-dir is removed at the end of every cycle, success or
+		// failure. dyno re-creates the root on the next trigger, so nothing is
+		// lost and no stale dump can skew a later cycle's newest-dir pick.
+		d.cleanupDump(cr)
 		d.finishCycle(cr)
 	}()
 
@@ -375,18 +375,16 @@ func copyFile(src, dst string) error {
 	return os.WriteFile(dst, data, 0644)
 }
 
-// cleanupDump removes the heavy dump dir at the end of every cycle, success or
-// failure, so profiler data never accumulates across cycles and a stale dump
-// from a failed cycle can't be picked up as "newest" by a later one. The result
-// artifacts already live in daemon_results/<start>/, so removing the dump dir
-// loses nothing queryable. Failures are logged, never fatal.
-func (d *Daemon) cleanupDump(cr *CycleResult, dumpDir string) {
-	if dumpDir == "" {
+// cleanupDump removes the entire --profiler-dir at the end of every cycle,
+// success or failure. dyno re-creates the root on the next trigger, so nothing
+// is lost and no stale dump can skew a later cycle's newest-dir pick. Result
+// artifacts live in daemon_results/<start>/ (outside profiler-dir) and are
+// untouched; RemoveAll on a missing root is a no-op, so this is safe even when
+// the trigger never created a dump. Failures are logged, never fatal.
+func (d *Daemon) cleanupDump(cr *CycleResult) {
+	if err := os.RemoveAll(d.cfg.ProfilerDir); err != nil {
+		d.logf("cycle %d cleanup failed: %v", cr.ID, err)
 		return
 	}
-	if err := os.RemoveAll(dumpDir); err != nil {
-		d.logf("cycle %d cleanup failed, kept %s: %v", cr.ID, dumpDir, err)
-		return
-	}
-	d.logf("cycle %d cleaned: removed %s", cr.ID, dumpDir)
+	d.logf("cycle %d cleaned: removed %s", cr.ID, d.cfg.ProfilerDir)
 }
