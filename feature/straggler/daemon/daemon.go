@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,6 +80,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	if d.cfg.KpiDir == "" {
 		d.logf("KPI detection disabled (no --kpi-dir): cycles run profiler-only")
+	} else {
+		// Pre-flight: surface the KPI data source at startup so a wrong
+		// --kpi-dir (or a CATMonitor straggler_output plugin that is off) is
+		// visible immediately instead of silently skipping every cycle.
+		n := countKPIFiles(d.cfg.KpiDir)
+		d.logf("KPI detection enabled: --kpi-dir=%s (%d straggler_kpi_*.jsonl file(s))", d.cfg.KpiDir, n)
+		if n == 0 {
+			d.logf("WARNING: no straggler_kpi_*.jsonl found in %s — check that --kpi-dir points at CATMonitor's straggler_output.data_dir (default /var/lib/catmonitor/straggler) and that the straggler_output plugin is enabled", d.cfg.KpiDir)
+		}
 	}
 
 	// First cycle runs after the first interval tick, not immediately at
@@ -178,8 +188,9 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 
-	// 5. KPI detection (--kpi-dir, JSONL).
-	cr.KPI = d.detectKPI()
+	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so a
+	//    skipped/failed KPI pass is visible in history, not silently absent.
+	cr.KPI, cr.KPIStatus = d.detectKPI()
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
 	res, derr := d.detect(root, d.cfg.Degradation, d.cfg.DebugOutput)
@@ -227,25 +238,67 @@ func (d *Daemon) runCycle(id int) {
 }
 
 // detectKPI reads the latest KPI data from --kpi-dir and runs the same
-// resource detection as one-shot mode. Returns nil (cycle continues, profiler
-// still runs) when the directory is empty or detection fails.
-func (d *Daemon) detectKPI() *resource.DetectionResult {
+// resource detection as one-shot mode. It returns the result plus a status
+// string surfaced in the cycle's history, so a disabled/skipped/failed KPI
+// pass is visible instead of silently absent. The cycle itself continues
+// (profiler still runs) when the directory is empty or detection fails.
+func (d *Daemon) detectKPI() (*resource.DetectionResult, string) {
 	if d.cfg.KpiDir == "" {
-		return nil
+		return nil, "disabled (no --kpi-dir)"
 	}
 	ts, err := resource.ReadKPIFiles(d.cfg.KpiDir)
 	if err != nil {
 		d.logf("KPI read skipped: %v", err)
-		return nil
+		return nil, fmt.Sprintf("skipped: %v", err)
 	}
 	kpiCfg := resource.DefaultDetectionConfig()
 	kpiCfg.EnableDebug = d.cfg.DebugOutput
 	res, err := resource.RunDetectionFromData(ts, d.cfg.KpiDir, kpiCfg)
 	if err != nil {
 		d.logf("KPI detection failed: %v", err)
-		return nil
+		return nil, fmt.Sprintf("failed: %v", err)
 	}
-	return res
+	return res, "ok"
+}
+
+// countKPIFiles returns how many straggler_kpi_*.jsonl files ReadKPIFiles would
+// consume for dir, mirroring its layout handling: with a node_config.json the
+// files live inside the per-node subfolders it references; without one they are
+// directly inside dir. Returns 0 when the dir is missing/empty or uses a
+// different layout.
+func countKPIFiles(dir string) int {
+	// Optional node_config.json switches to the multi-node layout: folder →
+	// {node, cards}; each folder holds that node's jsonl files.
+	if raw, err := os.ReadFile(filepath.Join(dir, "node_config.json")); err == nil {
+		var cfg map[string]struct {
+			Node  string `json:"node"`
+			Cards []int  `json:"cards"`
+		}
+		if json.Unmarshal(raw, &cfg) == nil && len(cfg) > 0 {
+			n := 0
+			for folder := range cfg {
+				n += countKPIFilesIn(filepath.Join(dir, folder))
+			}
+			return n
+		}
+	}
+	return countKPIFilesIn(dir)
+}
+
+func countKPIFilesIn(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "straggler_kpi_") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // finishCycle records a finished cycle in the store and logs its outcome.

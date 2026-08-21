@@ -103,7 +103,7 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 
 **主检测组优先级**：`tp → exp → ep → tp_exp → cp → cp2 → cp_ulysses → cp_ring → dp → dp_cp → dp_modulo_exp_cp`
 
-**并行域去重**：`checkRankParallelExist` 通过 `parallelInfo map[int]map[int]bool` 追踪每个 rank 已归属的组，避免同域组重复。
+**并行域去重**：每个 rank 的 `group_info_{N}.json` 都可能列出同一组（如 tp 组 [0..7]），用 `assigned map[int]bool` 追踪本域内已归属的 rank：组内任一 rank 已归属 → 跳过该组。修复前内层 map 从未被填充导致去重失效，8 个 rank 文件会产出 8 个完全相同的组。
 
 ## 检测逻辑
 
@@ -204,7 +204,7 @@ func WriteReport(stepData, parallels, validRanks, outputDir, detectionResult, in
 func GenerateReport(stepData, parallels, validRanks, detectionResult, inputPath, degradation) string
 ```
 
-**报告章节**：头部 → 并行域拓扑 → 检测摘要表 → ZP_Kernel 柱状图（Top 30 + Bottom 5）→ ZP_Host 柱状图 → 总通信时间 → 各域分组对比（min/mean/max + 柱状图）。
+**报告章节**：头部 → 并行域拓扑 → 检测摘要表 → ZP_Kernel 柱状图（Top 30 + Bottom 5，跨 rank）→ ZP_Host 节点对比（≥2 物理节点才显示，跨节点聚合）→ 各域通信分组对比（min/mean/max + 柱状图）。通信以通信组为单位比较，不输出逐 rank 的总通信时间排序。
 
 **常量**：柱状图 `█`，最大宽度 40，Top N = 30，Bottom N = 5。
 

@@ -159,6 +159,7 @@ func toCycleSummary(c *CycleResult) *cycleSummary {
 		DBs:        c.DBs,
 		DumpDir:    c.DumpDir,
 		Summary:    c.Summary,
+		KPIStatus:  c.KPIStatus,
 		Error:      c.Error,
 	}
 }
