@@ -355,7 +355,7 @@ go run . --daemon \
     [--daemon-port=8080] \          # HTTP 监听端口
     [--interval=600] \              # 循环周期（秒），默认 600
     --profiler-dir=/home/nf/data \  # profiler 采集落盘根目录（必填；即传给 dyno 的 --log-file）
-    --kpi-dir=/home/nf/kpi \        # KPI 数据目录（必填；CATMonitor JSONL，同 --kpi-jsonl-dir 语义）
+    [--kpi-dir=/home/nf/kpi] \      # KPI 数据目录（可选；CATMonitor JSONL，同 --kpi-jsonl-dir 语义；缺省只跑 Profiler）
     [--collect-wait=60] \           # dyno 触发成功后的等待秒数，默认 60
     [--history=50]                  # 历史保留周期数，默认 50
 ```
@@ -558,7 +558,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 // daemon/types.go
 type DaemonConfig struct {
     ProfilerDir string        // profiler 采集落盘根目录（CLI --profiler-dir=，必填；传给 dyno 的 --log-file）
-    KpiDir      string        // KPI 数据目录（CLI --kpi-dir=，必填；CATMonitor JSONL）
+    KpiDir      string        // KPI 数据目录（CLI --kpi-dir=，可选；空 = 每轮只跑 Profiler）
     Interval    time.Duration // 循环周期，默认 600s
     Port        int           // HTTP 端口，默认 8080
     CollectWait time.Duration // dyno 触发成功后的等待秒数，默认 60s

@@ -145,9 +145,9 @@ func main() {
 	// Daemon mode: resident service (dynolog/dyno collection + HTTP).
 	// ─────────────────────────────────────────────────────────────────
 	if daemonMode {
-		if profilerDir == "" || kpiDir == "" {
-			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir --kpi-dir=/dir [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--history=50]\n")
-			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir and --kpi-dir\n")
+		if profilerDir == "" {
+			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--history=50]\n")
+			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir (--kpi-dir is optional; omit to run profiler-only cycles)\n")
 			os.Exit(1)
 		}
 
@@ -183,7 +183,11 @@ func main() {
 		d := daemon.New(cfg, detectFromParsedData)
 		d.SetTempDir(tmpDir)
 
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Daemon Mode (profiler=%s kpi=%s) ===\n", profilerDir, kpiDir)
+		if kpiDir != "" {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Daemon Mode (profiler=%s kpi=%s) ===\n", profilerDir, kpiDir)
+		} else {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Daemon Mode (profiler=%s, KPI detection disabled) ===\n", profilerDir)
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := d.Run(ctx); err != nil {

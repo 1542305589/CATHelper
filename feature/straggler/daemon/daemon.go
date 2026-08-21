@@ -84,6 +84,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.cfg.DynologBin != "" {
 		d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
 	}
+	if d.cfg.KpiDir == "" {
+		d.logf("KPI detection disabled (no --kpi-dir): cycles run profiler-only")
+	}
 
 	// First cycle immediately.
 	d.mu.Lock()
