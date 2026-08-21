@@ -34,8 +34,7 @@ cd feature/straggler
 go run . --kpi-path=/data/kpi_csv_dir
 
 # 整合模式（CATMonitor straggler_output JSONL，优先）
-go run . --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
-         --faultsub-url=http://localhost:9101
+go run . --kpi-jsonl-dir=/var/lib/catmonitor/straggler
 ```
 
 ### 模式 2：仅 Profiler 检测
@@ -77,7 +76,6 @@ straggler/
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
 │   ├── report.go           #   管线编排 + 文本报告（stdout）
-│   └── emit.go             #   faultsub 闭环回传
 ├── profiling/              # 第二道防线：Profiling 检测
 │   ├── dataparse/          #   数据清洗（SQLite → CSV/JSON 中间件）
 │   │   ├── data_process.go
@@ -203,7 +201,6 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `degradation` | float64 | 否 | 0.3 | 灵敏度。`< 0` 重置为 0.3；`> 1` 允许但告警。联动 Profiler 阈值 |
 | `--kpi-path` | string | 否* | — | KPI 模式：每节点 CSV + `node_config.json` 的**目录** |
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
-| `--faultsub-url` | string | 否 | — | FaultSub 回调 URL，非空时把 KPI 命中卡回注 faultsub（闭环） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮，不随 degradation 变化） |
 | `--debug-output` | bool | 否 | 假 | 输出全量数据排查未检出（仍在 `straggler_output.json`，不额外生成文件）：KPI 每个指标的 `cards` 列出全部卡（含正常的 score，`abnormal` 区分）；Profiler `node_result` 包含所有节点（含正常节点及其诊断 score） |
 

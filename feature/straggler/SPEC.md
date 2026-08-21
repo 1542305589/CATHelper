@@ -40,7 +40,7 @@
 ## CLI
 
 ```
-slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--faultsub-url=http://host:9101] [--space-ratio-threshold=2.0] [--debug-output]
+slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--debug-output]
 ```
 
 ### 参数
@@ -51,7 +51,6 @@ slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs 
 | `degradation` | float64 | 否 | 0.3 | 灵敏度系数，< 0 重置为 0.3，> 1 允许但警告 |
 | `--kpi-path` | string | 否 | — | KPI 模式：包含多个每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否 | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
-| `--faultsub-url` | string | 否 | — | FaultSub 回调 URL，KPI 发现异常时回传检测结果 |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（簇均值/基线均值，独立旋钮，不随 degradation 变化） |
 | `--debug-output` | bool | 否 | false | 全量输出：KPI 全部指标×全部卡（含正常的）；Profiler 全部节点/全部通信组（含正常的） |
 
@@ -119,10 +118,10 @@ aggregateScores → buildAnomalyMetrics
          metric → anomalous cards + space score)
                    │
                    ▼
-    ┌──────────────┼──────────────┐
-    ▼              ▼              ▼
-合并输出JSON   WriteReport    EmitToFaultSub
- (straggler_    (stdout text   (POST /faultsub/events)
+    ┌──────────────┼─────────────┐
+    ▼              ▼
+合并输出JSON   WriteReport
+ (straggler_    (stdout text
   output.json)   report)
 ```
 
@@ -235,7 +234,6 @@ CPU 取桶内最后一个值。
 | `straggler_output.json` | 运行目录（当前目录） | **合并输出**：`{"kpi": <KPI 结果>, "profiler": <Profiler 结果>}`；只跑了哪个维度就只含哪个键 |
 | `detection_report.log` | `path/analysis_result/` | Profiler 文本报告 |
 | stdout | — | KPI 文本报告（不落盘）+ Profiler 逐类摘要 |
-| FaultSub | `--faultsub-url` | 异常卡事件回传 |
 
 **JSON 输出结构**（`straggler_output.json` 的 `kpi` 段，即 `{"kpi": {...}}`）：
 
@@ -604,7 +602,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 |------|--------|
 | `main` | CLI 参数解析、双模式编排（KPI → Profiler 降级链）、合并 JSON 输出、embed 二进制 |
 | `daemon` | 守护进程：周期调度（dynolog/dyno 采集）、runCycle 编排、HTTP 查询/控制、结果落盘 |
-| `resource` | KPI 检测引擎：解析 → 聚合 → 空间检测 → 指标分组 → 报告 → JSON 导出 → FaultSub 推送 |
+| `resource` | KPI 检测引擎：解析 → 聚合 → 空间检测 → 指标分组 → 报告 → JSON 导出 |
 | `clustering` | 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 均质化聚类共用） |
 | `config` | Profiler 全局配置（FilePath、CalThreshold、CommThreshold）、DegradationData 结果聚合 |
 | `profiling/dataparse` | SQLite `.db` 解析 → CSV + JSON 中间文件（含 host_info/npu_info） |
