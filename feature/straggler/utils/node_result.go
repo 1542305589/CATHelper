@@ -313,7 +313,7 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 	// Slow-CPU needs ≥2 physical nodes to be meaningful: hostUid-based trimming
 	// collapses a single node's ranks to identical values, so no straggler can
 	// be found. Skip its line entirely in that case.
-	cpuDetectable := physicalNodeCount() >= 2
+	cpuDetectable := PhysicalNodeCount() >= 2
 
 	// Degraded mode (no parallel topology, cal-only): state it explicitly and
 	// only report cal — the other categories have no input data, so "无异常"
@@ -354,11 +354,12 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 	}
 }
 
-// physicalNodeCount returns the number of distinct physical nodes, read from
+// PhysicalNodeCount returns the number of distinct physical nodes, read from
 // op_metric/host_info_{N}.json (hostName, falling back to hostUid). It scans
 // ALL rank metadata files, not just anomalous ones, so slow-CPU detectability
-// (needs ≥2 nodes) is judged on the whole system.
-func physicalNodeCount() int {
+// (needs ≥2 nodes) and the report's cross-node sections are judged on the
+// whole system.
+func PhysicalNodeCount() int {
 	metricDir := filepath.Join(config.FilePath, "op_metric")
 	entries, err := os.ReadDir(metricDir)
 	if err != nil {

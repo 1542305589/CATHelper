@@ -415,8 +415,9 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 - 数据目录、时间、有效 rank 数
 - 并行域拓扑摘要
 - 四类检测结果表格（异常详情最多 5 条 + "+N more"）
-- ZP_Kernel / ZP_Host 排序柱状图（Top 30 + Bottom 5）
-- 各通信域分组对比（min/mean/max，异常组标 `***`）
+- ZP_Kernel 跨 rank 排序柱状图（Top 30 + Bottom 5；rank 数 ≤35 时只输出一次完整列表）
+- ZP_Host 跨节点对比（≥2 物理节点才出现；逐 rank 排序无意义，不输出）
+- 各通信域分组对比（min/mean/max，异常组标 `***`；通信以通信组为单位比较，不输出逐 rank 的总通信时间）
 - 时间自动单位转换（s / ms / µs / ns）
 
 ### 2.7 均质化聚类算法（kmeans 比例检测）

@@ -1,6 +1,6 @@
 # CATHelper — 慢节点（Straggler）检测
 
-AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。
+AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制（见[五、守护进程模式](#五守护进程模式常驻检测)）。
 
 ---
 
@@ -10,11 +10,12 @@ AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一
 - [二、目录结构](#二目录结构)
 - [三、输入数据](#三输入数据)
 - [四、CLI 参数详解](#四cli-参数详解)
-- [五、检测原理](#五检测原理)
-- [六、输出与解读](#六输出与解读)
-- [七、边界情况](#七边界情况)
-- [八、构建与部署](#八构建与部署)
-- [九、设计文档](#九设计文档)
+- [五、守护进程模式（常驻检测）](#五守护进程模式常驻检测)
+- [六、检测原理](#六检测原理)
+- [七、输出与解读](#七输出与解读)
+- [八、边界情况](#八边界情况)
+- [九、构建与部署](#九构建与部署)
+- [十、设计文档](#十设计文档)
 
 ---
 
@@ -56,9 +57,16 @@ go run . path=/data/profiler_output --kpi-path=/data/kpi_csv_dir degradation=0.3
 
 ```
 straggler/
-├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON 输出
+├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON 输出、--daemon 入口（PATH 解析 dyno/dynolog）
+├── daemon/                 # 守护进程：dynolog/dyno 采集 + 周期检测 + HTTP 查询/控制
+│   ├── daemon.go           #   运行循环（周期调度、生命周期、优雅退出）
+│   ├── dyno.go             #   dynolog 拉起 + dyno 触发校验 + python analyse 转 .db
+│   ├── store.go            #   会话历史 + 周期计数
+│   ├── server.go           #   HTTP 路由（/status /straggler/* /daemon/*）
+│   └── types.go            #   Config / CycleResult / HTTP 响应类型
 ├── README.md               # 本文件
 ├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
+├── build.sh                # 构建：架构检查 + 安装 dyno/dynolog（.deb）+ Python 版本检查 + wheel 安装 + go build
 ├── clustering/             # 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 均质化聚类共用）
 │   └── kmeans.go
 ├── resource/               # 第一道防线：资源指标检测（KPI）
@@ -198,6 +206,19 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 
 \* `path` 与 KPI 输入（`--kpi-path` / `--kpi-jsonl-dir`）至少提供一个；都没有则打印用法并退出。
 
+### 守护进程（`--daemon`）参数
+
+| 参数 | 类型 | 必需 | 默认 | 说明 |
+|------|------|------|------|------|
+| `--daemon` | bool | 否 | 假 | 进入常驻守护进程模式（周期自动采集+检测，HTTP 查询/控制） |
+| `--profiler-dir` | string | 是* | — | 采集落盘根目录（传给 dyno 的 `--log-file`）；每轮 dump 目录建在其下（*`--daemon` 时必填） |
+| `--kpi-dir` | string | 否 | — | KPI 数据目录（CATMonitor JSONL；可选，缺省则每轮只跑 Profiler 检测） |
+| `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
+| `--interval` | int | 否 | 600 | 检测周期（秒，≥60，非法回退默认） |
+| `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
+
+`--daemon` 模式用法与 HTTP 接口详见[五、守护进程模式](#五守护进程模式常驻检测)。`degradation`、`--debug-output` 在该模式下语义不变（作用于每轮检测）。
+
 ### 阈值计算
 
 ```
@@ -220,9 +241,144 @@ Profiler 模式:
 
 ---
 
-## 五、检测原理
+## 五、守护进程模式（常驻检测）
 
-### 5.1 KPI 检测（resource/）
+一次性模式按需手动运行；**守护进程模式（`--daemon`）常驻运行**，周期性自动完成「触发采集 → 转换 → 解析 → 分析」全链路，检测结果通过 HTTP 查询与运维控制，适合接入手管或调度系统持续巡检。
+
+### 5.1 工作原理
+
+每到一个周期，daemon 自动执行一次完整的检测循环（每周期数据为 **`--profiler-dir` 根目录下的全部 rank 子目录**——dyno 每个 rank 写一个 `master_<pid>_<ts>_ascend_pt`，互不共享状态）：
+
+```
+dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm 进程) → 等待 collect-wait →
+对整个 --profiler-dir 根目录 python analyse 转 .db（覆盖所有 rank）→ dataparse 解析 →
+KPI 检测(读 --kpi-dir) + Profiler 检测(整个根目录) → 合并 JSON + daemon_meta.json 直接落盘 daemon_results/<start>/ → 周期结束删除整个 profiler-dir
+```
+
+同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后等待一个周期（`--interval`）再开始循环；`POST /daemon/trigger` 可随时手动补跑一轮。每轮周期把结果（合并 JSON、检测报告）直接落盘到 `--profiler-dir` 之外的 `daemon_results/<start>/`，周期结束时删除整个 `--profiler-dir`（dyno 下次采集自动重建）——存结果与删数据互不影响，防止 profiler 数据堆积影响后续检测。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
+
+### 5.2 前置条件与启动
+
+| 条件 | 说明 |
+|------|------|
+| 硬件 | aarch64 Linux + Ascend NPU + CANN |
+| Python | 3.9–3.12，装有 `torch_npu`（`build.sh` 自动安装 mindstudio_monitor wheel） |
+| 采集链路 | 训练进程以 `MSMONITOR_USE_DAEMON=1` 启动（dyno 才能命中并触发采集） |
+| 构建 | 先跑 `bash build.sh`（架构检查 + 下载 dyno/dynolog + 装 Python 依赖 + go build） |
+
+```bash
+cd feature/straggler
+bash build.sh          # 首次构建（见九、构建与部署）
+
+./slowNodeDetection --daemon \
+    --profiler-dir=/data/profiler \   # 必填：采集落盘根目录（传给 dyno 的 --log-file）
+    --kpi-dir=/data/kpi \             # 可选：KPI 数据目录（CATMonitor JSONL；缺省则只跑 Profiler）
+    --interval=600 \                  # 可选：检测周期（秒，≥60）
+    --collect-wait=60 \               # 可选：触发成功后等待采集完成的秒数
+    --daemon-port=8080 \              # 可选：HTTP 端口
+    --degradation=0.3                 # 可选：灵敏度（与一次性模式同义）
+```
+
+`--profiler-dir` 必填；`--kpi-dir` 可选（缺省时每轮只跑 Profiler 检测，合并 JSON 不含 `kpi` 键）。日志打到 stderr。
+
+> `--kpi-dir` 与单次调用的 `--kpi-jsonl-dir` 共用同一读取逻辑（`resource.ReadKPIFiles`），支持两种目录布局：
+> 1. **平铺**：目录下直接放 `straggler_kpi_{date}.jsonl`（无 `node_config.json`）；
+> 2. **多节点**：目录下有 `node_config.json`（`{"<folder>": {"node": "节点名", "cards": [...]}}`），jsonl 放在各 `<folder>/` 子目录内，按 per-node 卡号过滤。
+>
+> 注意：目录里**一旦存在 `node_config.json`，就按多节点布局读，顶层散放的 jsonl 会被忽略**。daemon 的 `--kpi-dir` 应指向 CATMonitor 的 `straggler_output.data_dir`（默认 `/var/lib/catmonitor/straggler`）且 CATMonitor 侧启用 `straggler_output` 插件。守护进程启动时会打印该目录可读取的 jsonl 文件数（两种布局都统计）；若为 0 会输出明确 WARNING。每轮周期的 KPI 执行结果（`ok` / `skipped: ...` / `failed: ...`）记录在 history 与 `/status` 的 `last_cycle.kpi_status` 中，KPI 未生效时原因一目了然。
+
+### 5.3 HTTP 接口
+
+路由**无 `/api/v1` 前缀**。查询类只读，控制类需 POST。
+
+| 方法 & 路径 | 作用 | 请求体 |
+|-------------|------|--------|
+| `GET /healthz` | 存活探针 | — |
+| `GET /status` | 状态总览：state / interval_sec / 两个数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at | — |
+| `GET /straggler/results/latest` | 最近一轮合并结果 JSON（数据源 = `daemon_results` 归档文件） | — |
+| `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（含失败的 error），按时间倒序；`?limit=N` 可选，限制返回条数 | — |
+| `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
+| `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告（text/plain） | — |
+| `POST /daemon/start` | 恢复运行（paused → running） | — |
+| `POST /daemon/pause` | 暂停（在跑的周期跑完，不再排新的） | — |
+| `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
+| `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
+
+**curl 示例**：
+
+```bash
+# 查询
+curl -s localhost:8080/status | jq
+curl -s localhost:8080/straggler/results/latest | jq
+curl -s localhost:8080/straggler/results/history | jq        # 全部历史；可用 ?limit=N 截断
+curl -s localhost:8080/straggler/results/2 | jq
+curl -s localhost:8080/straggler/report/latest
+
+# 控制
+curl -s -X POST localhost:8080/daemon/pause
+curl -s -X POST localhost:8080/daemon/trigger
+curl -s -X POST localhost:8080/daemon/interval -d '{"interval_sec": 300}'
+curl -s -X POST localhost:8080/daemon/start
+```
+
+**`GET /status` 响应示例**：
+
+```json
+{
+  "state": "running",
+  "interval_sec": 600,
+  "profiler_dir": "/data/profiler",
+  "kpi_dir": "/data/kpi",
+  "cycles_total": 3,
+  "cycles_failed": 0,
+  "last_cycle": {
+    "id": 3,
+    "started_at": "2026-08-20T10:00:00+08:00",
+    "finished_at": "2026-08-20T10:02:00+08:00",
+    "duration_ms": 120000,
+    "dbs": 8,
+    "dump_dir": "daemon_results/20260820-100000",
+    "summary": { "cal": 1, "comm": 0, "cpu": 0, "npu_bubble": 0 }
+  },
+  "next_run_at": "2026-08-20T10:10:00+08:00"
+}
+```
+
+### 5.4 数据落盘与重启
+
+每轮周期的采集产物落在 `--profiler-dir` 根目录下（dyno 每个 rank 写一个 `master_<pid>_<ts>_ascend_pt` 子目录）；结果 JSON 与 meta 直接落盘到运行目录下的 `daemon_results/<start>/`（`--profiler-dir` 之外），整个 `--profiler-dir` 在周期结束时删除（dyno 下次采集自动重建，防堆积）：
+
+```
+<profiler-dir>/                    # 采集根目录；整个 profiler-dir 周期结束删除
+├── master_<pid>_<ts>_ascend_pt/     # 每个 rank 一个子目录（dyno 落盘）
+├── ascend_pytorch_profiler_*.db     # python analyse 转出的 SQLite（findDBs 递归发现）
+├── op_metric/                       # dataparse 中间产物（写根下）
+└── analysis_result/detection_report.log
+
+daemon_results/<start>/           # 每轮结果直接落盘于此（归档记录；查询走内存 store）
+├── straggler_output.json          # 本轮合并结果（latest/{id} 经 JSONPath 读）
+├── daemon_meta.json               # 周期元数据（归档记录，查询不读）
+└── analysis_result/detection_report.log   # 文本报告（归档记录，report/latest 走内存）
+```
+
+运行目录另有一份最新的 `straggler_output.json`（与一次性模式同形状，覆盖写）。
+
+**查询只看本次会话**：所有查询接口（latest/history/{id}/report）都从进程内 store 读，daemon 重启后清空，不读磁盘历史；本次会话的历史无条数上限，`/straggler/results/history` 默认返回全部周期（可用 `?limit=N` 截断）；`/status` 的 `cycles_total`/`cycles_failed` 同样是本进程内累计（重启归零）。
+
+### 5.5 常见问题
+
+| 现象 | 原因与处理 |
+|------|-----------|
+| 每轮周期都失败，`error` 含 `processesMatched empty` | 训练进程未设 `MSMONITOR_USE_DAEMON=1`，dyno 没命中 → 检查训练启动参数 |
+| 周期失败，`error` 含 `python analyse` | `torch_npu` 未装或版本不匹配 → 重跑 `build.sh` 装 mindstudio_monitor wheel |
+| `dynolog exited` 日志但能检测 | IPC 端口已被占用，daemon 复用现有实例，属正常 |
+| `trigger` 返回 409 | 已有周期在跑（周期内再触发被 single-flight 挡住），稍后再试 |
+
+---
+
+## 六、检测原理
+
+### 6.1 KPI 检测（resource/）
 
 ```
 CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
@@ -251,7 +407,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 
 **判定与输出**：某指标某卡空间异常 → 该卡异常。输出按**指标分组**：每个异常指标下列出异常的卡及其 `score`（劣化程度）。
 
-### 5.2 Profiler 检测（profiling/）
+### 6.2 Profiler 检测（profiling/）
 
 ```
 SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点聚合 → 合并 JSON
@@ -268,9 +424,9 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 ---
 
-## 六、输出与解读
+## 七、输出与解读
 
-### 6.1 合并 JSON：`straggler_output.json`（运行目录）
+### 7.1 合并 JSON：`straggler_output.json`（运行目录）
 
 两道检测结果合并为**一个文件**，写在**运行目录**（启动命令所在目录）：
 
@@ -301,15 +457,15 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
   ```
   对照阈值即可看出"为什么某 rank/组 值不低却没被标"（比如 ratio 1.02 < CalThreshold 1.3）。
 
-### 6.2 文本报告
+### 7.2 文本报告
 
 | 报告 | 路径 | 内容 |
 |------|------|------|
-| Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel/ZP_Host 排序柱状图、通信域分组对比 |
+| Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel 跨 rank 排序柱状图、ZP_Host 跨节点对比（≥2 节点）、通信域分组对比 |
 
 > KPI 已无文本报告文件（`npu_resource_detection_report.log` 已移除），KPI 文本仅打印到 stdout。
 
-### 6.3 stdout
+### 7.3 stdout
 
 - KPI 文本报告（仅 stdout，不落盘）
 - Profiler 逐类摘要（有异常才列出详情）：
@@ -320,7 +476,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
   Bubble (npu_bubble): 无异常
   ```
 
-### 6.4 结果字段解读
+### 7.4 结果字段解读
 
 | 字段 | 含义 |
 |------|------|
@@ -329,7 +485,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 ---
 
-## 七、边界情况
+## 八、边界情况
 
 | 场景 | 处理 |
 |------|------|
@@ -348,13 +504,37 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 ---
 
-## 八、构建与部署
+## 九、构建与部署
+
+### 标准构建（`build.sh`，推荐）
+
+`build.sh` 在 **aarch64 Linux** 主机上一次完成依赖与编译（仅支持 aarch64，其他架构直接报错退出）：
 
 ```bash
-# straggler 是 CATHelper 下的独立 Go module（feature/straggler/）
+cd feature/straggler
+bash build.sh
+```
+
+它依次做 6 件事：
+1. **架构检查**：`uname -m` != `aarch64` → 报错退出
+2. **安装 dyno / dynolog**：wget 直接下载 `dynolog_0.3.2_1.aarch64.deb`（msmonitor daily bucket）→ 检测系统包管理器（dpkg 原生安装 .deb；rpm 系需 `alien` 转换）→ 安装，使 `dyno` / `dynolog` 直接可从 PATH 调用（已安装则跳过）
+3. **Python 版本检查**：须 3.9 / 3.10 / 3.11 / 3.12，否则报错退出
+4. **装依赖**：下载并 `pip install` 对应的 `mindstudio_monitor-26.2.0-cp<xx>-cp<xx>-linux_aarch64.whl`（cp 标签随 Python 版本）
+5. **Go 工具链**：需 >= go.mod 版本；缺失/过旧时从阿里云镜像下载并持久化 PATH（`/usr/local/go`，不可写时 `~/.local/go`）
+6. **编译**：`CGO_ENABLED=0 go build -o slowNodeDetection .`
+
+产物 `./slowNodeDetection`。dyno/dynolog 由第 2 步安装到**系统**（不进仓库，也不再使用 `3rdparty/`）；下载的中间文件在临时目录，退出即清理。改动 Go 代码后只需重跑第 6 步（或直接 `go build`）。
+
+### 手动编译 / 跨平台
+
+Go 编译**不再依赖** dyno/dynolog 二进制（已无 embed），任何平台都能出包；daemon 模式只在运行时要求目标 aarch64 主机装好 dyno/dynolog（跑一次 `build.sh` 即可）：
+
+```bash
 cd feature/straggler
 go mod tidy                      # 首次拉取 modernc.org/sqlite 依赖（需网络）
-CGO_ENABLED=0 go build -o slowNodeDetection .
+CGO_ENABLED=0 go build -o slowNodeDetection .                                   # aarch64（本机，daemon + 一次性都可用）
+CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o slownode_linux_amd64 .       # 跨平台，仅一次性模式
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o slownode_win_amd64.exe .    # 跨平台，仅一次性模式
 ```
 
 全静态二进制，无 CGo（Profiler 用纯 Go SQLite 驱动 `modernc.org/sqlite`）。
@@ -366,7 +546,7 @@ go build ./... && go test ./...
 
 ---
 
-## 九、设计文档
+## 十、设计文档
 
 - [DESIGN_NPU_RESOURCE.md](./DESIGN_NPU_RESOURCE.md) — KPI 资源指标检测设计
 - [DESIGN.md](./DESIGN.md) — Profiling 检测设计

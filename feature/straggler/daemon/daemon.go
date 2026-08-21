@@ -32,7 +32,6 @@ type Daemon struct {
 	nextRun       time.Time     // when the next cycle starts (zero when paused)
 	cycleID       int           // per-process id, starting from 1
 	cycleInFlight bool
-	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
 	dynolog       *exec.Cmd     // dynolog child to kill on shutdown (nil = reusing existing)
 }
 
@@ -97,15 +96,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// POST /daemon/trigger for an immediate cycle.
 	d.mu.Lock()
 	d.nextRun = time.Now().Add(d.interval)
-	d.timer = time.NewTimer(d.interval)
-	// The HTTP server starts before this point, so a Pause could already have
-	// arrived; in that case the timer must not stay armed (Start() re-arms).
-	if d.state == "paused" {
-		d.nextRun = time.Time{}
-		d.timer.Stop()
-	}
 	d.mu.Unlock()
-	defer d.stopTimer()
+
+	timer := time.NewTimer(d.interval)
+	defer timer.Stop()
 
 	for {
 		select {
@@ -113,21 +107,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return d.shutdown(srv)
 		case err := <-srvErr:
 			return err
-		case <-d.timer.C:
+		case <-timer.C:
 			d.mu.Lock()
 			if d.state == "running" {
 				d.startCycle()
-				// Re-anchor both the display and the actual timer to the next
-				// interval. (startCycle already sets nextRun unless a cycle
-				// was in flight and this tick was skipped.)
-				d.nextRun = time.Now().Add(d.interval)
-				d.timer.Reset(d.interval)
-			} else {
-				// Paused: stop the timer so it does not keep ticking through
-				// the pause; Start() re-arms it from now+interval.
-				d.stopTimer()
 			}
 			d.mu.Unlock()
+			timer.Reset(d.interval)
 		}
 	}
 }
@@ -202,9 +188,8 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 
-	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so
-	//    whether KPI ran (and its outcome) is visible in history: "ok" means
-	//    detection executed; disabled/skipped/failed carry the reason.
+	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so a
+	//    skipped/failed KPI pass is visible in history, not silently absent.
 	cr.KPI, cr.KPIStatus = d.detectKPI()
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
@@ -215,12 +200,6 @@ func (d *Daemon) runCycle(id int) {
 	}
 	cr.Result = res.NodeOutput
 	cr.Summary = res.Summary
-	// Merge the KPI anomaly counts (per metric) into the cycle summary so
-	// history shows both dimensions; the kpi segment is absent when KPI
-	// detection produced no result.
-	if cr.KPI != nil {
-		cr.Summary.KPI = kpiMetricCounts(cr.KPI, d.cfg.DebugOutput)
-	}
 	cr.Report = res.Report
 
 	// 7. Write the combined result JSON + cycle meta into the per-cycle archive
@@ -280,28 +259,6 @@ func (d *Daemon) detectKPI() (*resource.DetectionResult, string) {
 		return nil, fmt.Sprintf("failed: %v", err)
 	}
 	return res, "ok"
-}
-
-// kpiMetricCounts builds the kpi sub-summary: per KPI metric, the number of
-// anomalous cards (unit: 卡). Without --debug-output the result lists only
-// anomalous cards; with debug every card is listed with an Abnormal flag, so
-// only flagged cards are counted.
-func kpiMetricCounts(kpi *resource.DetectionResult, debug bool) map[string]int {
-	out := make(map[string]int)
-	for _, ma := range kpi.Metrics {
-		if !debug {
-			out[string(ma.Metric)] = len(ma.Cards)
-			continue
-		}
-		n := 0
-		for _, c := range ma.Cards {
-			if c.Abnormal {
-				n++
-			}
-		}
-		out[string(ma.Metric)] = n
-	}
-	return out
 }
 
 // countKPIFiles returns how many straggler_kpi_*.jsonl files ReadKPIFiles would
@@ -385,32 +342,26 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 // ---------------------------------------------------------------------------
 
 // Pause stops scheduling new cycles; an in-flight cycle finishes naturally.
-// The cycle timer is stopped so the schedule does not keep ticking through
-// the pause (Start() re-arms it from now+interval).
 func (d *Daemon) Pause() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "running" {
 		d.state = "paused"
 		d.nextRun = time.Time{}
-		d.stopTimer()
 	}
 }
 
-// Start resumes the cycle loop and schedules the next run after the interval,
-// re-arming the timer so the actual fire matches next_run_at.
+// Start resumes the cycle loop and schedules the next run after the interval.
 func (d *Daemon) Start() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "paused" {
 		d.state = "running"
 		d.nextRun = time.Now().Add(d.interval)
-		d.resetTimer()
 	}
 }
 
-// SetInterval updates the cycle period, validating [60, 86400] seconds. The
-// running timer is re-armed so the new period takes effect immediately.
+// SetInterval updates the cycle period, validating [60, 86400] seconds.
 func (d *Daemon) SetInterval(sec int64) error {
 	if sec < 60 || sec > 86400 {
 		return fmt.Errorf("interval_sec out of range [60, 86400]")
@@ -420,14 +371,12 @@ func (d *Daemon) SetInterval(sec int64) error {
 	d.interval = time.Duration(sec) * time.Second
 	if d.state == "running" {
 		d.nextRun = time.Now().Add(d.interval)
-		d.resetTimer()
 	}
 	return nil
 }
 
 // Trigger runs one cycle immediately; returns an error when paused or when a
-// cycle is already in flight (HTTP 409). The timer is re-anchored so the next
-// automatic cycle is exactly one interval after the manual one.
+// cycle is already in flight (HTTP 409).
 func (d *Daemon) Trigger() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -438,32 +387,7 @@ func (d *Daemon) Trigger() error {
 		return fmt.Errorf("a cycle is already running")
 	}
 	d.startCycle()
-	d.resetTimer()
 	return nil
-}
-
-// stopTimer stops the cycle timer, draining any stale fire so a later Reset
-// takes effect cleanly (Stop returning false means a value may be pending in
-// C). Caller holds d.mu.
-func (d *Daemon) stopTimer() {
-	if d.timer == nil {
-		return
-	}
-	if !d.timer.Stop() {
-		select {
-		case <-d.timer.C:
-		default:
-		}
-	}
-}
-
-// resetTimer re-arms the cycle timer to fire after the current interval.
-// Caller holds d.mu.
-func (d *Daemon) resetTimer() {
-	d.stopTimer()
-	if d.timer != nil {
-		d.timer.Reset(d.interval)
-	}
 }
 
 // ---------------------------------------------------------------------------
