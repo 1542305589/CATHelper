@@ -36,10 +36,12 @@ func DefaultConfig() Config {
 	}
 }
 
-// CycleResult is one cycle's metadata + result. Each cycle's data source is an
-// independent dump directory, so there is no incremental state across cycles.
-// It is serialized (minus the heavy fields) into daemon_meta.json inside the
-// dump directory, which is what /straggler/results/history reads.
+// CycleResult is one cycle's metadata + result. The data source is the
+// --profiler-dir root (dyno writes one master_<pid>_<ts>_ascend_pt subdir per
+// rank under it); the root is removed at the end of the cycle and the small
+// result artifacts live in ./daemon_results/<start>/. Serialized (minus the
+// heavy fields) into daemon_meta.json inside the archive dir, which is what
+// /straggler/results/history reads.
 type CycleResult struct {
 	ID         int                       `json:"id"`
 	StartedAt  time.Time                 `json:"started_at"`

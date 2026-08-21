@@ -87,50 +87,14 @@ func parseDynoResponse(stdout string) (*dynoResponse, error) {
 	return &r, nil
 }
 
-// locateLatestDumpDir returns the newest dump directory directly under
-// ProfilerDir. Trigger time is deliberately NOT used as a lower bound: the dump
-// dirs are created by the profiler during collection initiation and can land a
-// few seconds before the dyno client command returns, so an "mtime after
-// trigger" filter is inherently racy. Cycles run one interval apart and nothing
-// else writes into ProfilerDir, so the newest dir is the current cycle's
-// output. It is only rejected as stale (older than a whole interval) when the
-// collection produced nothing at all.
-func (d *Daemon) locateLatestDumpDir() (string, error) {
-	entries, err := os.ReadDir(d.cfg.ProfilerDir)
-	if err != nil {
-		return "", fmt.Errorf("scan profiler dir: %w", err)
-	}
-	best, bestT := "", time.Time{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		info, ierr := e.Info()
-		if ierr != nil {
-			continue
-		}
-		if info.ModTime().After(bestT) {
-			best, bestT = e.Name(), info.ModTime()
-		}
-	}
-	if best == "" || time.Since(bestT) > d.cfg.Interval {
-		return "", d.noNewDumpErr(bestT)
-	}
-	return filepath.Join(d.cfg.ProfilerDir, best), nil
-}
-
-// noNewDumpErr builds the "no fresh dump dir" error including a listing of what
-// currently sits under ProfilerDir, so the on-disk layout can be validated
-// during field testing.
-func (d *Daemon) noNewDumpErr(newest time.Time) error {
-	newestTxt := newest.Format(time.RFC3339)
-	if newest.IsZero() {
-		newestTxt = "none"
-	}
+// noDBsErr builds the "no .db after analyse" error with a listing of the
+// profiler root's top-level entries, so the on-disk layout can be validated
+// during field testing (e.g. whether dyno wrote one subdir per rank).
+func (d *Daemon) noDBsErr() error {
 	var b strings.Builder
 	entries, err := os.ReadDir(d.cfg.ProfilerDir)
 	if err != nil {
-		return fmt.Errorf("no fresh dump dir under %s (scan failed: %v)", d.cfg.ProfilerDir, err)
+		return fmt.Errorf("no ascend_pytorch_profiler_*.db found after analyse (scan %s failed: %v)", d.cfg.ProfilerDir, err)
 	}
 	for _, e := range entries {
 		info, ierr := e.Info()
@@ -139,8 +103,8 @@ func (d *Daemon) noNewDumpErr(newest time.Time) error {
 		}
 		fmt.Fprintf(&b, "\n  %s  %s", info.ModTime().Format(time.RFC3339), e.Name())
 	}
-	return fmt.Errorf("no fresh dump dir under %s (newest=%s, top-level:%s)",
-		d.cfg.ProfilerDir, newestTxt, b.String())
+	return fmt.Errorf("no ascend_pytorch_profiler_*.db found after analyse under %s (top-level:%s)",
+		d.cfg.ProfilerDir, b.String())
 }
 
 // runAnalyse converts the raw profiler dump into .db files via torch_npu's

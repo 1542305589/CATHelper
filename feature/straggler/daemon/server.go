@@ -68,12 +68,9 @@ func (d *Daemon) handleResultsLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metas := d.listMetaFiles()
-	if len(metas) > 0 {
-		p := filepath.Join(metas[0].DumpDir, "straggler_output.json")
-		if fileExists(p) {
-			http.ServeFile(w, r, p)
-			return
-		}
+	if len(metas) > 0 && metas[0].JSONPath != "" && fileExists(metas[0].JSONPath) {
+		http.ServeFile(w, r, metas[0].JSONPath)
+		return
 	}
 	http.Error(w, "no result yet", http.StatusNotFound)
 }
@@ -111,12 +108,9 @@ func (d *Daemon) handleResultsByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, m := range d.listMetaFiles() {
-		if m.ID == id {
-			p := filepath.Join(m.DumpDir, "straggler_output.json")
-			if fileExists(p) {
-				http.ServeFile(w, r, p)
-				return
-			}
+		if m.ID == id && m.JSONPath != "" && fileExists(m.JSONPath) {
+			http.ServeFile(w, r, m.JSONPath)
+			return
 		}
 	}
 	http.NotFound(w, r)
@@ -130,8 +124,8 @@ func (d *Daemon) handleReportLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metas := d.listMetaFiles()
-	if len(metas) > 0 {
-		p := filepath.Join(metas[0].DumpDir, "analysis_result", "detection_report.log")
+	if len(metas) > 0 && metas[0].JSONPath != "" {
+		p := filepath.Join(filepath.Dir(metas[0].JSONPath), "analysis_result", "detection_report.log")
 		if fileExists(p) {
 			http.ServeFile(w, r, p)
 			return
@@ -176,12 +170,12 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Disk metadata helpers (daemon_meta.json in each dump directory)
+// Disk metadata helpers (daemon_meta.json in each archive directory)
 // ---------------------------------------------------------------------------
 
 // listMetaFiles parses daemon_meta.json from every cycle's archive directory
 // (./daemon_results/<started-at>), newest first. This is the restart-surviving
-// history source; the heavy dump dirs are removed after each cycle.
+// history source; the heavy --profiler-dir root is removed after each cycle.
 func (d *Daemon) listMetaFiles() []*CycleResult {
 	entries, err := os.ReadDir("daemon_results")
 	if err != nil {
