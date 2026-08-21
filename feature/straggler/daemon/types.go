@@ -51,6 +51,7 @@ type CycleResult struct {
 	DumpDir    string                    `json:"dump_dir"`
 	JSONPath   string                    `json:"json_path,omitempty"`
 	KPI        *resource.DetectionResult `json:"-"`
+	KPIStatus  string                    `json:"kpi_status,omitempty"` // "ok" / "disabled..." / "skipped: ..." / "failed: ..."
 	Result     *utils.NodeOutput         `json:"-"`
 	Summary    map[string]int            `json:"summary"`
 	Report     string                    `json:"-"`
@@ -107,6 +108,7 @@ type cycleSummary struct {
 	DBs        int            `json:"dbs"`
 	DumpDir    string         `json:"dump_dir"`
 	Summary    map[string]int `json:"summary"`
+	KPIStatus  string         `json:"kpi_status,omitempty"`
 	Error      string         `json:"error,omitempty"`
 }
 
