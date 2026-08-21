@@ -53,9 +53,20 @@ type CycleResult struct {
 	KPI        *resource.DetectionResult `json:"-"`
 	KPIStatus  string                    `json:"kpi_status,omitempty"` // "ok" / "disabled..." / "skipped: ..." / "failed: ..."
 	Result     *utils.NodeOutput         `json:"-"`
-	Summary    map[string]int            `json:"summary"`
+	Summary    CycleSummary              `json:"summary"`
 	Report     string                    `json:"-"`
 	Error      string                    `json:"error,omitempty"`
+}
+
+// CycleSummary holds one cycle's anomaly counts, split by data dimension.
+//
+//	profiler: cal -> 卡数, comm -> 通信组数, cpu -> 节点数, npu_bubble -> 卡数
+//	kpi:      KPI 指标名 (temp/power/aicore_freq/...) -> 异常卡数
+//
+// kpi 段仅在 KPI 检测成功产出结果时存在；profiler 段恒有四个键。
+type CycleSummary struct {
+	KPI      map[string]int `json:"kpi,omitempty"`      // metric -> anomalous cards
+	Profiler map[string]int `json:"profiler,omitempty"` // cal/comm/cpu/npu_bubble -> count
 }
 
 // dynoResponse is the JSON snippet embedded in the dyno trigger command's
@@ -75,8 +86,8 @@ type DetectFunc func(inputPath string, degradation float64, debugOutput bool) (*
 // combined JSON, per-category anomaly counts, and the text report.
 type DetectResult struct {
 	NodeOutput *utils.NodeOutput
-	Summary    map[string]int // cal/comm/cpu/npu_bubble -> anomaly counts
-	Report     string         // report.GenerateReport text
+	Summary    CycleSummary // profiler 段：cal=卡/comm=通信组/cpu=节点/npu_bubble=卡
+	Report     string       // report.GenerateReport text
 }
 
 // CombinedOutput is the merged KPI + profiler result written as one JSON file
@@ -101,15 +112,15 @@ type statusResponse struct {
 // cycleSummary is the compact per-cycle entry served by /status and /history
 // (what a serialized CycleResult looks like without the heavy fields).
 type cycleSummary struct {
-	ID         int            `json:"id"`
-	StartedAt  time.Time      `json:"started_at"`
-	FinishedAt time.Time      `json:"finished_at"`
-	DurationMs int64          `json:"duration_ms"`
-	DBs        int            `json:"dbs"`
-	DumpDir    string         `json:"dump_dir"`
-	Summary    map[string]int `json:"summary"`
-	KPIStatus  string         `json:"kpi_status,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	ID         int           `json:"id"`
+	StartedAt  time.Time     `json:"started_at"`
+	FinishedAt time.Time     `json:"finished_at"`
+	DurationMs int64         `json:"duration_ms"`
+	DBs        int           `json:"dbs"`
+	DumpDir    string        `json:"dump_dir"`
+	Summary    CycleSummary  `json:"summary"`
+	KPIStatus  string        `json:"kpi_status,omitempty"`
+	Error      string        `json:"error,omitempty"`
 }
 
 // historyResponse is the GET /straggler/results/history payload.

@@ -357,13 +357,39 @@ func detectFromParsedData(inputPath string, degradation float64, debugOutput boo
 	}, nil
 }
 
-// summarizeProfiler counts anomalies per category from the detection result.
-func summarizeProfiler(result config.DegradationData) map[string]int {
-	return map[string]int{
-		"cal":        len(result["cal"]),
-		"comm":       len(result["comm"]),
-		"cpu":        len(result["cpu"]),
-		"npu_bubble": len(result["npu_bubble"]),
+// summarizeProfiler counts anomalies per profiler category for the cycle
+// summary. Units: cal = 卡, comm = 通信组, cpu = 物理节点数（同节点 rank 共享
+// host，按 hostUid 去重），npu_bubble = 卡。
+func summarizeProfiler(result config.DegradationData) daemon.CycleSummary {
+	return daemon.CycleSummary{
+		Profiler: map[string]int{
+			"cal":        len(result["cal"]),
+			"comm":       len(result["comm"]),
+			"cpu":        countCPUNodes(result["cpu"]),
+			"npu_bubble": len(result["npu_bubble"]),
+		},
 	}
+}
+
+// countCPUNodes counts distinct physical nodes among the flagged CPU ranks.
+// hostUid comes from host_info_{N}.json; ranks without hostUid (profiler data
+// lacking HOST_INFO) each count as their own node so information is not lost.
+func countCPUNodes(flagged map[string]float64) int {
+	ranks := make([]int, 0, len(flagged))
+	for k := range flagged {
+		if r, err := strconv.Atoi(k); err == nil {
+			ranks = append(ranks, r)
+		}
+	}
+	hostOf := detector.GetHostUidMapping(config.FilePath, ranks)
+	nodes := make(map[string]bool)
+	for _, r := range ranks {
+		h := hostOf[r]
+		if h == "" {
+			h = fmt.Sprintf("rank-%d", r) // unknown host: rank as its own node
+		}
+		nodes[h] = true
+	}
+	return len(nodes)
 }
 

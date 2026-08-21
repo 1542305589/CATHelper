@@ -188,8 +188,9 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 
-	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so a
-	//    skipped/failed KPI pass is visible in history, not silently absent.
+	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so
+	//    whether KPI ran (and its outcome) is visible in history: "ok" means
+	//    detection executed; disabled/skipped/failed carry the reason.
 	cr.KPI, cr.KPIStatus = d.detectKPI()
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
@@ -200,6 +201,12 @@ func (d *Daemon) runCycle(id int) {
 	}
 	cr.Result = res.NodeOutput
 	cr.Summary = res.Summary
+	// Merge the KPI anomaly counts (per metric) into the cycle summary so
+	// history shows both dimensions; the kpi segment is absent when KPI
+	// detection produced no result.
+	if cr.KPI != nil {
+		cr.Summary.KPI = kpiMetricCounts(cr.KPI, d.cfg.DebugOutput)
+	}
 	cr.Report = res.Report
 
 	// 7. Write the combined result JSON + cycle meta into the per-cycle archive
@@ -259,6 +266,28 @@ func (d *Daemon) detectKPI() (*resource.DetectionResult, string) {
 		return nil, fmt.Sprintf("failed: %v", err)
 	}
 	return res, "ok"
+}
+
+// kpiMetricCounts builds the kpi sub-summary: per KPI metric, the number of
+// anomalous cards (unit: 卡). Without --debug-output the result lists only
+// anomalous cards; with debug every card is listed with an Abnormal flag, so
+// only flagged cards are counted.
+func kpiMetricCounts(kpi *resource.DetectionResult, debug bool) map[string]int {
+	out := make(map[string]int)
+	for _, ma := range kpi.Metrics {
+		if !debug {
+			out[string(ma.Metric)] = len(ma.Cards)
+			continue
+		}
+		n := 0
+		for _, c := range ma.Cards {
+			if c.Abnormal {
+				n++
+			}
+		}
+		out[string(ma.Metric)] = n
+	}
+	return out
 }
 
 // countKPIFiles returns how many straggler_kpi_*.jsonl files ReadKPIFiles would

@@ -524,7 +524,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
     "finished_at": "2026-08-18T10:00:08+08:00",
     "duration_ms": 8123,
     "dbs": 8,
-    "summary": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0},
+    "summary": {"profiler": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0}, "kpi": {"temp": 1}},
     "error": null
   },
   "next_run_at": "2026-08-18T10:10:00+08:00"
@@ -541,7 +541,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
       "finished_at": "2026-08-18T10:01:30+08:00",
       "dbs": 8,
       "dump_dir": "daemon_results/20260818-100000",
-      "summary": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0},
+      "summary": {"profiler": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0}, "kpi": {"temp": 1}},
       "error": null
     }
   ]
@@ -584,7 +584,7 @@ type CycleResult struct {
     JSONPath   string                // 本周期结果 JSON 落盘路径（查询接口的数据源）
     KPI        *resource.DetectionResult // KPI 检测结果（nil = 本轮无 KPI 数据）
     Result     *utils.NodeOutput     // profiler 检测结果（nil = 周期失败或无新数据）
-    Summary    map[string]int        // cal/comm/cpu/npu_bubble -> 异常数
+    Summary    CycleSummary          // {kpi: {指标->异常卡数}, profiler: {cal=卡/comm=通信组/cpu=节点/npu_bubble=卡}}
     Report     string                // 文本报告（供 /report/latest）
     Error      string                // 空 = 成功
 }
