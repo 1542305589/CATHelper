@@ -528,6 +528,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（倒序；`?limit=N` 可选，限制条数） | 200 `{cycles: []}` | — |
 | `GET /straggler/results/{id}` | 指定周期合并 JSON | 200 文件 | 400 id 非法 / 404 无该周期 |
 | `GET /straggler/report/latest` | 最近一轮文本报告 | 200 text/plain | 404 无报告 |
+| `GET /straggler/report/{id}` | 指定周期文本报告 | 200 text/plain | 400 id 非法 / 404 无该周期 / 404 该周期无报告 |
 | `POST /daemon/start` | 恢复运行 | 200 `{"state":"running"}` | — |
 | `POST /daemon/pause` | 暂停（在跑周期跑完） | 200 `{"state":"paused"}` | — |
 | `POST /daemon/interval` | 改周期 | 200 `{"interval_sec":N}` | 400 越界 [60,86400] / body 非法 |

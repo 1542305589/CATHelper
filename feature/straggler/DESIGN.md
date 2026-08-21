@@ -502,6 +502,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 | GET | `/straggler/results/history?limit=N` | 本次会话全部周期摘要（元数据，倒序；`?limit=N` 可选，限制条数） |
 | GET | `/straggler/results/{id}` | 指定周期的落盘结果 JSON |
 | GET | `/straggler/report/latest` | 最近周期文本报告（`text/plain`） |
+| GET | `/straggler/report/{id}` | 指定周期的文本报告（`text/plain`） |
 | POST | `/daemon/start` | 恢复循环 |
 | POST | `/daemon/pause` | 暂停循环 |
 | POST | `/daemon/interval` | 修改循环周期 |

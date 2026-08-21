@@ -299,6 +299,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 | `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（含失败的 error），按时间倒序；`?limit=N` 可选，限制返回条数 | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
 | `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告（text/plain） | — |
+| `GET /straggler/report/{id}` | 指定周期 id 的 Profiler 文本报告（text/plain） | — |
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
 | `POST /daemon/pause` | 暂停（在跑的周期跑完，不再排新的） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
@@ -313,6 +314,7 @@ curl -s localhost:8080/straggler/results/latest | jq
 curl -s localhost:8080/straggler/results/history | jq        # 全部历史；可用 ?limit=N 截断
 curl -s localhost:8080/straggler/results/2 | jq
 curl -s localhost:8080/straggler/report/latest
+curl -s localhost:8080/straggler/report/1
 
 # 控制
 curl -s -X POST localhost:8080/daemon/pause
