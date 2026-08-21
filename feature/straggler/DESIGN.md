@@ -451,8 +451,9 @@ dyno / dynolog 二进制**不进版本库**，也不随 Go 二进制 embed——
 5. detectFromParsedData(dumpDir, ...)（与一次性模式共用，见下节）
 6. 合并结果 JSON（{"kpi": ..., "profiler": ...}）与 daemon_meta.json 直接落盘到
    ./daemon_results/<start>/（dump 目录之外；文本报告拷入其 analysis_result/）
-7. 周期结束时删除整个 dump 目录——profiler 数据每周期清理不堆积；
-   存结果与删数据是两步独立的事，删除不依赖结果写入是否成功
+7. 周期结束时删除整个 --profiler-dir（dyno 每次采集自动重建根）——
+   profiler 数据每周期清理不堆积；存结果与删数据是两步独立的事，
+   删除不依赖结果写入是否成功
 ```
 
 `config.FilePath` / `CalThreshold` / `CommThreshold` 全局量按周期设置（FilePath 每周期 = 当次 dump 目录）。
@@ -615,7 +616,7 @@ daemon/
 运行期产物：
 ├── <kpi-dir>/                # KPI 数据目录（外部 CATMonitor 写入，daemon 只读）
 ├── <profiler-dir>/           # profiler 采集落盘根目录（--profiler-dir=）
-│                             # 本轮 dump 目录在周期结束后被删除，防数据堆积
+│                             # 整个 profiler-dir 在周期结束后被删除(dyno 采集时重建)
 ├── daemon_results/<start>/   # 每周期结果直接落盘于此（查询 API 的持久数据源）
 │   ├── straggler_output.json # 本周期结果 JSON（含 kpi + profiler；latest/{id} 数据源）
 │   ├── daemon_meta.json      # 周期元数据（/straggler/results/history 数据源）
@@ -641,7 +642,7 @@ daemon/
 
 - **不引 Web 框架**：接口少且无中间件需求，`net/http` 标准库足够，与项目零额外依赖的风格一致
 - **结果以落盘 JSON 为数据源而非内存**：每周期结果 JSON 与 `daemon_meta.json` 直接落盘到运行目录 `daemon_results/<start>/`（dump 目录之外），`/straggler/results/*` 直接读文件——daemon 重启不丢历史；进程内 50 周期环形历史仅作摘要缓存
-- **每周期清理 profiler 数据**：周期结束时删除本轮 dump 目录（重量的原始 profiler / .db / 中间产物），成功与失败都删（防半截数据干扰后续周期定位）——只留 dump 之外的小结果文件；存结果与删数据相互独立
+- **每周期清理 profiler 数据**：周期结束时删除整个 `--profiler-dir`（重量的原始 profiler / .db / 中间产物都在其下），成功与失败都删（防半截数据干扰后续周期定位）——只留 `--profiler-dir` 之外的小结果文件；存结果与删数据相互独立
 - **采集走 dynolog/dyno 而非 watch/exec 插件**：vllm 经 dynolog IPC 接入（`MSMONITOR_USE_DAEMON=1` 由服务侧设置，守护进程不管）；工具侧统一以 `dyno nputrace` 触发，不绑定部署侧脚本
 - **dyno/dynolog 用系统包管理器安装而非 embed/仓库分发**：仓库不携带第三方制品；build.sh 从 msmonitor 包取 `dynolog_*.deb` 用系统包管理器安装（dpkg 原生 / rpm 系 alien 转换），二者走 PATH 调用。代价是 daemon 运行机器必须先装好（否则启动即报错），换来编译与交付简单：Go 产物与采集工具解耦，任何平台都能出包
 - **固定等待而非轮询就绪**：dyno 响应不含落盘路径，采集完成时间无法获知；按联调实测默认等待 60s（`--collect-wait` 可调）
