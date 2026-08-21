@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -88,44 +87,70 @@ func parseDynoResponse(stdout string) (*dynoResponse, error) {
 	return &r, nil
 }
 
-// locateLatestDumpDir finds the profiler dump directory created after `since`:
-// the newest directory directly under ProfilerDir. dyno's response does not
-// include the dump path; this heuristic stands until the dump layout is
-// confirmed during first field testing.
+// locateLatestDumpDir finds the dump directory produced by the trigger at
+// `since`: the top-level child of ProfilerDir that contains files modified
+// after `since`, preferring the child with the newest content. dyno's response
+// does not include the dump path, and a top-level dir's own mtime can stay
+// stale when new data lands inside pre-existing subdirectories, so discovery is
+// content-based rather than directory-mtime-based. "." means new files were
+// written directly into ProfilerDir.
 func (d *Daemon) locateLatestDumpDir(since time.Time) (string, error) {
+	// Map each top-level child of ProfilerDir to the newest file mtime inside it.
+	newest := map[string]time.Time{}
+	_ = filepath.Walk(d.cfg.ProfilerDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !info.ModTime().After(since) {
+			return nil
+		}
+		rel, rerr := filepath.Rel(d.cfg.ProfilerDir, path)
+		if rerr != nil {
+			return nil
+		}
+		top := "."
+		if idx := strings.Index(rel, string(os.PathSeparator)); idx >= 0 {
+			top = rel[:idx]
+		}
+		if info.ModTime().After(newest[top]) {
+			newest[top] = info.ModTime()
+		}
+		return nil
+	})
+	if len(newest) == 0 {
+		return "", d.noNewDumpErr(since)
+	}
+	best, bestT := ".", time.Time{}
+	for dir, t := range newest {
+		if t.After(bestT) {
+			best, bestT = dir, t
+		}
+	}
+	if best == "." {
+		return d.cfg.ProfilerDir, nil
+	}
+	return filepath.Join(d.cfg.ProfilerDir, best), nil
+}
+
+// noNewDumpErr builds the "no new dump dir" error including a listing of what
+// currently sits under ProfilerDir, so the on-disk layout can be validated
+// during field testing.
+func (d *Daemon) noNewDumpErr(since time.Time) error {
+	var b strings.Builder
 	entries, err := os.ReadDir(d.cfg.ProfilerDir)
 	if err != nil {
-		return "", fmt.Errorf("scan profiler dir: %w", err)
+		return fmt.Errorf("no new dump dir under %s after %s (scan failed: %v)",
+			d.cfg.ProfilerDir, since.Format(time.RFC3339), err)
 	}
-	var candidates []string
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		info, ierr := e.Info()
 		if ierr != nil {
 			continue
 		}
-		if !info.ModTime().After(since) {
-			continue
-		}
-		candidates = append(candidates, filepath.Join(d.cfg.ProfilerDir, e.Name()))
+		fmt.Fprintf(&b, "\n  %s  %s", info.ModTime().Format(time.RFC3339), e.Name())
 	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no new dump dir under %s after %s", d.cfg.ProfilerDir, since.Format(time.RFC3339))
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return fileModTime(candidates[i]).After(fileModTime(candidates[j]))
-	})
-	return candidates[0], nil
-}
-
-func fileModTime(path string) time.Time {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime()
+	return fmt.Errorf("no new dump dir under %s after %s (top-level:%s)",
+		d.cfg.ProfilerDir, since.Format(time.RFC3339), b.String())
 }
 
 // runAnalyse converts the raw profiler dump into .db files via torch_npu's
