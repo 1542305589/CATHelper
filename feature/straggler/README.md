@@ -61,7 +61,7 @@ straggler/
 ├── daemon/                 # 守护进程：dynolog/dyno 采集 + 周期检测 + HTTP 查询/控制
 │   ├── daemon.go           #   运行循环（周期调度、生命周期、优雅退出）
 │   ├── dyno.go             #   dynolog 拉起 + dyno 触发校验 + python analyse 转 .db
-│   ├── store.go            #   环形历史 + 周期计数
+│   ├── store.go            #   会话历史 + 周期计数
 │   ├── server.go           #   HTTP 路由（/status /straggler/* /daemon/*）
 │   └── types.go            #   Config / CycleResult / HTTP 响应类型
 ├── README.md               # 本文件
@@ -216,7 +216,6 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 检测周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--history` | int | 否 | 50 | 保留的历史周期数 |
 
 `--daemon` 模式用法与 HTTP 接口详见[五、守护进程模式](#五守护进程模式常驻检测)。`degradation`、`--debug-output` 在该模式下语义不变（作用于每轮检测）。
 
@@ -277,7 +276,6 @@ bash build.sh          # 首次构建（见九、构建与部署）
     --interval=600 \                  # 可选：检测周期（秒，≥60）
     --collect-wait=60 \               # 可选：触发成功后等待采集完成的秒数
     --daemon-port=8080 \              # 可选：HTTP 端口
-    --history=50 \                    # 可选：保留的历史周期数
     --degradation=0.3                 # 可选：灵敏度（与一次性模式同义）
 ```
 
@@ -292,7 +290,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 | `GET /healthz` | 存活探针 | — |
 | `GET /status` | 状态总览：state / interval_sec / 两个数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at | — |
 | `GET /straggler/results/latest` | 最近一轮合并结果 JSON（数据源 = `daemon_results` 归档文件） | — |
-| `GET /straggler/results/history?limit=10` | 本次会话各周期摘要（含失败的 error），按时间倒序 | — |
+| `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（含失败的 error），按时间倒序；`?limit=N` 可选，限制返回条数 | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
 | `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告（text/plain） | — |
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
@@ -306,7 +304,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 # 查询
 curl -s localhost:8080/status | jq
 curl -s localhost:8080/straggler/results/latest | jq
-curl -s "localhost:8080/straggler/results/history?limit=3" | jq
+curl -s localhost:8080/straggler/results/history | jq        # 全部历史；可用 ?limit=N 截断
 curl -s localhost:8080/straggler/results/2 | jq
 curl -s localhost:8080/straggler/report/latest
 
@@ -327,7 +325,6 @@ curl -s -X POST localhost:8080/daemon/start
   "kpi_dir": "/data/kpi",
   "cycles_total": 3,
   "cycles_failed": 0,
-  "history_size": 50,
   "last_cycle": {
     "id": 3,
     "started_at": "2026-08-20T10:00:00+08:00",
@@ -360,7 +357,7 @@ daemon_results/<start>/           # 每轮结果直接落盘于此（归档记�
 
 运行目录另有一份最新的 `straggler_output.json`（与一次性模式同形状，覆盖写）。
 
-**查询只看本次会话**：所有查询接口（latest/history/{id}/report）都从进程内 store 读，daemon 重启后清空，不读磁盘历史；`/status` 的 `cycles_total`/`cycles_failed` 同样是本进程内累计（重启归零）。
+**查询只看本次会话**：所有查询接口（latest/history/{id}/report）都从进程内 store 读，daemon 重启后清空，不读磁盘历史；本次会话的历史无条数上限，`/straggler/results/history` 默认返回全部周期（可用 `?limit=N` 截断）；`/status` 的 `cycles_total`/`cycles_failed` 同样是本进程内累计（重启归零）。
 
 ### 5.5 常见问题
 

@@ -20,7 +20,6 @@ type Config struct {
 	CollectWait time.Duration // dyno 触发成功后的等待秒数，默认 60s
 	DynoBin     string        // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
 	DynologBin  string        // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
-	HistorySize int           // 环形历史容量，默认 50
 	Degradation float64       // 阈值参数透传（1+degradation / 1+degradation*5）
 	DebugOutput bool          // --debug-output：结果含所有正常卡的诊断分
 }
@@ -31,7 +30,6 @@ func DefaultConfig() Config {
 		Interval:    10 * time.Minute,
 		Port:        8080,
 		CollectWait: 60 * time.Second,
-		HistorySize: 50,
 		Degradation: 0.3,
 	}
 }
@@ -95,7 +93,6 @@ type statusResponse struct {
 	KpiDir       string        `json:"kpi_dir"`
 	CyclesTotal  int           `json:"cycles_total"`
 	CyclesFailed int           `json:"cycles_failed"`
-	HistorySize  int           `json:"history_size"`
 	LastCycle    *cycleSummary `json:"last_cycle,omitempty"`
 	NextRunAt    *time.Time    `json:"next_run_at,omitempty"`
 }

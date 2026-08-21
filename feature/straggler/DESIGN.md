@@ -357,7 +357,6 @@ go run . --daemon \
     --profiler-dir=/home/nf/data \  # profiler 采集落盘根目录（必填；即传给 dyno 的 --log-file）
     [--kpi-dir=/home/nf/kpi] \      # KPI 数据目录（可选；CATMonitor JSONL，同 --kpi-jsonl-dir 语义；缺省只跑 Profiler）
     [--collect-wait=60] \           # dyno 触发成功后的等待秒数，默认 60
-    [--history=50]                  # 历史保留周期数，默认 50
 ```
 
 `--daemon` 进入常驻模式：从 PATH 解析 dyno/dynolog 并拉起 dynolog、启动 HTTP 服务，随后等待一个 interval 再开始周期循环（首个周期不在启动时立即执行）。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
@@ -500,7 +499,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 | GET | `/healthz` | 存活检查，恒 200 |
 | GET | `/status` | 守护进程状态 |
 | GET | `/straggler/results/latest` | 最近周期的落盘结果 JSON |
-| GET | `/straggler/results/history?limit=10` | 最近 N 个周期摘要（元数据） |
+| GET | `/straggler/results/history?limit=N` | 本次会话全部周期摘要（元数据，倒序；`?limit=N` 可选，限制条数） |
 | GET | `/straggler/results/{id}` | 指定周期的落盘结果 JSON |
 | GET | `/straggler/report/latest` | 最近周期文本报告（`text/plain`） |
 | POST | `/daemon/start` | 恢复循环 |
@@ -508,7 +507,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 | POST | `/daemon/interval` | 修改循环周期 |
 | POST | `/daemon/trigger` | 立即触发一个周期 |
 
-查询接口以**本次会话的进程内记录为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 返回内存 store 里对应周期的结果 JSON（经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 读取）；`/straggler/results/history` 列出本次会话各周期摘要（daemon 重启即空，不读磁盘历史）。
+查询接口以**本次会话的进程内记录为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 返回内存 store 里对应周期的结果 JSON（经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 读取）；`/straggler/results/history` 列出本次会话全部周期摘要（无条数上限，daemon 重启即空，不读磁盘历史）。
 
 **GET /status 响应**：
 ```json
@@ -519,7 +518,6 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
   "kpi_dir": "/home/nf/kpi",
   "cycles_total": 12,
   "cycles_failed": 1,
-  "history_size": 50,
   "last_cycle": {
     "id": 12,
     "started_at": "2026-08-18T10:00:00+08:00",
@@ -570,7 +568,6 @@ type DaemonConfig struct {
     CollectWait time.Duration // dyno 触发成功后的等待秒数，默认 60s
     DynoBin     string        // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
     DynologBin  string        // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
-    HistorySize int           // 环形历史容量，默认 50
     Degradation float64       // 阈值参数透传
     DebugOutput bool
 }
@@ -607,7 +604,7 @@ type dynoResponse struct {
 daemon/
 ├── daemon.go    // Daemon 结构：生命周期、状态机、runCycle
 ├── dyno.go      // dynolog 拉起 + dyno 触发采集 + 等待 + python analyse 调用
-├── store.go     // 环形历史（mutex 保护）
+├── store.go     // 会话历史（mutex 保护，无条数上限）
 ├── server.go    // HTTP handlers（net/http 标准库，不引第三方框架）
 └── types.go     // DaemonConfig / CycleResult / dynoResponse / API 载荷
 
@@ -641,7 +638,7 @@ daemon/
 ### 设计取舍
 
 - **不引 Web 框架**：接口少且无中间件需求，`net/http` 标准库足够，与项目零额外依赖的风格一致
-- **查询以本次会话内存记录为数据源**：`/straggler/results/*` 从进程内 50 周期环形 store 读（重启即空，看不到历史）；每周期结果 JSON 落盘到 `daemon_results/<start>/`（`--profiler-dir` 之外）供 latest/{id} 经 `JSONPath` ServeFile 读取，`daemon_meta.json` 仅作归档记录
+- **查询以本次会话内存记录为数据源**：`/straggler/results/*` 从进程内无上限 store 读（本次会话全部周期均可查，重启即空，看不到历史）；每周期结果 JSON 落盘到 `daemon_results/<start>/`（`--profiler-dir` 之外）供 latest/{id} 经 `JSONPath` ServeFile 读取，`daemon_meta.json` 仅作归档记录
 - **每周期清理 profiler 数据**：周期结束时删除整个 `--profiler-dir`（重量的原始 profiler / .db / 中间产物都在其下），成功与失败都删（防半截数据干扰后续周期定位）——只留 `--profiler-dir` 之外的小结果文件；存结果与删数据相互独立
 - **采集走 dynolog/dyno 而非 watch/exec 插件**：vllm 经 dynolog IPC 接入（`MSMONITOR_USE_DAEMON=1` 由服务侧设置，守护进程不管）；工具侧统一以 `dyno nputrace` 触发，不绑定部署侧脚本
 - **dyno/dynolog 用系统包管理器安装而非 embed/仓库分发**：仓库不携带第三方制品；build.sh 从 msmonitor 包取 `dynolog_*.deb` 用系统包管理器安装（dpkg 原生 / rpm 系 alien 转换），二者走 PATH 调用。代价是 daemon 运行机器必须先装好（否则启动即报错），换来编译与交付简单：Go 产物与采集工具解耦，任何平台都能出包
