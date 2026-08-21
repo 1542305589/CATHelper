@@ -285,7 +285,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 > 1. **平铺**：目录下直接放 `straggler_kpi_{date}.jsonl`（无 `node_config.json`）；
 > 2. **多节点**：目录下有 `node_config.json`（`{"<folder>": {"node": "节点名", "cards": [...]}}`），jsonl 放在各 `<folder>/` 子目录内，按 per-node 卡号过滤。
 >
-> 注意：目录里**一旦存在 `node_config.json`，就按多节点布局读，顶层散放的 jsonl 会被忽略**。daemon 的 `--kpi-dir` 应指向 CATMonitor 的 `straggler_output.data_dir`（默认 `/var/lib/catmonitor/straggler`）且 CATMonitor 侧启用 `straggler_output` 插件。守护进程启动时会打印该目录可读取的 jsonl 文件数（两种布局都统计）；若为 0 会输出明确 WARNING。每轮周期的 KPI 执行结果（`ok` / `skipped: ...` / `failed: ...`）记录在 history 与 `/status` 的 `last_cycle.kpi_status` 中，KPI 未生效时原因一目了然。
+> 注意：目录里**一旦存在 `node_config.json`，就按多节点布局读，顶层散放的 jsonl 会被忽略**。daemon 的 `--kpi-dir` 应指向 CATMonitor 的 `straggler_output.data_dir`（默认 `/var/lib/catmonitor/straggler`）且 CATMonitor 侧启用 `straggler_output` 插件。守护进程启动时会打印该目录可读取的 jsonl 文件数（两种布局都统计）；若为 0 会输出明确 WARNING。每轮周期的 KPI 执行结果（`ok` = 已执行；`disabled` / `skipped: ...` / `failed: ...` = 未产出结果及原因）记录在 history 与 `/status` 的 `last_cycle.kpi_status` 中。
 
 ### 5.3 HTTP 接口
 
@@ -338,7 +338,7 @@ curl -s -X POST localhost:8080/daemon/start
     "duration_ms": 120000,
     "dbs": 8,
     "dump_dir": "daemon_results/20260820-100000",
-    "summary": { "cal": 1, "comm": 0, "cpu": 0, "npu_bubble": 0 }
+    "summary": { "profiler": { "cal": 1, "comm": 0, "cpu": 0, "npu_bubble": 0 }, "kpi": { "temp": 1 } }
   },
   "next_run_at": "2026-08-20T10:10:00+08:00"
 }
