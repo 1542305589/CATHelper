@@ -40,8 +40,8 @@ func DefaultConfig() Config {
 // --profiler-dir root (dyno writes one master_<pid>_<ts>_ascend_pt subdir per
 // rank under it); the root is removed at the end of the cycle and the small
 // result artifacts live in ./daemon_results/<start>/. Serialized (minus the
-// heavy fields) into daemon_meta.json inside the archive dir, which is what
-// /straggler/results/history reads.
+// heavy fields) into daemon_meta.json inside the archive dir as a durable
+// record; the query API reads the in-memory store, not this file.
 type CycleResult struct {
 	ID         int                       `json:"id"`
 	StartedAt  time.Time                 `json:"started_at"`

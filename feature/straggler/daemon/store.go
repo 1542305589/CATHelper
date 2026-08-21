@@ -2,10 +2,10 @@ package daemon
 
 import "sync"
 
-// store is a mutex-protected ring of recent CycleResults. It serves /status
-// (counters + last_cycle) and as a fast path for /straggler/results/*. The
-// authoritative long-term record is each dump directory's daemon_meta.json, so
-// history survives a daemon restart even though this cache does not.
+// store is a mutex-protected ring of recent CycleResults. It is the sole data
+// source for /status (counters + last_cycle) and /straggler/results/*: only
+// cycles from THIS daemon session are visible, so a restart starts with no
+// history.
 type store struct {
 	mu     sync.Mutex
 	cycles []*CycleResult
@@ -55,6 +55,17 @@ func (s *store) get(id int) *CycleResult {
 		}
 	}
 	return nil
+}
+
+// list returns this session's cycles, newest first (a snapshot copy).
+func (s *store) list() []*CycleResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*CycleResult, 0, len(s.cycles))
+	for i := len(s.cycles) - 1; i >= 0; i-- {
+		out = append(out, s.cycles[i])
+	}
+	return out
 }
 
 // counts returns (total, failed) cycles for this session.

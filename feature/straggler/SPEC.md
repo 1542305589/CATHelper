@@ -533,7 +533,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | `POST /daemon/interval` | 改周期 | 200 `{"interval_sec":N}` | 400 越界 [60,86400] / body 非法 |
 | `POST /daemon/trigger` | 立即补跑一轮 | 200 `{"status":"triggered"}` | 409 已有周期在跑 / 已暂停 |
 
-**查询数据源 = 落盘 JSON**：latest/history/{id} 从各周期 `daemon_results/<start>/` 的 `straggler_output.json` / `daemon_meta.json` 读取（daemon 重启不丢历史；结果在 `--profiler-dir` 之外，`--profiler-dir` 周期结束时整个删除，互不影响）；进程内 `store` 只是最新周期的快速路径，重启即空。
+**查询数据源 = 本次会话内存 store**：latest/history/{id} 从进程内 store 读（daemon 重启即空，看不到历史；latest/{id} 的 JSON 内容经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 文件读取）；结果在 `--profiler-dir` 之外，`--profiler-dir` 周期结束时整个删除，互不影响。
 
 **`GET /status` 响应**：
 
@@ -572,8 +572,8 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 daemon_results/<start>/                # 每周期结果直接落盘于此（dump 目录之外，查询数据源）
 ├── straggler_output.json              # 本轮合并结果（查询数据源：latest/{id}）
-├── daemon_meta.json                   # 周期元数据（查询数据源：history）
-└── analysis_result/detection_report.log   # 文本报告（report/latest 重启后兜底）
+├── daemon_meta.json                   # 周期元数据（归档记录，查询不读）
+└── analysis_result/detection_report.log   # 文本报告（归档记录，report/latest 走内存）
 ```
 
 运行目录另有一份最新的 `straggler_output.json`（与一次性模式同形状，覆盖写）。
@@ -592,7 +592,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 | dynolog 已占用 | 复用现有实例（不视为失败），首个周期验证连通 |
 | KPI 目录为空 / 检测失败 | 该维度本轮跳过（profiler 照常，不阻断周期） |
 
-失败的周期照常写 `daemon_meta.json`（error 非空），history 可查。
+失败的周期照常记录到内存 store（error 非空），history 可查。
 
 ### 3.5 dyno/dynolog 安装与构建
 
@@ -632,7 +632,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 - **Profiler: 单一算法**：kmeans 比例检测（`clustering` 包）是唯一的异常检测器，所有场景通用，并与 KPI 空间检测共享同一实现。
 - **Profiler: 不做时序分析**：仅处理单次快照，不进行趋势/移动平均/变点检测。
 - **单一检测管线**：daemon 与一次性模式共用 `detectFromParsedData`（main 以 `DetectFunc` 注入 daemon，避免 import cycle）。
-- **每周期 = `--profiler-dir` 根下全部 rank 子目录**：周期之间无增量状态；周期结束时删除整个 `--profiler-dir` 防堆积（成功/失败都删，dyno 采集时自动重建），历史 = `daemon_results/<start>/` 的 `daemon_meta.json`（重启不丢）。
+- **每周期 = `--profiler-dir` 根下全部 rank 子目录**：周期之间无增量状态；周期结束时删除整个 `--profiler-dir` 防堆积（成功/失败都删，dyno 采集时自动重建）；查询只看本次会话内存 store（重启即空）。
 - **落盘 JSON 为查询数据源**：HTTP 查询读 `daemon_results/<start>/` 直接落盘的结果文件，进程内 store 只是最新周期的快速路径。
 - **采集工具走系统安装而非 embed**：dyno/dynolog 由 build.sh 用系统包管理器安装（`dynolog_*.deb`），走 PATH 调用，仓库不携带第三方制品；代价是 daemon 机器须先装好，换来编译与交付简单（Go 产物与采集工具解耦，任何平台可出包）。
 - **KPI 复用**：daemon 的 KPI 检测与一次性模式同一实现（`resource.RunDetectionFromData`），输入换成每周期重读 `--kpi-dir`，无额外状态。
