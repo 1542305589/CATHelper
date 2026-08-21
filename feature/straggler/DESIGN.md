@@ -377,7 +377,9 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
         --msprof-tx --export-type Db --log-file <profiler-dir>
    # dyno 自身的参数名就是 --log-file；守护进程 CLI 用 --profiler-dir 指同一路径
 
-3. 解析 dyno stdout 中的 JSON（形如 "response = {...}"）：
+3. 解析 dyno stdout 中的 JSON（形如 "response = {...}"；stdout 还带前导
+   "Security Warning: ..." / "NpuTrace config = ..." 与尾随 "Matched N processes"
+   等文本，解析取第一个 `{` 到最后一个 `}` 之间的 JSON 对象）：
    {"activityProfilersBusy":0,
     "activityProfilersTriggered":[2503,124212],
     "commandStatus":"effective",
@@ -385,7 +387,8 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
     "eventProfilersTriggered":[],
     "processesMatched":[2503,124212]}
 
-   commandStatus == "effective"   -> 采集已触发，继续
+   commandStatus == "effective"   -> 采集已触发，继续（判定只看这里；
+                                      dyno 进程退出码非零不影响，只要 effective 即继续）
    commandStatus == "ineffective" -> 本周期失败
    processesMatched 为空          -> 目标进程未匹配（vllm 未运行或未设
                                       MSMONITOR_USE_DAEMON=1），周期失败并提示

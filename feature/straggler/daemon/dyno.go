@@ -47,11 +47,14 @@ func (d *Daemon) triggerCollection() error {
 		"--log-file", d.cfg.ProfilerDir,
 	}
 	out, err := exec.Command(d.cfg.DynoBin, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("dyno trigger: %v (stderr: %s)", err, strings.TrimSpace(string(out)))
-	}
+	// The collection verdict comes only from commandStatus in the response:
+	// dyno's process exit code says nothing about whether data was captured, so
+	// an effective response wins even when the process exited non-zero.
 	resp, perr := parseDynoResponse(string(out))
 	if perr != nil {
+		if err != nil {
+			return fmt.Errorf("dyno trigger: %v (stderr: %s)", err, strings.TrimSpace(string(out)))
+		}
 		return fmt.Errorf("dyno response: %v (stdout: %s)", perr, strings.TrimSpace(string(out)))
 	}
 	if resp.CommandStatus != "effective" {
@@ -63,18 +66,21 @@ func (d *Daemon) triggerCollection() error {
 	return nil
 }
 
-// parseDynoResponse extracts the JSON from dyno's stdout. The output is shaped
-// "response = {...}"; fall back to parsing the whole output as JSON.
+// parseDynoResponse extracts the JSON object from dyno's stdout. The payload is
+// shaped "response = {...}" and is wrapped in a preamble ("Security Warning: ...",
+// "NpuTrace config = ...") plus trailing status lines ("Matched N processes",
+// "Trace output files will be written to: ..."). The JSON object itself is the
+// text between the first '{' and the last '}' of the whole output.
 func parseDynoResponse(stdout string) (*dynoResponse, error) {
-	if idx := strings.Index(stdout, "response ="); idx >= 0 {
-		rest := strings.TrimSpace(stdout[idx+len("response ="):])
-		if rest != "" {
-			var r dynoResponse
-			if err := json.Unmarshal([]byte(rest), &r); err == nil {
-				return &r, nil
-			}
+	start := strings.Index(stdout, "{")
+	end := strings.LastIndex(stdout, "}")
+	if start >= 0 && end > start {
+		var r dynoResponse
+		if err := json.Unmarshal([]byte(stdout[start:end+1]), &r); err == nil {
+			return &r, nil
 		}
 	}
+	// Fallback: the whole trimmed output is JSON (no preamble/trailing text).
 	var r dynoResponse
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &r); err != nil {
 		return nil, err
