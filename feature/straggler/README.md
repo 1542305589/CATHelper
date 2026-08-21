@@ -334,7 +334,7 @@ curl -s -X POST localhost:8080/daemon/start
     "finished_at": "2026-08-20T10:02:00+08:00",
     "duration_ms": 120000,
     "dbs": 8,
-    "dump_dir": "/data/profiler/20260820-1000",
+    "dump_dir": "daemon_results/20260820-100000",
     "summary": { "cal": 1, "comm": 0, "cpu": 0, "npu_bubble": 0 }
   },
   "next_run_at": "2026-08-20T10:10:00+08:00"

@@ -542,7 +542,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
       "started_at": "2026-08-18T10:00:00+08:00",
       "finished_at": "2026-08-18T10:01:30+08:00",
       "dbs": 8,
-      "dump_dir": "/home/nf/data/2026_0818_...",
+      "dump_dir": "daemon_results/20260818-100000",
       "summary": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0},
       "error": null
     }
@@ -583,7 +583,7 @@ type CycleResult struct {
     FinishedAt time.Time
     DurationMs int64
     DBs        int                   // 本周期解析的 .db 数
-    DumpDir    string                // 本周期采集+解析所在目录（含 .db / op_metric / 结果 JSON）
+    DumpDir    string                // 本周期结果落盘目录 daemon_results/<start>/（含结果 JSON / meta / 报告；--profiler-dir 只是临时采集输入，周期结束即删，不作为 dump_dir）
     JSONPath   string                // 本周期结果 JSON 落盘路径（查询接口的数据源）
     KPI        *resource.DetectionResult // KPI 检测结果（nil = 本轮无 KPI 数据）
     Result     *utils.NodeOutput     // profiler 检测结果（nil = 周期失败或无新数据）

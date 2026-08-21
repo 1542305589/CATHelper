@@ -133,11 +133,16 @@ func (d *Daemon) startCycle() {
 // CycleResult (success or error) into the store.
 func (d *Daemon) runCycle(id int) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now()}
-	// The data source is the whole --profiler-dir root: dyno writes one
-	// master_<pid>_<ts>_ascend_pt subdir PER RANK directly under it. The root
-	// (not any single rank subdir) is what analyse/parse/detect operate on,
-	// exactly like one-shot mode's input path.
-	cr.DumpDir = d.cfg.ProfilerDir
+	// This cycle's analysed results (combined JSON, meta, report) are written
+	// to ./daemon_results/<start>/ — OUTSIDE the --profiler-dir root — and
+	// that archive dir is the cycle's dump_dir. The --profiler-dir root is only
+	// the transient raw-collection input: dyno writes one
+	// master_<pid>_<ts>_ascend_pt subdir PER RANK directly under it (the root,
+	// not any single rank subdir, is what analyse/parse/detect operate on), and
+	// cleanupDump deletes the whole root at the end of every cycle — so it must
+	// not be reported as where this cycle's data lives.
+	archive := filepath.Join("daemon_results", cr.StartedAt.Format("20060102-150405"))
+	cr.DumpDir = archive
 	defer func() {
 		cr.FinishedAt = time.Now()
 		cr.DurationMs = cr.FinishedAt.Sub(cr.StartedAt).Milliseconds()
@@ -190,10 +195,10 @@ func (d *Daemon) runCycle(id int) {
 	cr.Report = res.Report
 
 	// 7. Write the combined result JSON + cycle meta into the per-cycle archive
-	//    dir (./daemon_results/<start>/), OUTSIDE the dump dir. Keeping results
-	//    out of the dump dir is what lets the cycle's end delete the heavy
-	//    profiler folder without touching the query data source.
-	archive := filepath.Join("daemon_results", cr.StartedAt.Format("20060102-150405"))
+	//    dir (cr.DumpDir = ./daemon_results/<start>/), OUTSIDE the raw dump
+	//    root. Keeping results out of --profiler-dir is what lets the cycle's
+	//    end delete the heavy profiler folder without touching the query data
+	//    source.
 	if err := os.MkdirAll(archive, 0o755); err != nil {
 		cr.Error = fmt.Sprintf("mkdir archive: %v", err)
 		return
