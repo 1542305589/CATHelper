@@ -248,12 +248,12 @@ Profiler 模式:
 
 ### 5.1 工作原理
 
-每到一个周期，daemon 自动执行一次完整的检测循环（每周期数据为**独立 dump 目录**，互不共享状态）：
+每到一个周期，daemon 自动执行一次完整的检测循环（每周期数据为 **`--profiler-dir` 根目录下的全部 rank 子目录**——dyno 每个 rank 写一个 `master_<pid>_<ts>_ascend_pt`，互不共享状态）：
 
 ```
 dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm 进程) → 等待 collect-wait →
-定位最新 dump 目录 → python analyse 转 .db → dataparse 解析 →
-KPI 检测(读 --kpi-dir) + Profiler 检测(本次 dump) → 合并 JSON + daemon_meta.json 直接落盘 daemon_results/<start>/ → 周期结束删除整个 profiler-dir
+对整个 --profiler-dir 根目录 python analyse 转 .db（覆盖所有 rank）→ dataparse 解析 →
+KPI 检测(读 --kpi-dir) + Profiler 检测(整个根目录) → 合并 JSON + daemon_meta.json 直接落盘 daemon_results/<start>/ → 周期结束删除整个 profiler-dir
 ```
 
 同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后等待一个周期（`--interval`）再开始循环；`POST /daemon/trigger` 可随时手动补跑一轮。每轮周期把结果（合并 JSON、检测报告）直接落盘到 `--profiler-dir` 之外的 `daemon_results/<start>/`，周期结束时删除整个 `--profiler-dir`（dyno 下次采集自动重建）——存结果与删数据互不影响，防止 profiler 数据堆积影响后续检测。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
@@ -343,14 +343,13 @@ curl -s -X POST localhost:8080/daemon/start
 
 ### 5.4 数据落盘与重启
 
-每轮周期的采集产物落在 `--profiler-dir` 下的一个独立 dump 目录；结果 JSON 与 meta 直接落盘到运行目录下的 `daemon_results/<start>/`（`--profiler-dir` 之外），整个 `--profiler-dir` 在周期结束时删除（dyno 下次采集自动重建，防堆积）：
+每轮周期的采集产物落在 `--profiler-dir` 根目录下（dyno 每个 rank 写一个 `master_<pid>_<ts>_ascend_pt` 子目录）；结果 JSON 与 meta 直接落盘到运行目录下的 `daemon_results/<start>/`（`--profiler-dir` 之外），整个 `--profiler-dir` 在周期结束时删除（dyno 下次采集自动重建，防堆积）：
 
 ```
-<profiler-dir>/<dump>/            # 每轮采集/检测一个目录；整个 profiler-dir 周期结束删除
-├── ascend_pytorch_profiler_*.db    # python analyse 转出的 SQLite
-├── op_metric/                      # dataparse 中间产物
-├── straggler_output.json          # 本轮合并结果
-├── daemon_meta.json               # 周期元数据（id/时间/时长/dbs/summary/error）
+<profiler-dir>/                    # 采集根目录；整个 profiler-dir 周期结束删除
+├── master_<pid>_<ts>_ascend_pt/     # 每个 rank 一个子目录（dyno 落盘）
+├── ascend_pytorch_profiler_*.db     # python analyse 转出的 SQLite（findDBs 递归发现）
+├── op_metric/                       # dataparse 中间产物（写根下）
 └── analysis_result/detection_report.log
 
 daemon_results/<start>/           # 每轮结果直接落盘于此（查询接口的数据源，重启不丢）

@@ -495,10 +495,10 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
             └─────────────┬─────────────┘
                           ▼
   ┌────────────────────────────────────────────────────────────┐
-  │ runCycle（每周期一个独立 dump 目录，互不共享状态）           │
+  │ runCycle（每周期 = --profiler-dir 根下全部 rank 子目录）     │
   │ 1. dyno 触发采集 → 校验 commandStatus=effective + 命中 PID   │
-  │ 2. 等待 collect-wait → 定位新 dump 目录                      │
-  │ 3. python analyse 转 .db（torch_npu）                        │
+  │ 2. 等待 collect-wait（每个 rank 一个 master_*_ascend_pt）    │
+  │ 3. python analyse 转 .db（torch_npu，对整个根目录）          │
   │ 4. 发现 ascend_pytorch_profiler_*.db（空 → 周期失败）        │
   │ 5. dataparse.StartProcess（非 DataParsing，不 os.Exit）      │
   │ 6. KPI 检测（读 --kpi-dir 最新数据，同 --kpi-jsonl-dir 语义）│
@@ -512,7 +512,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 ```
 
 - 首个周期在启动 **`interval` 之后**运行（不等启动即跑）；`POST /daemon/trigger` 手动补跑；已有周期在跑时 tick 跳过（single-flight）。
-- `config.FilePath` 每周期设为当次 dump 目录；KPI 每周期重读 `--kpi-dir` 取最新数据，无跨周期状态。
+- `config.FilePath` 每周期设为 `--profiler-dir` 根目录；KPI 每周期重读 `--kpi-dir` 取最新数据，无跨周期状态。
 - 未提供 `--kpi-dir`：步骤 6 跳过，合并 JSON 不含 `kpi` 键，周期仍成功（仅 Profiler）。
 - 退出：SIGINT/SIGTERM → 停 HTTP → 等 in-flight 周期（≤10min）→ 杀掉自己拉起的 dynolog。
 
@@ -564,11 +564,10 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 ### 3.3 落盘布局
 
 ```
-<profiler-dir>/<dump>/                 # 每轮一个独立目录；整个 profiler-dir 周期结束时删除
-├── ascend_pytorch_profiler_*.db       # python analyse 转出（findDBs 递归发现）
-├── op_metric/                         # dataparse 中间产物
-├── straggler_output.json              # 本轮合并结果（{"kpi":…,"profiler":…}）
-├── daemon_meta.json                   # 周期元数据（CycleResult；KPI/Result/Report 字段 json:"-"）
+<profiler-dir>/                        # 采集根目录（dyno 写每个 rank 一个子目录；周期结束时整个删除）
+├── master_<pid>_<ts>_ascend_pt/       # 每个 rank 一个子目录（dyno 落盘）
+├── ascend_pytorch_profiler_*.db       # python analyse 转出（findDBs 递归发现，位置由 torch_npu 定）
+├── op_metric/                         # dataparse 中间产物（StartProcess 写根下）
 └── analysis_result/detection_report.log
 
 daemon_results/<start>/                # 每周期结果直接落盘于此（dump 目录之外，查询数据源）
@@ -589,7 +588,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 | dyno 触发失败 / 非零退出 | error=触发失败，周期记失败 |
 | `commandStatus=ineffective` 或 `processesMatched` 空 | error=未命中 vllm 进程（未设 MSMONITOR_USE_DAEMON=1），周期记失败 |
 | python analyse 失败 | error=转换失败，周期记失败 |
-| 无新鲜 dump 目录（最新目录比 interval 还旧）/ 无 .db | error=无产物，周期记失败 |
+| 无 .db（analyse 后根目录递归找不到 .db） | error=无产物（附根目录顶层清单），周期记失败 |
 | dynolog 已占用 | 复用现有实例（不视为失败），首个周期验证连通 |
 | KPI 目录为空 / 检测失败 | 该维度本轮跳过（profiler 照常，不阻断周期） |
 
@@ -633,7 +632,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 - **Profiler: 单一算法**：kmeans 比例检测（`clustering` 包）是唯一的异常检测器，所有场景通用，并与 KPI 空间检测共享同一实现。
 - **Profiler: 不做时序分析**：仅处理单次快照，不进行趋势/移动平均/变点检测。
 - **单一检测管线**：daemon 与一次性模式共用 `detectFromParsedData`（main 以 `DetectFunc` 注入 daemon，避免 import cycle）。
-- **每周期独立 dump 目录**：周期之间无增量状态；周期结束时删除整个 `--profiler-dir` 防堆积（成功/失败都删，dyno 采集时自动重建，防半截数据干扰后续定位），历史 = `daemon_results/<start>/` 的 `daemon_meta.json`（重启不丢）。
+- **每周期 = `--profiler-dir` 根下全部 rank 子目录**：周期之间无增量状态；周期结束时删除整个 `--profiler-dir` 防堆积（成功/失败都删，dyno 采集时自动重建），历史 = `daemon_results/<start>/` 的 `daemon_meta.json`（重启不丢）。
 - **落盘 JSON 为查询数据源**：HTTP 查询读 `daemon_results/<start>/` 直接落盘的结果文件，进程内 store 只是最新周期的快速路径。
 - **采集工具走系统安装而非 embed**：dyno/dynolog 由 build.sh 用系统包管理器安装（`dynolog_*.deb`），走 PATH 调用，仓库不携带第三方制品；代价是 daemon 机器须先装好，换来编译与交付简单（Go 产物与采集工具解耦，任何平台可出包）。
 - **KPI 复用**：daemon 的 KPI 检测与一次性模式同一实现（`resource.RunDetectionFromData`），输入换成每周期重读 `--kpi-dir`，无额外状态。

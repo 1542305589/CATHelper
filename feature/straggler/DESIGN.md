@@ -332,7 +332,7 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 │  HTTP Server (net/http)          Runner (goroutine)           │
 │  ├ GET  /status                  │  ticker ──> runCycle       │
 │  ├ GET  /straggler/results/latest │  ├ dyno 触发采集           │
-│  ├ GET  /straggler/results/history│  ├ wait + 定位 dump 目录   │
+│  ├ GET  /straggler/results/history│  ├ wait 采集落盘           │
 │  ├ GET  /straggler/report/latest  │  ├ python analyse -> .db  │
 │  ├ POST /daemon/start             │  ├ StartProcess 解析       │
 │  ├ POST /daemon/pause             │  ├ KPI 读取 + 检测         │
@@ -395,19 +395,17 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
 
 4. 固定等待 --collect-wait（默认 60s），让 --iterations 个迭代完成落盘
 
-5. 定位本次产物：取 --profiler-dir 下 **mtime 最新的顶层子目录**作为 profiler_path。
-   刻意**不**用「触发时间戳」做下界过滤——dump 目录由 profiler 在采集发起时创建，
-   可能比 dyno 客户端返回还早几秒（联调实测：目录 mtime 常比触发时刻早约 3~4s），
-   任何以触发时刻为边界的过滤都不可靠。周期一个 interval 才跑一次且无其他写入，
-   最新目录即本轮产物；仅当最新目录比整个 interval 还旧（本轮什么都没产出）时报错，
-   并列出顶层各条目 mtime + 名字便于核对
-   （dyno 响应不含落盘路径；首次联调时实测确认落盘目录结构）
+5. 数据目录 = **整个 --profiler-dir 根目录**（不是某个 rank 子目录）。dyno 在根下
+   **每个 rank 写一个 master_<pid>_<ts>_ascend_pt 子目录**，所以根目录就是本轮全部
+   数据（含所有 rank），与一次性模式 `path=` 语义一致。analyse / parse / detect
+   都对根目录递归操作。
 
 6. 转换为 .db（依赖 PATH 上的 python 已安装 torch_npu）：
    python -c "from torch_npu.profiler.profiler import analyse; \
-              analyse(profiler_path='<profiler_path>', export_type=['db'])"
+              analyse(profiler_path='<--profiler-dir>', export_type=['db'])"
 
-7. 对该目录执行现有检测管线；结果 JSON 落盘，作为查询接口的数据源
+7. 对该根目录执行现有检测管线（递归发现所有 rank 的 .db）；结果 JSON 落盘，
+   作为查询接口的数据源
 ```
 
 ### dyno / dynolog 安装（build.sh，系统包管理器 .deb）
@@ -436,27 +434,29 @@ dyno / dynolog 二进制**不进版本库**，也不随 Go 二进制 embed——
 
 ### 检测循环（runCycle）
 
-每周期的数据是**本次采集产生的独立 dump 目录**，周期之间互不共享状态：
+每周期的数据是 **--profiler-dir 根目录下的全部 rank 子目录**（每个 rank 一个
+master_<pid>_<ts>_ascend_pt），周期之间互不共享状态：
 
 ```
-1. 执行采集链路步骤 2-6：dyno 触发 -> 校验 commandStatus -> 等待
-   -> 定位 dump 目录 -> python analyse 转 .db
-2. walk 该 dump 目录发现 ascend_pytorch_profiler_*.db
-   为空 -> 周期失败（collect 成功但无 .db = analyse 失败或落盘结构变化）
-3. dataparse.StartProcess(dbFiles, dumpDir)   ← 不走 DataParsing
-   （DataParsing 零文件时 os.Exit 会杀死 daemon；dump 目录每周期全新，
+1. 执行采集链路步骤 2-4：dyno 触发 -> 校验 commandStatus -> 等待落盘
+2. python analyse 转 .db：对整个 --profiler-dir 根目录递归 analyse（覆盖所有 rank）
+3. walk 根目录发现 ascend_pytorch_profiler_*.db（所有 rank 的 .db）
+   为空 -> 周期失败（collect 成功但无 .db = analyse 失败或落盘结构变化，
+   错误信息附根目录顶层清单）
+4. dataparse.StartProcess(dbFiles, root)   ← 不走 DataParsing
+   （DataParsing 零文件时 os.Exit 会杀死 daemon；根目录每周期删了重建，
    也无需增量状态）
-4. KPI 检测：读 --kpi-dir 最新数据（resource.RunDetectionFromData，
+5. KPI 检测：读 --kpi-dir 最新数据（resource.RunDetectionFromData，
    与一次性模式 --kpi-jsonl-dir 同源）；目录为空 -> 该维度本轮跳过
-5. detectFromParsedData(dumpDir, ...)（与一次性模式共用，见下节）
-6. 合并结果 JSON（{"kpi": ..., "profiler": ...}）与 daemon_meta.json 直接落盘到
-   ./daemon_results/<start>/（dump 目录之外；文本报告拷入其 analysis_result/）
-7. 周期结束时删除整个 --profiler-dir（dyno 每次采集自动重建根）——
+6. detectFromParsedData(root, ...)（与一次性模式共用，见下节）
+7. 合并结果 JSON（{"kpi": ..., "profiler": ...}）与 daemon_meta.json 直接落盘到
+   ./daemon_results/<start>/（--profiler-dir 之外；文本报告拷入其 analysis_result/）
+8. 周期结束时删除整个 --profiler-dir（dyno 每次采集自动重建根）——
    profiler 数据每周期清理不堆积；存结果与删数据是两步独立的事，
    删除不依赖结果写入是否成功
 ```
 
-`config.FilePath` / `CalThreshold` / `CommThreshold` 全局量按周期设置（FilePath 每周期 = 当次 dump 目录）。
+`config.FilePath` / `CalThreshold` / `CommThreshold` 全局量按周期设置（FilePath 每周期 = --profiler-dir 根目录）。
 
 ### 与一次性模式的代码复用（main.go 重构点）
 

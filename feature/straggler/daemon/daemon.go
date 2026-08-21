@@ -133,48 +133,45 @@ func (d *Daemon) startCycle() {
 // CycleResult (success or error) into the store.
 func (d *Daemon) runCycle(id int) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now()}
-	var dumpDir string // heavy profiler dump dir, removed when the cycle ends
+	// The data source is the whole --profiler-dir root: dyno writes one
+	// master_<pid>_<ts>_ascend_pt subdir PER RANK directly under it. The root
+	// (not any single rank subdir) is what analyse/parse/detect operate on,
+	// exactly like one-shot mode's input path.
+	cr.DumpDir = d.cfg.ProfilerDir
 	defer func() {
 		cr.FinishedAt = time.Now()
 		cr.DurationMs = cr.FinishedAt.Sub(cr.StartedAt).Milliseconds()
 		// Results are stored in daemon_results/<start>/ during the cycle; the
 		// whole --profiler-dir is removed at the end of every cycle, success or
-		// failure. dyno re-creates the root on the next trigger, so nothing is
-		// lost and no stale dump can skew a later cycle's newest-dir pick.
+		// failure. dyno re-creates the root on the next trigger.
 		d.cleanupDump(cr)
 		d.finishCycle(cr)
 	}()
 
-	// 1. Collect: dyno trigger -> verify commandStatus -> wait -> locate dump dir.
+	// 1. Collect: dyno trigger -> verify commandStatus -> wait for the dump.
 	if err := d.triggerCollection(); err != nil {
 		cr.Error = err.Error()
 		return
 	}
 	time.Sleep(d.cfg.CollectWait)
-	var err error
-	dumpDir, err = d.locateLatestDumpDir()
-	if err != nil {
-		cr.Error = err.Error()
-		return
-	}
-	cr.DumpDir = dumpDir
+	root := d.cfg.ProfilerDir
 
-	// 2. Convert the raw dump to .db (torch_npu analyse).
-	if err := runAnalyse(dumpDir, d.logf); err != nil {
+	// 2. Convert the raw dump to .db (torch_npu analyse) over the whole root.
+	if err := runAnalyse(root, d.logf); err != nil {
 		cr.Error = err.Error()
 		return
 	}
 
-	// 3. Discover the .db files produced by the conversion.
-	dbFiles := findDBs(dumpDir)
+	// 3. Discover the .db files (recursive across all rank subdirs).
+	dbFiles := findDBs(root)
 	if len(dbFiles) == 0 {
-		cr.Error = "no ascend_pytorch_profiler_*.db found after analyse"
+		cr.Error = d.noDBsErr().Error()
 		return
 	}
 	cr.DBs = len(dbFiles)
 
 	// 4. Parse (StartProcess — not DataParsing, which os.Exit's on zero files).
-	if err := dataparse.StartProcess(dbFiles, dumpDir); err != nil {
+	if err := dataparse.StartProcess(dbFiles, root); err != nil {
 		cr.Error = fmt.Sprintf("StartProcess: %v", err)
 		return
 	}
@@ -183,7 +180,7 @@ func (d *Daemon) runCycle(id int) {
 	cr.KPI = d.detectKPI()
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
-	res, derr := d.detect(dumpDir, d.cfg.Degradation, d.cfg.DebugOutput)
+	res, derr := d.detect(root, d.cfg.Degradation, d.cfg.DebugOutput)
 	if derr != nil {
 		cr.Error = fmt.Sprintf("profiler detection: %v", derr)
 		return
@@ -206,7 +203,6 @@ func (d *Daemon) runCycle(id int) {
 		cr.Error = fmt.Sprintf("write result JSON: %v", err)
 		return
 	}
-	cr.DumpDir = archive
 	cr.JSONPath = jsonPath
 	if err := writeMeta(archive, cr); err != nil {
 		d.logf("write daemon_meta.json: %v", err)
@@ -220,7 +216,7 @@ func (d *Daemon) runCycle(id int) {
 	//    derives its path from the input dir); copy it into the archive before
 	//    the dump dir is removed so /report/latest survives a restart. Best
 	//    effort — cr.Report already holds the text in memory for this session.
-	if src := filepath.Join(dumpDir, "analysis_result", "detection_report.log"); fileExists(src) {
+	if src := filepath.Join(root, "analysis_result", "detection_report.log"); fileExists(src) {
 		if err := os.MkdirAll(filepath.Join(archive, "analysis_result"), 0o755); err != nil {
 			d.logf("cycle %d copy report: %v", cr.ID, err)
 		} else if err := copyFile(src, filepath.Join(archive, "analysis_result", "detection_report.log")); err != nil {
