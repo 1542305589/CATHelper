@@ -48,7 +48,7 @@ func (d *Daemon) triggerCollection() error {
 	}
 	out, err := exec.Command(d.cfg.DynoBin, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dyno trigger: %v", err)
+		return fmt.Errorf("dyno trigger: %v (stderr: %s)", err, strings.TrimSpace(string(out)))
 	}
 	resp, perr := parseDynoResponse(string(out))
 	if perr != nil {

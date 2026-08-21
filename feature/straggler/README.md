@@ -256,7 +256,7 @@ dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm 进程)
 KPI 检测(读 --kpi-dir) + Profiler 检测(本次 dump) → 合并 JSON 落盘 + daemon_meta.json 落盘
 ```
 
-同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后立即执行**首个周期**（不等第一个 tick），之后按 `--interval` 周期循环；`--daemon/trigger` 可随时手动补跑。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
+同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后等待一个周期（`--interval`）再开始循环；`POST /daemon/trigger` 可随时手动补跑一轮。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
 
 ### 5.2 前置条件与启动
 

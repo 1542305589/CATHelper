@@ -510,7 +510,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
           HTTP 查询（/status /straggler/*）+ 控制（/daemon/*）
 ```
 
-- 启动即执行**首个周期**（不等第一个 tick）；`POST /daemon/trigger` 手动补跑；已有周期在跑时 tick 跳过（single-flight）。
+- 首个周期在启动 **`interval` 之后**运行（不等启动即跑）；`POST /daemon/trigger` 手动补跑；已有周期在跑时 tick 跳过（single-flight）。
 - `config.FilePath` 每周期设为当次 dump 目录；KPI 每周期重读 `--kpi-dir` 取最新数据，无跨周期状态。
 - 未提供 `--kpi-dir`：步骤 6 跳过，合并 JSON 不含 `kpi` 键，周期仍成功（仅 Profiler）。
 - 退出：SIGINT/SIGTERM → 停 HTTP → 等 in-flight 周期（≤10min）→ 杀掉自己拉起的 dynolog → 清理解包临时目录。

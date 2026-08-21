@@ -64,9 +64,10 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 // removed on graceful shutdown (call after New, before Run).
 func (d *Daemon) SetTempDir(dir string) { d.tmpDir = dir }
 
-// Run starts the HTTP server and dynolog, runs the first cycle immediately
-// (not waiting for the first tick), then cycles on the interval ticker until
-// ctx is cancelled (SIGINT/SIGTERM) or the HTTP server fails.
+// Run starts the HTTP server and dynolog, then cycles on the interval ticker
+// until ctx is cancelled (SIGINT/SIGTERM) or the HTTP server fails. The first
+// cycle runs after the first interval tick, not at startup; use
+// POST /daemon/trigger for an immediate cycle.
 func (d *Daemon) Run(ctx context.Context) error {
 	srv := d.httpServer()
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", d.cfg.Port))
@@ -88,9 +89,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.logf("KPI detection disabled (no --kpi-dir): cycles run profiler-only")
 	}
 
-	// First cycle immediately.
+	// First cycle runs after the first interval tick, not immediately at
+	// startup. nextRun is set so /status shows the scheduled first run; use
+	// POST /daemon/trigger for an immediate cycle.
 	d.mu.Lock()
-	d.startCycle()
+	d.nextRun = time.Now().Add(d.interval)
 	d.mu.Unlock()
 
 	timer := time.NewTimer(d.interval)
