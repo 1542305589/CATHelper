@@ -57,7 +57,7 @@ go run . path=/data/profiler_output --kpi-path=/data/kpi_csv_dir degradation=0.3
 
 ```
 straggler/
-├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON 输出、--daemon 入口（embed dyno/dynolog）
+├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON 输出、--daemon 入口（PATH 解析 dyno/dynolog）
 ├── daemon/                 # 守护进程：dynolog/dyno 采集 + 周期检测 + HTTP 查询/控制
 │   ├── daemon.go           #   运行循环（周期调度、生命周期、优雅退出）
 │   ├── dyno.go             #   dynolog 拉起 + dyno 触发校验 + python analyse 转 .db
@@ -66,7 +66,7 @@ straggler/
 │   └── types.go            #   Config / CycleResult / HTTP 响应类型
 ├── README.md               # 本文件
 ├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
-├── build.sh                # 构建：架构检查 + msmonitor 取 dyno/dynolog + Python 版本检查 + wheel 安装 + go build
+├── build.sh                # 构建：架构检查 + 安装 dyno/dynolog（.deb）+ Python 版本检查 + wheel 安装 + go build
 ├── clustering/             # 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 均质化聚类共用）
 │   └── kmeans.go
 ├── resource/               # 第一道防线：资源指标检测（KPI）
@@ -508,25 +508,26 @@ cd feature/straggler
 bash build.sh
 ```
 
-它依次做 5 件事：
+它依次做 6 件事：
 1. **架构检查**：`uname -m` != `aarch64` → 报错退出
-2. **取二进制**：wget 下载 msmonitor 8.1.0 包 → 解压 → 从解压目录 `bin/` 取出 `dyno`、`dynolog` 放入 `3rdparty/bin/` → 删除中间文件
+2. **安装 dyno / dynolog**：wget 直接下载 `dynolog_0.3.2_1.aarch64.deb`（msmonitor daily bucket）→ 检测系统包管理器（dpkg 原生安装 .deb；rpm 系需 `alien` 转换）→ 安装，使 `dyno` / `dynolog` 直接可从 PATH 调用（已安装则跳过）
 3. **Python 版本检查**：须 3.9 / 3.10 / 3.11 / 3.12，否则报错退出
 4. **装依赖**：下载并 `pip install` 对应的 `mindstudio_monitor-26.2.0-cp<xx>-cp<xx>-linux_aarch64.whl`（cp 标签随 Python 版本）
-5. **编译**：`CGO_ENABLED=0 go build -o slowNodeDetection .`
+5. **Go 工具链**：需 >= go.mod 版本；缺失/过旧时从阿里云镜像下载并持久化 PATH（`/usr/local/go`，不可写时 `~/.local/go`）
+6. **编译**：`CGO_ENABLED=0 go build -o slowNodeDetection .`
 
-产物 `./slowNodeDetection`。`3rdparty/bin/` 与所有中间文件不进版本库（已 gitignore）；改动 Go 代码后只需重跑第 5 步（或直接 `go build`）。
+产物 `./slowNodeDetection`。dyno/dynolog 由第 2 步安装到**系统**（不进仓库，也不再使用 `3rdparty/`）；下载的中间文件在临时目录，退出即清理。改动 Go 代码后只需重跑第 6 步（或直接 `go build`）。
 
 ### 手动编译 / 跨平台
 
-`go build` 编译期校验 `3rdparty/bin/dyno`、`3rdparty/bin/dynolog` 存在（`//go:embed`，缺失直接报错），因此**先跑一次 `build.sh`** 或手动放置这两个文件，之后可跨平台出包（仅一次性模式；daemon 需 aarch64，dyno/dynolog 是 aarch64 产物）：
+Go 编译**不再依赖** dyno/dynolog 二进制（已无 embed），任何平台都能出包；daemon 模式只在运行时要求目标 aarch64 主机装好 dyno/dynolog（跑一次 `build.sh` 即可）：
 
 ```bash
 cd feature/straggler
 go mod tidy                      # 首次拉取 modernc.org/sqlite 依赖（需网络）
-CGO_ENABLED=0 go build -o slowNodeDetection .                                   # aarch64（本机）
-CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o slownode_linux_amd64 .       # 跨平台一次性模式
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o slownode_win_amd64.exe .    # 跨平台一次性模式
+CGO_ENABLED=0 go build -o slowNodeDetection .                                   # aarch64（本机，daemon + 一次性都可用）
+CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o slownode_linux_amd64 .       # 跨平台，仅一次性模式
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o slownode_win_amd64.exe .    # 跨平台，仅一次性模式
 ```
 
 全静态二进制，无 CGo（Profiler 用纯 Go SQLite 驱动 `modernc.org/sqlite`）。

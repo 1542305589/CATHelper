@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Provision the straggler build dependencies on an aarch64 host and compile:
 #   1. check arch == aarch64 (exit otherwise)
-#   2. fetch dyno/dynolog from the msmonitor 8.1.0 bundle zip
-#      (skipped when 3rdparty/bin/dyno + dynolog already exist)
+#   2. install dyno/dynolog system-wide: download dynolog_*.deb from the
+#      msmonitor daily bucket and install it via the host package manager, so
+#      both are directly callable from PATH
+#      (skipped when dyno/dynolog are already on PATH)
 #   3. check python version is in {3.9, 3.10, 3.11, 3.12}
 #   4. pip install the mindstudio_monitor 26.2.0 wheel (cp tag matched to python)
 #      (skipped when pip already has mindstudio_monitor 26.2.0)
@@ -28,8 +30,6 @@ if [ "$INSECURE" = "1" ]; then
     echo "[build] --insecure: wget will skip certificate verification"
 fi
 
-BIN_DIR="3rdparty/bin"
-
 # ver_ge A B: exit 0 when version A >= version B (dot-separated numbers).
 ver_ge() {
     local a="$1" b="$2" ia ib
@@ -53,36 +53,54 @@ if [ "$ARCH" != "aarch64" ]; then
 fi
 echo "[build] 1/6 arch OK: aarch64"
 
-# All intermediates (zip, extracted tree, whl, go tarball) live under $WORK,
-# removed on exit — always created so later download steps can rely on it.
+# All intermediates (deb, whl, go tarball) live under $WORK, removed on exit —
+# always created so later download steps can rely on it.
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# ---------------------------------------------------------------------------
-# 2. dyno / dynolog from the msmonitor bundle (skip when already present)
-# ---------------------------------------------------------------------------
-if [ -s "$BIN_DIR/dyno" ] && [ -s "$BIN_DIR/dynolog" ]; then
-    echo "[build] 2/6 dyno/dynolog already present in $BIN_DIR, skipping download"
-else
-    command -v wget >/dev/null 2>&1 || { echo "[build] ERROR: wget not found" >&2; exit 1; }
-    command -v unzip >/dev/null 2>&1 || { echo "[build] ERROR: unzip not found" >&2; exit 1; }
-
-    ZIP_URL="https://ptdbg.obs.cn-north-4.myhuaweicloud.com/profiler/msmonitor/8.1.0/aarch64_8.1.0.zip"
-    echo "[build] 2/6 downloading $ZIP_URL"
-    wget "${WGET_ARGS[@]}" -O "$WORK/aarch64_8.1.0.zip" "$ZIP_URL"
-    echo "[build]     unzipping..."
-    unzip -q "$WORK/aarch64_8.1.0.zip" -d "$WORK/extracted"
-
-    DYNO_SRC=$(find "$WORK/extracted" -type f -path '*/bin/dyno' | head -n 1 || true)
-    DYNOLOG_SRC=$(find "$WORK/extracted" -type f -path '*/bin/dynolog' | head -n 1 || true)
-    if [ -z "$DYNO_SRC" ] || [ -z "$DYNOLOG_SRC" ]; then
-        echo "[build] ERROR: dyno/dynolog not found under $WORK/extracted/bin" >&2
+# install_deb <deb> — install a Debian package via the host package manager.
+# Native target is dpkg (Debian/Ubuntu); rpm-based hosts need 'alien' to
+# convert the .deb. sudo is used when the current user cannot write dpkg state.
+install_deb() {
+    local deb="$1"
+    if command -v dpkg >/dev/null 2>&1; then
+        echo "[build]     package manager: dpkg (Debian/Ubuntu)"
+        if [ -w /var/lib/dpkg ]; then
+            dpkg -i "$deb" || { echo "[build] ERROR: dpkg -i failed" >&2; exit 1; }
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo dpkg -i "$deb" || { echo "[build] ERROR: sudo dpkg -i failed" >&2; exit 1; }
+        else
+            echo "[build] ERROR: dpkg -i needs root and sudo is not available" >&2
+            exit 1
+        fi
+    elif command -v rpm >/dev/null 2>&1 && command -v alien >/dev/null 2>&1; then
+        echo "[build]     package manager: rpm + alien (converting .deb)"
+        if command -v sudo >/dev/null 2>&1; then
+            sudo alien -i "$deb" || { echo "[build] ERROR: alien -i failed" >&2; exit 1; }
+        else
+            alien -i "$deb" || { echo "[build] ERROR: alien -i failed" >&2; exit 1; }
+        fi
+    else
+        echo "[build] ERROR: the msmonitor bundle only ships a .deb (Debian package)." >&2
+        echo "[build]        This host looks rpm-based; install 'alien' to convert it, or run on Debian/Ubuntu." >&2
         exit 1
     fi
-    mkdir -p "$BIN_DIR"
-    install -m 0755 "$DYNO_SRC" "$BIN_DIR/dyno"
-    install -m 0755 "$DYNOLOG_SRC" "$BIN_DIR/dynolog"
-    echo "[build]     dyno/dynolog -> $BIN_DIR/"
+}
+
+# ---------------------------------------------------------------------------
+# 2. dyno / dynolog installed system-wide from the dynolog .deb so they are
+#    directly callable from PATH (skip when both are already on PATH)
+# ---------------------------------------------------------------------------
+if command -v dyno >/dev/null 2>&1 && command -v dynolog >/dev/null 2>&1; then
+    echo "[build] 2/6 dyno/dynolog already installed on PATH, skipping"
+else
+    command -v wget >/dev/null 2>&1 || { echo "[build] ERROR: wget not found" >&2; exit 1; }
+
+    DEB_URL="https://ascend-package.obs.cn-north-4.myhuaweicloud.com/msmonitor/daily/2026040207/deb/aarch64/dynolog_0.3.2_1.aarch64.deb"
+    echo "[build] 2/6 downloading $DEB_URL"
+    wget "${WGET_ARGS[@]}" -O "$WORK/dynolog_0.3.2_1.aarch64.deb" "$DEB_URL"
+    echo "[build]     installing dynolog_0.3.2_1.aarch64.deb"
+    install_deb "$WORK/dynolog_0.3.2_1.aarch64.deb"
 fi
 
 # ---------------------------------------------------------------------------

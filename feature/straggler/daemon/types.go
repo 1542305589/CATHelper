@@ -18,8 +18,8 @@ type Config struct {
 	Interval    time.Duration // 循环周期，默认 600s
 	Port        int           // HTTP 端口，默认 8080
 	CollectWait time.Duration // dyno 触发成功后的等待秒数，默认 60s
-	DynoBin     string        // 内嵌二进制解包后的 dyno 路径
-	DynologBin  string        // 内嵌二进制解包后的 dynolog 路径
+	DynoBin     string        // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
+	DynologBin  string        // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
 	HistorySize int           // 环形历史容量，默认 50
 	Degradation float64       // 阈值参数透传（1+degradation / 1+degradation*5）
 	DebugOutput bool          // --debug-output：结果含所有正常卡的诊断分
