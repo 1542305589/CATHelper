@@ -360,7 +360,7 @@ go run . --daemon \
     [--history=50]                  # 历史保留周期数，默认 50
 ```
 
-`--daemon` 进入常驻模式：解包内嵌二进制并拉起 dynolog、启动 HTTP 服务，随后立即执行**首个周期**（不等待第一个 tick），再按 interval 循环。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
+`--daemon` 进入常驻模式：解包内嵌二进制并拉起 dynolog、启动 HTTP 服务，随后等待一个 interval 再开始周期循环（首个周期不在启动时立即执行）。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
 
 ### 采集链路（dynolog / dyno）
 
@@ -426,7 +426,7 @@ dyno / dynolog 二进制**不进版本库**（仓库 `3rdparty/bin/` 下当前�
   ```
 
 **运行期**：daemon 启动时解包到 `os.MkdirTemp` 目录（`0o755`）：
-- spawn dynolog（`--enable-ipc-monitor --certs-dir NO_CERTS`）作为子进程并持有；启动失败（端口/IPC 已被占用）-> 记日志复用现有实例，首个周期即验证连通
+- spawn dynolog（`--enable-ipc-monitor --certs-dir NO_CERTS`）作为子进程并持有；启动失败（端口/IPC 已被占用）-> 记日志复用现有实例，dyno 经 IPC 复用其连通
 - dyno 每周期经 `exec.Command` 调用
 - 优雅退出：终止自己拉起的 dynolog，清理临时目录
 
@@ -625,7 +625,7 @@ daemon/
 | dyno 触发失败（命令执行错误/超时） | 记 error，本周期失败，daemon 存活 |
 | dyno commandStatus=ineffective（无 vllm 进程接入） | 记 error（processesMatched 为空），本周期失败，daemon 存活 |
 | python analyse 转换失败 | 记 error，本周期失败，daemon 存活（下周期重新触发） |
-| dynolog 已被占用（端口/IPC 冲突） | 复用现有实例不重启，首个周期即验证连通 |
+| dynolog 已被占用（端口/IPC 冲突） | 复用现有实例不重启，dyno 经 IPC 复用其连通 |
 | 新 .db 单文件解析失败 | 沿用 StartProcess 语义：日志 + 继续其余文件；全部失败 -> 周期失败 |
 | 检测阶段失败（拓扑/step data 为空等） | 周期失败，daemon 存活（对比一次性模式的 os.Exit） |
 | 周期超时 | 无强制超时（周期长度 = 解析+检测自然时长）；下个 tick 被 single-flight 跳过 |
