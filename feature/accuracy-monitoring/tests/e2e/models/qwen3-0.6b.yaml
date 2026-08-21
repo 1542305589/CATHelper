@@ -1,0 +1,9 @@
+model_name: Qwen3-0.6B
+model_path: /home/gyl/models/Qwen3-0.6B
+served_name: Qwen3-0.6B
+tensor_parallel_size: 1
+dtype: float16
+max_model_len: 8192
+gpu_memory_utilization: 0.85
+quantization: null
+startup_timeout_sec: 600

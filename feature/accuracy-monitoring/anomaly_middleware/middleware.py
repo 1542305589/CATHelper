@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import random
-import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List, Optional, Set, Tuple
+
+import numpy as np
 
 from .env import PluginConfig, resolve_config_path
 from .detector_runner import DetectorRunner, schedule_detection
@@ -129,7 +131,7 @@ class ResponseInterceptor:
         self._sse: Optional[SSEStreamProcessor] = None
         self._finished = False
         self._detection_scheduled = False
-        self._detection_results: List[Tuple[List, List]] = []
+        self._detection_results: List[Tuple[np.ndarray, np.ndarray]] = []
 
     async def __call__(self, message: dict) -> None:
         t = message.get("type")
@@ -212,12 +214,17 @@ class ResponseInterceptor:
             self._detection_results = extract_chat_response(
                 data, self._ctx.top_logprobs
             )
-            strip_chat_response(data, self._ctx.orig, self._resolver)
+            strip_chat_response(
+                data, self._ctx.orig, self._resolver,
+            )
         else:
             self._detection_results = extract_completions_response(
                 data, self._ctx.top_logprobs
             )
-            strip_completions_response(data, self._ctx.orig, self._resolver)
+            strip_completions_response(
+                data, self._ctx.orig, self._resolver,
+                recompute_text_offset=True,
+            )
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     async def _send_start(self, final: bytes) -> None:
@@ -247,17 +254,17 @@ class ResponseInterceptor:
             return
         self._detection_scheduled = True
         try:
-            topk, tokens = self._get_detection_inputs()
+            logprobs_list, token_ids_list = self._get_detection_inputs()
         except Exception as exc:
             logger.error("获取检测数据失败: %s", exc)
             return
-        if not tokens or not any(tokens):
+        if not token_ids_list or not any(len(tid) > 0 for tid in token_ids_list):
             return  # 空响应不检测
         try:
             schedule_detection(
                 self._runner,
-                topk,
-                tokens,
+                logprobs_list,
+                token_ids_list,
                 request_id=self._ctx.request_id,
                 model=self._ctx.model,
                 metrics=self._metrics,
@@ -269,12 +276,12 @@ class ResponseInterceptor:
 
     def _get_detection_inputs(
         self,
-    ) -> Tuple[List[List[dict]], List[List[int]]]:
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         if self._is_streaming:
             return self._sse.get_detection_data()
-        topk_all = [r[0] for r in self._detection_results]
-        tokens_all = [r[1] for r in self._detection_results]
-        return topk_all, tokens_all
+        logprobs_all = [r[0] for r in self._detection_results]
+        token_ids_all = [r[1] for r in self._detection_results]
+        return logprobs_all, token_ids_all
 
 
 # --------------------------------------------------------------------------- #
@@ -283,105 +290,53 @@ class ResponseInterceptor:
 class AnomalyMiddleware:
     def __init__(self, app: Callable) -> None:
         self.app = app
-        try:
-            self.config = PluginConfig.from_env()
-        except Exception as exc:
-            logger.error("配置无效, 降级透传: %s", exc)
-            self.config = PluginConfig(enabled=False)
+        # ① PluginConfig.from_env() — fail-fast on invalid
+        self.config = PluginConfig.from_env()
         self.metrics = Metrics()
-        self._runner: Optional[DetectorRunner] = None
-        self._runner_lock = threading.Lock()
-        self._runner_inited = False
         self._pending_tasks: Set = set()
         self._resolver = None
-        self._resolver_inited = False
-        self._resolver_lock = threading.Lock()
-        # 运行时 token2category 映射（预热/慢路径生成）
         self._tk2cat = None
         self._vocab_size: Optional[int] = None
-        self._preheat_thread = None
-        if self.config.enabled:
-            self._start_preheat()
+        self._runner: Optional[DetectorRunner] = None
 
-    def _start_preheat(self) -> None:
-        """后台 daemon 线程预热 tokenizer + tk2cat 映射（spec §4.5）。
+        if not self.config.enabled:
+            # ② enabled=False → skip all checks, pure passthrough
+            return
 
-        复用 token_resolver._from_pretrained（已补 trust_remote_code，可 monkeypatch）。
-        模型路径来源优先级：
-          1. VLLM_ANOMALY_TOKENIZER_MODEL（显式 env）；
-          2. --tokenizer 从 sys.argv 解析（vLLM 实际使用的 tokenizer 路径）；
-          3. --model 位置参数从 sys.argv 解析（模型路径，无 --tokenizer 时 tokenizer 在此）；
-          4. /v1/models root 轮询（argv 解析失败时的 HTTP 兜底）；
-          5. 均失败 → 记录 ERROR，提示用户设置 VLLM_ANOMALY_TOKENIZER_MODEL。
-        tokenizer 加载成功即设 resolver（strip 路径可用）；tk2cat 生成失败不影响 resolver。
-        """
-        import threading
+        # ③ resolve_config_path() — fail-fast on missing
+        cfg_path = resolve_config_path()
 
-        def _preheat() -> None:
-            try:
-                from .token_resolver import (
-                    _from_pretrained,
-                    parse_vllm_argv,
-                    poll_model_root,
-                    TokenTextResolver,
-                )
-                from .token_categorizer import generate_tk2cat
+        # ④ 加载 tokenizer — fail-fast on failure
+        from .token_resolver import acquire_tokenizer_sync, TokenTextResolver
+        tok = acquire_tokenizer_sync(explicit=self.config.tokenizer_model)
+        self._resolver = TokenTextResolver(tok)
+        logger.info("tokenizer 已加载")
 
-                path = self.config.tokenizer_model
-                source = "VLLM_ANOMALY_TOKENIZER_MODEL"
+        # ⑤ 生成 tk2cat — soft degrade
+        try:
+            from .token_categorizer import generate_tk2cat
+            self._tk2cat, self._vocab_size = generate_tk2cat(tok)
+            logger.info(
+                "tk2cat 已加载 (vocab_size=%d)",
+                self._vocab_size,
+            )
+        except Exception as exc:
+            logger.warning(
+                "tk2cat 生成失败, 检测降级为无词表: %s", exc
+            )
 
-                # 2-3. argv: --tokenizer → --model
-                info = None
-                if not path:
-                    info = parse_vllm_argv()
-                    if info is not None:
-                        if info.tokenizer:
-                            path = info.tokenizer
-                            source = "--tokenizer(argv)"
-                        elif info.model:
-                            path = info.model
-                            source = "serve <model>(argv)"
+        # ⑥ eager 构造 ILLDetector — fail-fast on failure
+        from .detector import ILLDetector
+        ILLDetector(cfg_path)
 
-                # 4. HTTP root 兜底
-                if not path and info is not None:
-                    root = poll_model_root(
-                        (info.host, info.port), timeout=60.0
-                    )
-                    if root:
-                        path = root
-                        source = "/v1/models root"
-
-                # 5. 均失败 → 明确报错
-                if not path:
-                    logger.error(
-                        "预热失败: 无法自动发现 tokenizer 路径，中间件将降级为无词表检测模式，检测算法能力会降级!"
-                        "请显式设置环境变量 VLLM_ANOMALY_TOKENIZER_MODEL 为 "
-                        "`vllm serve <model>` 的实际值"
-                        "（或 `--tokenizer` 的值，如使用独立 tokenizer）。"
-                    )
-                    return
-
-                tok = _from_pretrained(path, local_files_only=True)
-                self._resolver = TokenTextResolver(tok)
-                self._resolver_inited = True
-                logger.info("预热: tokenizer 已加载 (%s, 来源=%s)", path, source)
-                try:
-                    self._tk2cat, self._vocab_size = generate_tk2cat(tok)
-                    logger.info(
-                        "预热完成: tk2cat 已加载 (vocab_size=%d)",
-                        self._vocab_size,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "预热: tk2cat 生成失败, 检测将降级为无词表: %s", exc
-                    )
-            except Exception as exc:
-                logger.warning("预热失败, 将在首请求时重试: %s", exc)
-
-        self._preheat_thread = threading.Thread(
-            target=_preheat, daemon=True, name="anomaly-preheat"
+        # ⑦ 构造 DetectorRunner（含 ProcessPoolExecutor）
+        self._runner = DetectorRunner(
+            cfg_path,
+            max_workers=self.config.detector_workers,
+            topk_n=self.config.top_logprobs,
+            tk2cat=self._tk2cat,
+            vocab_size=self._vocab_size,
         )
-        self._preheat_thread.start()
 
     async def __call__(self, scope: dict, receive, send) -> None:
         if scope.get("type") != "http":
@@ -410,22 +365,19 @@ class AnomalyMiddleware:
             body = json.loads(raw)
         except Exception:
             body = None
-        if not isinstance(body, dict):
-            # 非 dict/非 JSON → 原样重放透传
+        if body is None:
+            # 非 JSON → 原样重放透传（vLLM 返回 400）
             replay = _make_replay_receive(receive, raw)
             await self.app(scope, replay, send)
             return
-        # _ensure_runner（双检锁，廉价）；失败 → 本请求重放透传
-        if not self._ensure_runner():
-            replay = _make_replay_receive(receive, raw)
-            await self.app(scope, replay, send)
-            return
+        # JSON 解析成功但非 dict（list/str/num）→ 不拦截，正常注入后透传，
+        # 由 vLLM 原生处理（Bug #3 原则：中间件不做额外判断）。
         is_chat = _is_chat_path(path)
         orig = save_original_params(body, is_chat)
         new_body = inject_params(body, is_chat, self.config.top_logprobs)
         new_scope = _patch_scope_content_length(scope, len(new_body))
         request_id = uuid.uuid4().hex
-        model = body.get("model") or "unknown"
+        model = body.get("model") if isinstance(body, dict) else "unknown"
         ctx = RequestContext(
             orig=orig,
             is_chat=is_chat,
@@ -434,7 +386,6 @@ class AnomalyMiddleware:
             will_detect=True,
             top_logprobs=self.config.top_logprobs,
         )
-        resolver = await self._ensure_resolver(model, scope.get("server"))
         replay = _make_replay_receive(receive, new_body)
         interceptor = ResponseInterceptor(
             send,
@@ -442,81 +393,9 @@ class AnomalyMiddleware:
             runner=self._runner,
             metrics=self.metrics,
             pending_tasks=self._pending_tasks,
-            resolver=resolver,
+            resolver=self._resolver,
         )
         await self.app(new_scope, replay, interceptor)
-
-    def _ensure_runner(self) -> bool:
-        """双检锁构造 DetectorRunner（廉价：线程池+锁+路径）。失败 → 永久降级。"""
-        if self._runner_inited:
-            return self._runner is not None
-        with self._runner_lock:
-            if self._runner_inited:
-                return self._runner is not None
-            try:
-                cfg = resolve_config_path()
-                if cfg is None:
-                    logger.error("检测器路径解析失败, 永久降级透传")
-                    self.config.enabled = False
-                    self._runner_inited = True
-                    return False
-                self._runner = DetectorRunner(
-                    cfg,
-                    self.config.detector_workers,
-                    topk_n=self.config.top_logprobs,
-                )
-                if self._tk2cat is not None:
-                    self._runner.set_vocabulary(self._tk2cat, self._vocab_size)
-                self._runner_inited = True
-                return True
-            except Exception as exc:
-                logger.error("runner 构造失败, 永久降级透传: %s", exc)
-                self.config.enabled = False
-                self._runner_inited = True
-                return False
-
-    async def _ensure_resolver(self, model_hint: str, server: Any) -> Any:
-        """双检锁惰性构造 TokenTextResolver；软降级（失败返回 None，不抛）。
-
-        快路径（resolver 已就绪，可能由预热线程设置）：补调 runner.set_vocabulary
-        覆盖竞态窗口（预热在 _ensure_runner 之后完成）。
-        慢路径：加载 tokenizer + generate_tk2cat 生成映射 + 注入 runner。
-        失败为软降级：仍注入、仍 strip，只是 token 文本回退 null/bytes；不影响客户端、不影响检测。
-        """
-        if self._resolver_inited:
-            # 快路径：补调 set_vocabulary 以覆盖竞态窗口
-            if self._tk2cat is not None and self._runner is not None:
-                self._runner.set_vocabulary(self._tk2cat, self._vocab_size)
-            return self._resolver
-        with self._resolver_lock:
-            if self._resolver_inited:
-                return self._resolver
-            from .token_resolver import acquire_tokenizer, TokenTextResolver
-            from .token_categorizer import generate_tk2cat
-
-            tok = None
-            try:
-                tok = await acquire_tokenizer(
-                    model_hint, server, explicit=self.config.tokenizer_model
-                )
-            except Exception as exc:
-                logger.error("resolver 构造失败, 软降级(null): %s", exc)
-                tok = None
-            if tok is not None:
-                self._resolver = TokenTextResolver(tok)
-                try:
-                    self._tk2cat, self._vocab_size = generate_tk2cat(tok)
-                except Exception as exc:
-                    logger.warning("tk2cat 生成失败, 检测降级为无词表: %s", exc)
-            self._resolver_inited = True
-            if self._resolver is None:
-                logger.warning(
-                    "token 文本 resolver 获取失败(model_hint=%r), token 文本回退 null/bytes",
-                    model_hint,
-                )
-            elif self._tk2cat is not None and self._runner is not None:
-                self._runner.set_vocabulary(self._tk2cat, self._vocab_size)
-            return self._resolver
 
     async def _serve_metrics(self, send: Callable[[dict], Awaitable[None]]) -> None:
         body = self.metrics.render_metrics()
