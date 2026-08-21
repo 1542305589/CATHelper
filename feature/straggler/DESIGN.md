@@ -395,10 +395,12 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
 
 4. 固定等待 --collect-wait（默认 60s），让 --iterations 个迭代完成落盘
 
-5. 定位本次产物：内容驱动——递归扫 --profiler-dir，找「触发时间戳之后有文件
-   被修改」的顶层子目录（取含最新文件者）作为 profiler_path；不用目录自身 mtime
-   （新数据落入既有深层子目录时顶层 mtime 不更新）。找不到时错误信息列出顶层
-   各条目的 mtime + 名字便于核对实际落盘结构
+5. 定位本次产物：取 --profiler-dir 下 **mtime 最新的顶层子目录**作为 profiler_path。
+   刻意**不**用「触发时间戳」做下界过滤——dump 目录由 profiler 在采集发起时创建，
+   可能比 dyno 客户端返回还早几秒（联调实测：目录 mtime 常比触发时刻早约 3~4s），
+   任何以触发时刻为边界的过滤都不可靠。周期一个 interval 才跑一次且无其他写入，
+   最新目录即本轮产物；仅当最新目录比整个 interval 还旧（本轮什么都没产出）时报错，
+   并列出顶层各条目 mtime + 名字便于核对
    （dyno 响应不含落盘路径；首次联调时实测确认落盘目录结构）
 
 6. 转换为 .db（依赖 PATH 上的 python 已安装 torch_npu）：
@@ -447,7 +449,10 @@ dyno / dynolog 二进制**不进版本库**，也不随 Go 二进制 embed——
 4. KPI 检测：读 --kpi-dir 最新数据（resource.RunDetectionFromData，
    与一次性模式 --kpi-jsonl-dir 同源）；目录为空 -> 该维度本轮跳过
 5. detectFromParsedData(dumpDir, ...)（与一次性模式共用，见下节）
-6. 合并结果 JSON（{"kpi": ..., "profiler": ...}）落盘到该 dump 目录
+6. 合并结果 JSON（{"kpi": ..., "profiler": ...}）与 daemon_meta.json 直接落盘到
+   ./daemon_results/<start>/（dump 目录之外；文本报告拷入其 analysis_result/）
+7. 周期结束时删除整个 dump 目录——profiler 数据每周期清理不堆积；
+   存结果与删数据是两步独立的事，删除不依赖结果写入是否成功
 ```
 
 `config.FilePath` / `CalThreshold` / `CommThreshold` 全局量按周期设置（FilePath 每周期 = 当次 dump 目录）。
@@ -502,7 +507,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 | POST | `/daemon/interval` | 修改循环周期 |
 | POST | `/daemon/trigger` | 立即触发一个周期 |
 
-查询接口以**落盘 JSON 为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 直接返回对应周期 dump 目录中落盘的结果 JSON（与一次性模式输出同构，含 `kpi` 与 `profiler` 两段）；`/straggler/results/history` 扫描各周期 dump 目录的 `daemon_meta.json` 元数据（daemon 重启不丢历史）。
+查询接口以**落盘 JSON 为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 直接返回对应周期归档 `daemon_results/<start>/` 中的结果 JSON（与一次性模式输出同构，含 `kpi` 与 `profiler` 两段）；`/straggler/results/history` 扫描各周期归档目录的 `daemon_meta.json` 元数据（daemon 重启不丢历史）。
 
 **GET /status 响应**：
 ```json
@@ -610,12 +615,12 @@ daemon/
 运行期产物：
 ├── <kpi-dir>/                # KPI 数据目录（外部 CATMonitor 写入，daemon 只读）
 ├── <profiler-dir>/           # profiler 采集落盘根目录（--profiler-dir=）
-│   └── <按触发时间戳定位的 dump 目录>/   # 每周期全新，周期之间互不共享
-│       ├── ascend_pytorch_profiler_*.db  # python analyse 转换后，每 rank 一个
-│       ├── op_metric/                    # StartProcess 中间产物（CSV/JSON）
-│       ├── daemon_meta.json              # 周期元数据（/straggler/results/history 数据源）
-│       └── straggler_output.json         # 本周期结果 JSON（含 kpi + profiler；latest/{id} 数据源）
-└── straggler_output.json                 # 运行目录副本 = 最近周期结果（与一次性模式输出同构）
+│                             # 本轮 dump 目录在周期结束后被删除，防数据堆积
+├── daemon_results/<start>/   # 每周期结果直接落盘于此（查询 API 的持久数据源）
+│   ├── straggler_output.json # 本周期结果 JSON（含 kpi + profiler；latest/{id} 数据源）
+│   ├── daemon_meta.json      # 周期元数据（/straggler/results/history 数据源）
+│   └── analysis_result/detection_report.log  # 文本报告（report/latest 重启后兜底）
+└── straggler_output.json     # 运行目录副本 = 最近周期结果（与一次性模式输出同构）
 ```
 
 ### 错误处理
@@ -635,7 +640,8 @@ daemon/
 ### 设计取舍
 
 - **不引 Web 框架**：接口少且无中间件需求，`net/http` 标准库足够，与项目零额外依赖的风格一致
-- **结果以落盘 JSON 为数据源而非内存**：每周期结果 JSON 与 `daemon_meta.json` 落在该周期 dump 目录，`/straggler/results/*` 直接读文件——daemon 重启不丢历史；进程内 50 周期环形历史仅作摘要缓存
+- **结果以落盘 JSON 为数据源而非内存**：每周期结果 JSON 与 `daemon_meta.json` 直接落盘到运行目录 `daemon_results/<start>/`（dump 目录之外），`/straggler/results/*` 直接读文件——daemon 重启不丢历史；进程内 50 周期环形历史仅作摘要缓存
+- **每周期清理 profiler 数据**：周期结束时删除本轮 dump 目录（重量的原始 profiler / .db / 中间产物），成功与失败都删（防半截数据干扰后续周期定位）——只留 dump 之外的小结果文件；存结果与删数据相互独立
 - **采集走 dynolog/dyno 而非 watch/exec 插件**：vllm 经 dynolog IPC 接入（`MSMONITOR_USE_DAEMON=1` 由服务侧设置，守护进程不管）；工具侧统一以 `dyno nputrace` 触发，不绑定部署侧脚本
 - **dyno/dynolog 用系统包管理器安装而非 embed/仓库分发**：仓库不携带第三方制品；build.sh 从 msmonitor 包取 `dynolog_*.deb` 用系统包管理器安装（dpkg 原生 / rpm 系 alien 转换），二者走 PATH 调用。代价是 daemon 运行机器必须先装好（否则启动即报错），换来编译与交付简单：Go 产物与采集工具解耦，任何平台都能出包
 - **固定等待而非轮询就绪**：dyno 响应不含落盘路径，采集完成时间无法获知；按联调实测默认等待 60s（`--collect-wait` 可调）

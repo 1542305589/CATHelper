@@ -252,11 +252,11 @@ Profiler 模式:
 
 ```
 dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm 进程) → 等待 collect-wait →
-定位新 dump 目录 → python analyse 转 .db → dataparse 解析 →
-KPI 检测(读 --kpi-dir) + Profiler 检测(本次 dump) → 合并 JSON 落盘 + daemon_meta.json 落盘
+定位最新 dump 目录 → python analyse 转 .db → dataparse 解析 →
+KPI 检测(读 --kpi-dir) + Profiler 检测(本次 dump) → 合并 JSON + daemon_meta.json 直接落盘 daemon_results/<start>/ → 周期结束删除 dump 目录
 ```
 
-同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后等待一个周期（`--interval`）再开始循环；`POST /daemon/trigger` 可随时手动补跑一轮。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
+同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后等待一个周期（`--interval`）再开始循环；`POST /daemon/trigger` 可随时手动补跑一轮。每轮周期把结果（合并 JSON、检测报告）直接落盘到 dump 目录之外的 `daemon_results/<start>/`，周期结束时删除采集 dump 目录——存结果与删数据互不影响，防止 profiler 数据堆积影响后续检测。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
 
 ### 5.2 前置条件与启动
 
@@ -291,7 +291,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 |-------------|------|--------|
 | `GET /healthz` | 存活探针 | — |
 | `GET /status` | 状态总览：state / interval_sec / 两个数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at | — |
-| `GET /straggler/results/latest` | 最近一轮合并结果 JSON（数据源 = dump 目录落盘文件） | — |
+| `GET /straggler/results/latest` | 最近一轮合并结果 JSON（数据源 = `daemon_results` 归档文件） | — |
 | `GET /straggler/results/history?limit=10` | 历史周期摘要（含失败的 error），按时间倒序 | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
 | `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告（text/plain） | — |
@@ -343,20 +343,25 @@ curl -s -X POST localhost:8080/daemon/start
 
 ### 5.4 数据落盘与重启
 
-每轮周期的产物落在 `--profiler-dir` 下的一个独立 dump 目录：
+每轮周期的采集产物落在 `--profiler-dir` 下的一个独立 dump 目录；结果 JSON 与 meta 直接落盘到运行目录下的 `daemon_results/<start>/`（dump 目录之外），dump 目录在周期结束时删除（防堆积）：
 
 ```
-<profiler-dir>/<dump>/            # 每轮采集/检测一个目录
+<profiler-dir>/<dump>/            # 每轮采集/检测一个目录（检测后删除）
 ├── ascend_pytorch_profiler_*.db    # python analyse 转出的 SQLite
 ├── op_metric/                      # dataparse 中间产物
-├── straggler_output.json          # 本轮合并结果（查询接口的数据源）
+├── straggler_output.json          # 本轮合并结果
 ├── daemon_meta.json               # 周期元数据（id/时间/时长/dbs/summary/error）
 └── analysis_result/detection_report.log
+
+daemon_results/<start>/           # 每轮结果直接落盘于此（查询接口的数据源，重启不丢）
+├── straggler_output.json          # 本轮合并结果（latest/{id} 数据源）
+├── daemon_meta.json               # 周期元数据（history 数据源）
+└── analysis_result/detection_report.log   # report/latest 重启后兜底
 ```
 
 运行目录另有一份最新的 `straggler_output.json`（与一次性模式同形状，覆盖写）。
 
-**重启不丢历史**：`/status` 的 `cycles_total`/`cycles_failed` 是进程内累计（重启归零），但 `/straggler/results/history` 与 `/straggler/results/{id}` 直接扫描各 dump 目录的 `daemon_meta.json`——daemon 重启后依然可查所有历史周期。
+**重启不丢历史**：`/status` 的 `cycles_total`/`cycles_failed` 是进程内累计（重启归零），但 `/straggler/results/history` 与 `/straggler/results/{id}` 直接扫描各归档 `daemon_results/<start>/daemon_meta.json`——daemon 重启后依然可查所有历史周期。
 
 ### 5.5 常见问题
 
