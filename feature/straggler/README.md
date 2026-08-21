@@ -212,7 +212,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 |------|------|------|------|------|
 | `--daemon` | bool | 否 | 假 | 进入常驻守护进程模式（周期自动采集+检测，HTTP 查询/控制） |
 | `--profiler-dir` | string | 是* | — | 采集落盘根目录（传给 dyno 的 `--log-file`）；每轮 dump 目录建在其下（*`--daemon` 时必填） |
-| `--kpi-dir` | string | 是* | — | KPI 数据目录（CATMonitor JSONL；*`--daemon` 时必填） |
+| `--kpi-dir` | string | 否 | — | KPI 数据目录（CATMonitor JSONL；可选，缺省则每轮只跑 Profiler 检测） |
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 检测周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
@@ -256,7 +256,7 @@ dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm 进程)
 KPI 检测(读 --kpi-dir) + Profiler 检测(本次 dump) → 合并 JSON 落盘 + daemon_meta.json 落盘
 ```
 
-同时检测 **KPI 资源**与 **Profiler 深查**，两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后立即执行**首个周期**（不等第一个 tick），之后按 `--interval` 周期循环；`--daemon/trigger` 可随时手动补跑。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
+同时检测 **KPI 资源**与 **Profiler 深查**（未提供 `--kpi-dir` 时 KPI 段跳过，仅跑 Profiler），两者合并为一份 `straggler_output.json`（只跑到的维度才有对应键，与一次性模式同形状）。启动后立即执行**首个周期**（不等第一个 tick），之后按 `--interval` 周期循环；`--daemon/trigger` 可随时手动补跑。`Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog、清理临时目录。
 
 ### 5.2 前置条件与启动
 
@@ -273,7 +273,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 
 ./slowNodeDetection --daemon \
     --profiler-dir=/data/profiler \   # 必填：采集落盘根目录（传给 dyno 的 --log-file）
-    --kpi-dir=/data/kpi \             # 必填：KPI 数据目录（CATMonitor JSONL）
+    --kpi-dir=/data/kpi \             # 可选：KPI 数据目录（CATMonitor JSONL；缺省则只跑 Profiler）
     --interval=600 \                  # 可选：检测周期（秒，≥60）
     --collect-wait=60 \               # 可选：触发成功后等待采集完成的秒数
     --daemon-port=8080 \              # 可选：HTTP 端口
@@ -281,7 +281,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
     --degradation=0.3                 # 可选：灵敏度（与一次性模式同义）
 ```
 
-`--profiler-dir` / `--kpi-dir` 缺一即报错退出。日志打到 stderr。
+`--profiler-dir` 必填；`--kpi-dir` 可选（缺省时每轮只跑 Profiler 检测，合并 JSON 不含 `kpi` 键）。日志打到 stderr。
 
 ### 5.3 HTTP 接口
 

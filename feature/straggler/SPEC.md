@@ -57,7 +57,7 @@ slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs 
 ### 守护进程模式（`--daemon`）
 
 ```
-slowNodeDetection --daemon --profiler-dir=/dir --kpi-dir=/dir \
+slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] \
     [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--history=50] \
     [degradation=0.3] [--debug-output]
 ```
@@ -66,13 +66,13 @@ slowNodeDetection --daemon --profiler-dir=/dir --kpi-dir=/dir \
 |------|------|------|------|------|
 | `--daemon` | bool | 是（本模式） | — | 进入守护进程模式 |
 | `--profiler-dir` | string | 是 | — | 采集落盘根目录（传给 dyno 的 `--log-file`） |
-| `--kpi-dir` | string | 是 | — | KPI 数据目录（CATMonitor JSONL） |
+| `--kpi-dir` | string | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler 检测 |
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | int | 否 | 60 | 触发后等待采集完成的秒数 |
 | `--history` | int | 否 | 50 | 环形历史容量 |
 
-`--daemon` 未提供 `--profiler-dir` / `--kpi-dir` → 打印用法并退出（见[第三章](#三守护进程模式daemon)）。
+`--daemon` 未提供 `--profiler-dir` → 打印用法并退出（`--kpi-dir` 可选，缺省只跑 Profiler；见[第三章](#三守护进程模式daemon)）。
 
 ### 阈值计算
 
@@ -512,6 +512,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 - 启动即执行**首个周期**（不等第一个 tick）；`POST /daemon/trigger` 手动补跑；已有周期在跑时 tick 跳过（single-flight）。
 - `config.FilePath` 每周期设为当次 dump 目录；KPI 每周期重读 `--kpi-dir` 取最新数据，无跨周期状态。
+- 未提供 `--kpi-dir`：步骤 6 跳过，合并 JSON 不含 `kpi` 键，周期仍成功（仅 Profiler）。
 - 退出：SIGINT/SIGTERM → 停 HTTP → 等 in-flight 周期（≤10min）→ 杀掉自己拉起的 dynolog → 清理解包临时目录。
 
 ### 3.2 HTTP 接口契约
