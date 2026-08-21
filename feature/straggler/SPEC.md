@@ -58,7 +58,7 @@ slowNodeDetection path=/data/dir [degradation=0.3] [--kpi-path=/dir/of/kpi_csvs 
 
 ```
 slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] \
-    [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--history=50] \
+    [--daemon-port=8080] [--interval=600] [--collect-wait=60] \
     [degradation=0.3] [--debug-output]
 ```
 
@@ -70,7 +70,6 @@ slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] \
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | int | 否 | 60 | 触发后等待采集完成的秒数 |
-| `--history` | int | 否 | 50 | 环形历史容量 |
 
 `--daemon` 未提供 `--profiler-dir` → 打印用法并退出（`--kpi-dir` 可选，缺省只跑 Profiler；见[第三章](#三守护进程模式daemon)）。
 
@@ -525,7 +524,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | `GET /healthz` | 存活探针 | 200 `ok` | — |
 | `GET /status` | 状态总览 | 200 `statusResponse` | — |
 | `GET /straggler/results/latest` | 最近一轮合并 JSON | 200 文件 | 404 无结果 |
-| `GET /straggler/results/history?limit=N` | 历史周期摘要（倒序，默认 10） | 200 `{cycles: []}` | — |
+| `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（倒序；`?limit=N` 可选，限制条数） | 200 `{cycles: []}` | — |
 | `GET /straggler/results/{id}` | 指定周期合并 JSON | 200 文件 | 400 id 非法 / 404 无该周期 |
 | `GET /straggler/report/latest` | 最近一轮文本报告 | 200 text/plain | 404 无报告 |
 | `POST /daemon/start` | 恢复运行 | 200 `{"state":"running"}` | — |
@@ -545,7 +544,6 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
   "kpi_dir": "/data/kpi",
   "cycles_total": 3,
   "cycles_failed": 0,
-  "history_size": 50,
   "last_cycle": {
     "id": 3,
     "started_at": "2026-08-20T10:00:00+08:00",
@@ -592,7 +590,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 | dynolog 已占用 | 复用现有实例（不视为失败），首个周期验证连通 |
 | KPI 目录为空 / 检测失败 | 该维度本轮跳过（profiler 照常，不阻断周期） |
 
-失败的周期照常记录到内存 store（error 非空），history 可查。
+失败的周期照常记录到内存 store（error 非空），history 可查。本次会话历史无条数上限，`/straggler/results/history` 默认返回全部周期。
 
 ### 3.5 dyno/dynolog 安装与构建
 

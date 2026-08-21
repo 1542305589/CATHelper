@@ -43,16 +43,13 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 	if cfg.CollectWait <= 0 {
 		cfg.CollectWait = 60 * time.Second
 	}
-	if cfg.HistorySize <= 0 {
-		cfg.HistorySize = 50
-	}
 	if cfg.Port <= 0 {
 		cfg.Port = 8080
 	}
 	return &Daemon{
 		cfg:      cfg,
 		detect:   detect,
-		st:       newStore(cfg.HistorySize),
+		st:       newStore(),
 		logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
 		state:    "running",
 		interval: cfg.Interval,

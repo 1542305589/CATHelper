@@ -45,7 +45,6 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		KpiDir:       d.cfg.KpiDir,
 		CyclesTotal:  total,
 		CyclesFailed: failed,
-		HistorySize:  d.cfg.HistorySize,
 	}
 	if c := d.st.latest(); c != nil {
 		resp.LastCycle = toCycleSummary(c)
@@ -68,16 +67,16 @@ func (d *Daemon) handleResultsLatest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleResultsHistory lists this session's cycle summaries, newest first.
-// ?limit=N caps the list.
+// The full session history is returned by default; ?limit=N caps the list.
 func (d *Daemon) handleResultsHistory(w http.ResponseWriter, r *http.Request) {
-	limit := 10
+	limit := 0 // 0 = no cap: all of this session's cycles
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
 	cycles := d.st.list()
-	if len(cycles) > limit {
+	if limit > 0 && len(cycles) > limit {
 		cycles = cycles[:limit]
 	}
 	resp := historyResponse{Cycles: make([]*cycleSummary, 0, len(cycles))}

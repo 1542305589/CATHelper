@@ -2,26 +2,23 @@ package daemon
 
 import "sync"
 
-// store is a mutex-protected ring of recent CycleResults. It is the sole data
+// store is a mutex-protected slice of recent CycleResults. It is the sole data
 // source for /status (counters + last_cycle) and /straggler/results/*: only
 // cycles from THIS daemon session are visible, so a restart starts with no
-// history.
+// history. The slice is unbounded — every finished cycle of the session is
+// kept, so history can list all of this session's collection/analysis runs.
 type store struct {
 	mu     sync.Mutex
 	cycles []*CycleResult
-	limit  int
 	total  int // cycles started this session (failed included)
 	failed int // cycles that errored this session
 }
 
-func newStore(limit int) *store {
-	if limit <= 0 {
-		limit = 50
-	}
-	return &store{limit: limit}
+func newStore() *store {
+	return &store{}
 }
 
-// add appends a finished cycle, trimming the ring to the limit.
+// add appends a finished cycle. History is unbounded: no trimming.
 func (s *store) add(c *CycleResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -30,9 +27,6 @@ func (s *store) add(c *CycleResult) {
 		s.failed++
 	}
 	s.cycles = append(s.cycles, c)
-	if len(s.cycles) > s.limit {
-		s.cycles = s.cycles[len(s.cycles)-s.limit:]
-	}
 }
 
 // latest returns the most recent finished cycle, or nil when none.
