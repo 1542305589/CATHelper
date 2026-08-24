@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 # Provision the straggler build dependencies on an aarch64 host and compile:
 #   1. check arch == aarch64 (exit otherwise)
-#   2. install dyno/dynolog system-wide: download dynolog_*.deb from the
-#      msmonitor daily bucket and install it via the host package manager, so
-#      both are directly callable from PATH
-#      (skipped when dyno/dynolog are already on PATH)
-#   3. check python version is in {3.9, 3.10, 3.11, 3.12}
-#   4. pip install the mindstudio_monitor 26.2.0 wheel (cp tag matched to python)
-#      (skipped when pip already has mindstudio_monitor 26.2.0)
+#   2. check python version is in {3.9, 3.10, 3.11, 3.12}
+#   3. install dyno/dynolog system-wide:
+#        preferred: git submodule update --init --recursive, then run
+#                   `python3 build.py -e dynolog=true` inside
+#                   3rdparty/msmonitor, then install the built package from
+#                   artifacts/ with dpkg (--force-overwrite --ignore-depends)
+#                   or rpm (--nodeps), verified via `dyno --help` and
+#                   `dynolog --help`; on any failure fall back to downloading
+#                   dynolog_*.deb from the msmonitor daily bucket
+#        (skipped when dyno/dynolog are already on PATH)
+#   4. pip install the mindstudio_monitor wheel:
+#        preferred: git submodule update --init --recursive, then run
+#                   `python3 build.py -e whl=true` inside 3rdparty/msmonitor,
+#                   then pip install the wheel from artifacts/, verified via
+#                   `import msmonitor`; on any failure fall back to downloading
+#                   the 26.2.0 wheel from OBS
+#        (skipped when pip already has mindstudio_monitor 26.2.0)
 #   5. ensure go >= go.mod requirement (download from Aliyun mirror if missing/old)
 #   6. go build
 #
@@ -58,9 +68,15 @@ echo "[build] 1/6 arch OK: aarch64"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Repository root and the msmonitor submodule location (build.sh lives in
+# feature/straggler/, the submodule lives in feature/straggler/3rdparty/).
+REPO_ROOT=$(git rev-parse --show-toplevel)
+MSMONITOR_DIR="$REPO_ROOT/feature/straggler/3rdparty/msmonitor"
+
 # install_deb <deb> — install a Debian package via the host package manager.
 # Native target is dpkg (Debian/Ubuntu); rpm-based hosts need 'alien' to
 # convert the .deb. sudo is used when the current user cannot write dpkg state.
+# Used only by the fallback path (OBS .deb download).
 install_deb() {
     local deb="$1"
     if command -v dpkg >/dev/null 2>&1; then
@@ -88,23 +104,8 @@ install_deb() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. dyno / dynolog installed system-wide from the dynolog .deb so they are
-#    directly callable from PATH (skip when both are already on PATH)
-# ---------------------------------------------------------------------------
-if command -v dyno >/dev/null 2>&1 && command -v dynolog >/dev/null 2>&1; then
-    echo "[build] 2/6 dyno/dynolog already installed on PATH, skipping"
-else
-    command -v wget >/dev/null 2>&1 || { echo "[build] ERROR: wget not found" >&2; exit 1; }
-
-    DEB_URL="https://ascend-package.obs.cn-north-4.myhuaweicloud.com/msmonitor/daily/2026040207/deb/aarch64/dynolog_0.3.2_1.aarch64.deb"
-    echo "[build] 2/6 downloading $DEB_URL"
-    wget "${WGET_ARGS[@]}" -O "$WORK/dynolog_0.3.2_1.aarch64.deb" "$DEB_URL"
-    echo "[build]     installing dynolog_0.3.2_1.aarch64.deb"
-    install_deb "$WORK/dynolog_0.3.2_1.aarch64.deb"
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Python version: must be 3.9 / 3.10 / 3.11 / 3.12
+# 2. Python version: must be 3.9 / 3.10 / 3.11 / 3.12
+#    (checked before dyno/dynolog because the submodule build uses python3)
 # ---------------------------------------------------------------------------
 PY=""
 for c in python3 python; do
@@ -125,19 +126,136 @@ case "$PYVER" in
         exit 1
         ;;
 esac
-echo "[build] 3/6 python $PYVER OK (wheel tag $CP)"
+echo "[build] 2/6 python $PYVER OK (wheel tag $CP)"
 
 # ---------------------------------------------------------------------------
-# 4. mindstudio_monitor wheel (skip when 26.2.0 already installed)
+# 3. dyno / dynolog installed system-wide so they are directly callable from
+#    PATH (skip when both are already on PATH).
+#
+#    Preferred path: refresh the msmonitor submodule, build the dynolog
+#    packages inside it (python3 build.py -e dynolog=true), install the
+#    built package from artifacts/ with the host package manager, and verify
+#    with `dyno --help` / `dynolog --help`. Runs in a subshell so a failure
+#    returns non-zero without aborting the script, letting the caller fall
+#    back to the OBS .deb download.
 # ---------------------------------------------------------------------------
+build_dynolog_from_submodule() {
+    (
+        set -euo pipefail
+        echo "[build]     git submodule update --init --recursive"
+        git -C "$REPO_ROOT" submodule update --init --recursive
+
+        if [ ! -f "$MSMONITOR_DIR/build.py" ]; then
+            echo "[build]     ERROR: $MSMONITOR_DIR/build.py not found (submodule not initialized?)" >&2
+            exit 1
+        fi
+        cd "$MSMONITOR_DIR"
+        echo "[build]     running: $PY build.py -e dynolog=true"
+        "$PY" build.py -e dynolog=true
+
+        cd artifacts
+        if command -v dpkg >/dev/null 2>&1; then
+            debs=(dynolog*.deb)
+            if [ ! -e "${debs[0]}" ]; then
+                echo "[build]     ERROR: no dynolog*.deb under $MSMONITOR_DIR/artifacts" >&2
+                exit 1
+            fi
+            echo "[build]     package manager: dpkg (installing with --force-overwrite --ignore-depends)"
+            if [ -w /var/lib/dpkg ]; then
+                dpkg -i --force-overwrite "${debs[@]}" --ignore-depends
+            elif command -v sudo >/dev/null 2>&1; then
+                sudo dpkg -i --force-overwrite "${debs[@]}" --ignore-depends
+            else
+                echo "[build]     ERROR: dpkg -i needs root and sudo is not available" >&2
+                exit 1
+            fi
+        elif command -v rpm >/dev/null 2>&1; then
+            rpms=(dynolog*.rpm)
+            if [ ! -e "${rpms[0]}" ]; then
+                echo "[build]     ERROR: no dynolog*.rpm under $MSMONITOR_DIR/artifacts" >&2
+                exit 1
+            fi
+            echo "[build]     package manager: rpm (installing with --nodeps)"
+            if command -v sudo >/dev/null 2>&1; then
+                sudo rpm -ivh "${rpms[@]}" --nodeps
+            else
+                rpm -ivh "${rpms[@]}" --nodeps
+            fi
+        else
+            echo "[build]     ERROR: neither dpkg nor rpm package manager found" >&2
+            exit 1
+        fi
+
+        echo "[build]     verifying: dyno --help / dynolog --help"
+        dyno --help >/dev/null 2>&1 || { echo "[build]     ERROR: 'dyno --help' failed after install" >&2; exit 1; }
+        dynolog --help >/dev/null 2>&1 || { echo "[build]     ERROR: 'dynolog --help' failed after install" >&2; exit 1; }
+        echo "[build]     dyno/dynolog verified OK"
+    )
+}
+
+if command -v dyno >/dev/null 2>&1 && command -v dynolog >/dev/null 2>&1; then
+    echo "[build] 3/6 dyno/dynolog already installed on PATH, skipping"
+elif build_dynolog_from_submodule; then
+    echo "[build] 3/6 dyno/dynolog built and installed from the msmonitor submodule"
+else
+    echo "[build] 3/6 msmonitor submodule build for dynolog failed — falling back to OBS .deb download"
+    command -v wget >/dev/null 2>&1 || { echo "[build] ERROR: wget not found" >&2; exit 1; }
+
+    DEB_URL="https://ascend-package.obs.cn-north-4.myhuaweicloud.com/msmonitor/daily/2026040207/deb/aarch64/dynolog_0.3.2_1.aarch64.deb"
+    echo "[build]     downloading $DEB_URL"
+    wget "${WGET_ARGS[@]}" -O "$WORK/dynolog_0.3.2_1.aarch64.deb" "$DEB_URL"
+    echo "[build]     installing dynolog_0.3.2_1.aarch64.deb"
+    install_deb "$WORK/dynolog_0.3.2_1.aarch64.deb"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. mindstudio_monitor wheel (skip when 26.2.0 already installed).
+#
+#    Preferred path: refresh the msmonitor submodule, build the wheel inside
+#    it (python3 build.py -e whl=true), pip install the wheel from
+#    artifacts/, and verify with `import msmonitor`. Runs in a subshell so a
+#    failure returns non-zero without aborting the script, letting the caller
+#    fall back to the OBS wheel download.
+# ---------------------------------------------------------------------------
+build_monitor_from_submodule() {
+    (
+        set -euo pipefail
+        echo "[build]     git submodule update --init --recursive"
+        git -C "$REPO_ROOT" submodule update --init --recursive
+
+        if [ ! -f "$MSMONITOR_DIR/build.py" ]; then
+            echo "[build]     ERROR: $MSMONITOR_DIR/build.py not found (submodule not initialized?)" >&2
+            exit 1
+        fi
+        cd "$MSMONITOR_DIR"
+        echo "[build]     running: $PY build.py -e whl=true"
+        "$PY" build.py -e whl=true
+
+        cd artifacts
+        whls=(*.whl)
+        if [ ! -e "${whls[0]}" ]; then
+            echo "[build]     ERROR: no wheel under $MSMONITOR_DIR/artifacts" >&2
+            exit 1
+        fi
+        echo "[build]     pip installing ${whls[0]}"
+        "$PY" -m pip install "${whls[0]}"
+
+        echo "[build]     verifying: import msmonitor"
+        "$PY" -c "import msmonitor; print('All is OK')"
+    )
+}
+
 INSTALLED_VER=$("$PY" -m pip show mindstudio_monitor 2>/dev/null \
     | awk -F': ' '/^Version:/{print $2}' | head -n 1 || true)
 if [ "$INSTALLED_VER" = "26.2.0" ]; then
     echo "[build] 4/6 mindstudio_monitor 26.2.0 already installed, skipping"
+elif build_monitor_from_submodule; then
+    echo "[build] 4/6 mindstudio_monitor wheel built and installed from the msmonitor submodule"
 else
+    echo "[build] 4/6 msmonitor submodule build for the wheel failed — falling back to OBS wheel download"
     command -v wget >/dev/null 2>&1 || { echo "[build] ERROR: wget not found" >&2; exit 1; }
     WHL_URL="https://mindstudio-pkg.obs.cn-north-4.myhuaweicloud.com/tag/26.2.0/B025/aarch64/mindstudio_monitor-26.2.0-${CP}-${CP}-linux_aarch64.whl"
-    echo "[build] 4/6 downloading $WHL_URL"
+    echo "[build]     downloading $WHL_URL"
     wget "${WGET_ARGS[@]}" -O "$WORK/mindstudio_monitor-26.2.0-${CP}-${CP}-linux_aarch64.whl" "$WHL_URL"
     "$PY" -m pip install "$WORK/mindstudio_monitor-26.2.0-${CP}-${CP}-linux_aarch64.whl"
 fi
