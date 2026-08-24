@@ -91,7 +91,7 @@ async def test_chat_stream_cross_chunk_reassembly(client_factory):
 
 
 async def test_chat_stream_detection_after_done(client_factory):
-    client, fake, mw = client_factory(_chat_stream_fn())
+    client, fake, mw = client_factory(_chat_stream_fn(), real_runner=True)
     await _collect_stream(
         client,
         "/v1/chat/completions",
@@ -121,7 +121,7 @@ async def test_chat_stream_detection_full_topk_not_client_m(client_factory):
     def fn(scope, body):
         e = chat_top_entry(100, NI, -0.1, n_top=20, nan_at=5)
         return ("stream", [chat_stream_chunk("glm-4-7", e, delta_text=NI), None])
-    client, fake, mw = client_factory(fn)
+    client, fake, mw = client_factory(fn, real_runner=True)
     await _collect_stream(
         client,
         "/v1/chat/completions",
@@ -149,7 +149,7 @@ async def test_completions_stream_n3_choice_index_preserved(client_factory):
             None,
         ]
         return ("stream", chunks)
-    client, fake, mw = client_factory(fn)
+    client, fake, mw = client_factory(fn, real_runner=True)
     await _collect_stream(
         client,
         "/v1/completions",

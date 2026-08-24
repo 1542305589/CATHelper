@@ -63,7 +63,7 @@ def test_multi_chunk_streaming_accumulation_and_strip():
     # 累积检测数据：2 个 token
     topk_all, tokens_all = sse.get_detection_data()
     assert len(tokens_all) == 1  # 一个 choice
-    assert tokens_all[0] == [100, 200]
+    assert tokens_all[0][:, 0].tolist() == [10000, 10000]  # top-1 候选 id
     assert len(topk_all[0]) == 2
     assert len(topk_all[0][0]) == 20  # 截断到 N=20
 
@@ -96,7 +96,7 @@ def test_streaming_detection_data_keeps_full_topk_not_client_m():
     assert len(entry["top_logprobs"]) == 2
     # 检测数据保持完整 N=20，token 保持 token_id
     topk_all, tokens_all = sse.get_detection_data()
-    assert tokens_all[0] == [100, 200]
+    assert tokens_all[0][:, 0].tolist() == [10000, 10000]  # top-1 候选 id
     assert len(topk_all[0]) == 2
     assert len(topk_all[0][0]) == 20
     assert len(topk_all[0][1]) == 20
@@ -118,10 +118,10 @@ def test_completions_streaming_n3_keeps_choice_separate():
         sse.feed(_sse_bytes(c))
     sse.feed(b"data: [DONE]\n\n")
     topk_all, tokens_all = sse.get_detection_data()
-    assert len(tokens_all) == 3
-    assert tokens_all[0] == [101, 102]
-    assert tokens_all[1] == [201, 202]
-    assert tokens_all[2] == [301, 302]
+    assert len(tokens_all) == 3  # 3 choices 独立成组
+    assert tokens_all[0][:, 0].tolist() == [10000, 10000]  # choice 0: 2 token
+    assert tokens_all[1][:, 0].tolist() == [10000, 10000]  # choice 1: 2 token
+    assert tokens_all[2][:, 0].tolist() == [10000, 10000]  # choice 2: 2 token
     assert len(topk_all[0]) == 2 and len(topk_all[1]) == 2 and len(topk_all[2]) == 2
 
 
@@ -139,10 +139,10 @@ def test_chat_streaming_n3_keeps_choice_separate():
         sse.feed(_sse_bytes(c))
     sse.feed(b"data: [DONE]\n\n")
     topk_all, tokens_all = sse.get_detection_data()
-    assert len(tokens_all) == 3
-    assert tokens_all[0] == [100, 400]
-    assert tokens_all[1] == [200]
-    assert tokens_all[2] == [300]
+    assert len(tokens_all) == 3  # 3 choices 独立成组
+    assert tokens_all[0][:, 0].tolist() == [10000, 10000]  # choice 0: 2 token (100, 400)
+    assert tokens_all[1][:, 0].tolist() == [10000]  # choice 1: 1 token (200)
+    assert tokens_all[2][:, 0].tolist() == [10000]  # choice 2: 1 token (300)
 
 
 def test_crlf_compat():
@@ -165,7 +165,7 @@ def test_completions_streaming_accumulation():
     sse.feed(_sse_bytes(c2))
     sse.feed(b"data: [DONE]\n\n")
     topk_all, tokens_all = sse.get_detection_data()
-    assert tokens_all[0] == [100, 200]
+    assert tokens_all[0][:, 0].tolist() == [10000, 10000]  # top-1 候选 id
     assert len(topk_all[0]) == 2
     assert len(topk_all[0][0]) == 20
 
@@ -183,7 +183,7 @@ def test_flush_tail_without_done():
     assert out != b""  # flush 补 \n\n
     assert out.endswith(b"\n\n")
     topk_all, tokens_all = sse.get_detection_data()
-    assert tokens_all[0] == [100]
+    assert tokens_all[0][:, 0].tolist() == [10000]  # top-1 候选 id
 
 
 def test_non_json_data_passthrough():

@@ -95,16 +95,25 @@ def test_patch_scope_headers_copied_not_shared():
 
 # --------------------------- AnomalyMiddleware 分派 --------------------------- #
 def _make_mw_with_fake(fake_app, **cfg):
-    mw = AnomalyMiddleware(fake_app)
+    # 构造期临时 enabled=False 跳过重活（tokenizer/runner/detector.yaml 硬依赖），
+    # 构造后再覆盖 config 为目标状态；_runner/_resolver/_anomaly_store 留 None，
+    # 分派/路由/错误透传/无 choices 的请求不触达检测（spec §2.13）。
+    import os
+    old = os.environ.get("VLLM_ANOMALY_ENABLED")
+    os.environ["VLLM_ANOMALY_ENABLED"] = "0"
+    try:
+        mw = AnomalyMiddleware(fake_app)
+    finally:
+        if old is None:
+            os.environ.pop("VLLM_ANOMALY_ENABLED", None)
+        else:
+            os.environ["VLLM_ANOMALY_ENABLED"] = old
     mw.config = PluginConfig(
         enabled=cfg.get("enabled", True),
         top_logprobs=cfg.get("top_logprobs", 20),
         monitor_rate=cfg.get("monitor_rate", 1.0),
     )
-    mw._runner = None
-    mw._runner_inited = False
-    mw._resolver = None
-    mw._resolver_inited = True  # 跳过 _ensure_resolver 慢路径（网络），与 client_factory 一致
+    # _runner/_resolver/_anomaly_store 已为 None（enabled=False 构造）
     return mw
 
 
@@ -274,12 +283,11 @@ async def test_error_response_non_json_raw_passthrough():
                          "vllm_anomaly_requests_total") == 0.0
 
 
-# --------------------------- 构造期配置非法 -> 降级透传（spec §2.11/§2.13） --------------------------- #
-def test_init_invalid_env_degrades_to_disabled(monkeypatch):
-    monkeypatch.setenv("VLLM_ANOMALY_TOP_LOGPROBS", "0")  # 非法 -> from_env 抛
-    mw = AnomalyMiddleware(_Recorder())
-    assert mw.config.enabled is False  # 降级为透传
-    mw.shutdown()
+# --------------------------- 构造期配置非法 -> fail-fast（spec §2.13） --------------------------- #
+def test_init_invalid_env_raises(monkeypatch):
+    monkeypatch.setenv("VLLM_ANOMALY_TOP_LOGPROBS", "0")  # 非法 -> from_env 抛 ValueError
+    with pytest.raises(ValueError):
+        AnomalyMiddleware(_Recorder())
 
 
 # --------------------------- 终端 body 幂等（spec §3.3） --------------------------- #
@@ -316,60 +324,7 @@ async def test_interceptor_ignores_repeated_terminal_body():
     assert ic._finished is True
 
 
-# --------------------------- _ensure_resolver --------------------------- #
-class _FakeTok:
-    def __init__(self, m):
-        self._m = m
-
-    def decode(self, ids, **kw):
-        return "".join(self._m.get(i, "") for i in ids)
-
-
-def _make_mw_for_resolver():
-    rec = _Recorder()
-    mw = AnomalyMiddleware(rec)
-    mw.config = PluginConfig(enabled=True, top_logprobs=20)
-    mw._runner = object()  # 跳过 runner 构造
-    mw._runner_inited = True
-    return mw
-
-
-@pytest.mark.asyncio
-async def test_ensure_resolver_uses_acquire_and_caches(monkeypatch):
-    mw = _make_mw_for_resolver()
-    import anomaly_middleware.token_resolver as tr
-
-    async def fake_acquire(hint, server, explicit=None):
-        assert hint == "m"
-        assert server == ("127.0.0.1", 8000)
-        return _FakeTok({1: "x"})
-
-    monkeypatch.setattr(tr, "acquire_tokenizer", fake_acquire)
-    r = await mw._ensure_resolver("m", ("127.0.0.1", 8000))
-    assert r is not None
-    assert r.resolve(1) == "x"
-
-    # 双检锁：第二次不重复 acquire
-    called = {"n": 0}
-
-    async def counting(hint, server, explicit=None):
-        called["n"] += 1
-        return _FakeTok({})
-
-    monkeypatch.setattr(tr, "acquire_tokenizer", counting)
-    r2 = await mw._ensure_resolver("m", ("127.0.0.1", 8000))
-    assert r2 is r  # 同一实例
-    assert called["n"] == 0
-
-
-@pytest.mark.asyncio
-async def test_ensure_resolver_failure_returns_none(monkeypatch):
-    mw = _make_mw_for_resolver()
-    import anomaly_middleware.token_resolver as tr
-
-    async def fail(hint, server):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(tr, "acquire_tokenizer", fail)
-    r = await mw._ensure_resolver("m", ("127.0.0.1", 8000))
-    assert r is None  # 失败软降级，不抛
+# --------------------------- _ensure_resolver（已移除） --------------------------- #
+# 重构后 tokenizer 在 AnomalyMiddleware.__init__ 启动期同步加载（spec §2.15），
+# 加载失败即终止启动（fail-fast，不软降级），不再有运行期 lazy _ensure_resolver。
+# 相关覆盖由 test_token_resolver.py（需 transformers）与 e2e 承担。

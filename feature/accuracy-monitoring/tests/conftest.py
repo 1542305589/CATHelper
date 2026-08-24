@@ -14,7 +14,8 @@ if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
 from anomaly_middleware import AnomalyMiddleware  # noqa: E402
-from anomaly_middleware.env import PluginConfig  # noqa: E402
+from anomaly_middleware.env import PluginConfig, resolve_config_path  # noqa: E402
+from anomaly_middleware.detector_runner import DetectorRunner  # noqa: E402
 from _helpers import FakeVLLM  # noqa: E402
 
 
@@ -35,9 +36,21 @@ async def client_factory():
         enabled: bool = True,
         workers: int = 1,
         metrics_path: str = "/anomaly/metrics",
+        real_runner: bool = False,
     ):
         fake = FakeVLLM(response_fn)
-        mw = AnomalyMiddleware(fake)
+        # 构造期临时 enabled=False 跳过重活（tokenizer/runner/detector.yaml 硬依赖），
+        # 再覆盖 config 为目标状态；_resolver/_anomaly_store 留 None，
+        # 由各 e2e 用例按需 install_fake_resolver / 注入 runner（spec §2.13）。
+        old = os.environ.get("VLLM_ANOMALY_ENABLED")
+        os.environ["VLLM_ANOMALY_ENABLED"] = "0"
+        try:
+            mw = AnomalyMiddleware(fake)
+        finally:
+            if old is None:
+                os.environ.pop("VLLM_ANOMALY_ENABLED", None)
+            else:
+                os.environ["VLLM_ANOMALY_ENABLED"] = old
         mw.config = PluginConfig(
             enabled=enabled,
             top_logprobs=top_logprobs,
@@ -45,10 +58,18 @@ async def client_factory():
             monitor_rate=monitor_rate,
             detector_workers=workers,
         )
-        mw._runner = None
-        mw._runner_inited = False
         mw._resolver = None
-        mw._resolver_inited = True  # 默认跳过 _ensure_resolver（e2e 默认 resolver 不可用）
+        mw._anomaly_store = None
+        if real_runner:
+            # 真实 DetectorRunner（vendored detector.yaml 可用）；检测在子进程跑，
+            # max_workers=1 串行，满足 e2e 检测断言（spec §2.5 §2.7）。
+            mw._runner = DetectorRunner(
+                resolve_config_path(),
+                max_workers=workers,
+                topk_n=top_logprobs,
+            )
+        else:
+            mw._runner = None
         client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         )

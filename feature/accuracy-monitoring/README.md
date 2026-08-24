@@ -68,13 +68,37 @@ curl http://localhost:8000/anomaly/metrics
 | `VLLM_ANOMALY_TOP_LOGPROBS` | `20` | 注入的 top-logprobs 数量，范围 1-20 |
 | `VLLM_ANOMALY_METRICS_PATH` | `/anomaly/metrics` | 指标端点路径 |
 | `VLLM_ANOMALY_TOKENIZER_MODEL` | None | 显式指定模型绝对路径 |
+| `VLLM_ANOMALY_SAVE_PATH` | None | 异常详细数据保存到本地，如需开启，请配置保存的路径。默认不开启 |
+
 
 ### 3.2 配置方式
+#### (1) 配置示例
 以 VLLM_ANOMALY_TOP_LOGPROBS 为例，当需要显式设置 VLLM_ANOMALY_TOP_LOGPROBS 数量时，可在拉起服务前配置全局环境变量。
 ```powershell
 export VLLM_ANOMALY_TOP_LOGPROBS=10  # 配置 VLLM_ANOMALY_TOP_LOGPROBS 为 10
 vllm serve <model> --middleware anomaly_middleware.AnomalyMiddleware
 ```
+
+#### (2) VLLM_ANOMALY_SAVE_PATH 详细介绍
+a) 当开启此功能时，请配置存储文件的绝对路径，文件存储为 pkl 格式。
+```powershell
+export VLLM_ANOMALY_SAVE_PATH=/xxx/qwen3.pkl   # 方法1，指定存储的文件
+# export VLLM_ANOMALY_SAVE_PATH=/xxx/ # 方法2，指定存储的文件夹，系统默认以模型名作为文件名
+vllm serve <model> --middleware anomaly_middleware.AnomalyMiddleware
+```
+
+b) 当开启此功能时，可将异常详细信息保存到本地，便于后续做故障复现。每条异常信息内容如下：
+| 字段 |  说明 |
+|---|---|
+| `time` | 时间戳 | 
+| `prompt` | 请求 prompt | 
+| `ill_type` | 异常类型 | 
+| `topk_logprobs` | topk logprobs |
+| `tokens_ids` | token ids | 
+| `text` | 推理输出文本 | 
+| `model_name` | 模型名称 |
+
+
 
 ## 4 检测算法阈值配置
 

@@ -10,15 +10,16 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from multiprocessing import shared_memory
-from typing import List, Optional, Set
+from typing import Any, List, Optional, Sequence, Set
 
 import numpy as np
 
 from .logging import get_logger
-from .metrics import Metrics
+from .metrics import ILL_NORMAL, Metrics
 
 logger = get_logger()
 
@@ -197,10 +198,18 @@ def schedule_detection(
     model: str,
     metrics: Metrics,
     pending_tasks: Set,
+    anomaly_store: Any = None,
+    prompt: Any = None,
+    texts: Optional[Sequence] = None,
 ) -> asyncio.Task:
-    """fire-and-forget 检测任务。异常全捕获计 error，不影响客户端。"""
+    """fire-and-forget 检测任务。异常全捕获计 error，不影响客户端。
+
+    若传入 anomaly_store，则对每个异常候选保存现场（编号 + pickle 落盘）
+    并经 metrics 暴露最新异常编号/时间戳。
+    """
 
     async def _run() -> None:
+        results = None
         with metrics.detection_duration.time():
             try:
                 results = await runner.run_async(logprobs_list, token_ids_list)
@@ -218,6 +227,34 @@ def schedule_detection(
                     request_id, model, exc,
                 )
                 metrics.record_error()
+        # 异常信息保存（不计入检测耗时；保存失败不影响客户端/检测/后续请求）
+        if results is not None and anomaly_store is not None:
+            try:
+                ts = time.time()
+                for idx, res in enumerate(results):
+                    if not res or len(res) < 2:
+                        continue
+                    is_ill = bool(res[0])
+                    ill_type = int(res[1])
+                    if not (is_ill and ill_type != ILL_NORMAL):
+                        continue  # 仅异常候选
+                    lp = logprobs_list[idx] if idx < len(logprobs_list) else None
+                    tid = token_ids_list[idx] if idx < len(token_ids_list) else None
+                    record = {
+                        "time": ts,
+                        "prompt": prompt,
+                        "ill_type": ill_type,
+                        "topk_logprobs": lp.tolist() if lp is not None else [],
+                        "tokens_ids": tid.tolist() if tid is not None else [],
+                        "text": texts[idx] if texts and idx < len(texts) else None,
+                        "model_name": model,
+                    }
+                    aid = await anomaly_store.save(record)
+                    metrics.record_anomaly(aid, ts, model)
+            except Exception as exc:
+                logger.error(
+                    "异常信息保存失败 request_id=%s: %s", request_id, exc,
+                )
 
     task = asyncio.create_task(_run())
     pending_tasks.add(task)

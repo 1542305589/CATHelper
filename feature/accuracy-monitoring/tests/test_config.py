@@ -20,7 +20,7 @@ def test_config_defaults(monkeypatch):
     assert c.top_logprobs == 20
     assert c.metrics_path == "/anomaly/metrics"
     assert c.monitor_rate == 1.0
-    assert c.detector_workers == 1
+    assert c.detector_workers == 4
 
 
 def test_config_env_override(monkeypatch):
@@ -61,10 +61,11 @@ def test_resolve_config_path_default():
     assert os.path.isfile(path) and path.endswith("detector.yaml")
 
 
-def test_resolve_config_path_missing_returns_none(monkeypatch):
+def test_resolve_config_path_missing_raises(monkeypatch):
     import anomaly_middleware.env as env_mod
     monkeypatch.setattr(env_mod.os.path, "isfile", lambda _p: False)
-    assert resolve_config_path() is None
+    with pytest.raises(FileNotFoundError):
+        resolve_config_path()
 
 
 # --------------------------- tokenizer_model --------------------------- #
@@ -81,10 +82,10 @@ def test_tokenizer_model_env(monkeypatch):
 
 
 # --------------------------- 边界/非法值回退（spec §2.11） --------------------------- #
-def test_config_workers_zero_falls_back_to_default(monkeypatch):
+def test_config_workers_zero_raises(monkeypatch):
     monkeypatch.setenv("VLLM_ANOMALY_DETECTOR_WORKERS", "0")
-    c = PluginConfig.from_env()
-    assert c.detector_workers == 1  # <1 -> 默认 1
+    with pytest.raises(ValueError):
+        PluginConfig.from_env()  # <1 -> 启动期 raise（fail-fast, spec §2.11）
 
 
 def test_config_enabled_invalid_string_defaults_true(monkeypatch):

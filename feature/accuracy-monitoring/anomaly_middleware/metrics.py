@@ -81,6 +81,19 @@ class Metrics:
             ["model"],
             registry=self.registry,
         )
+        # 异常编号 / 时间戳（与本地保存文件对应；不改动现有指标/标签）
+        self.last_anomaly_id = Gauge(
+            "vllm_anomaly_last_id",
+            "该模型最近一次检出异常的编号（与本地保存文件 key 对应）",
+            ["model"],
+            registry=self.registry,
+        )
+        self.last_anomaly_timestamp = Gauge(
+            "vllm_anomaly_last_timestamp_seconds",
+            "该模型最近一次检出异常的时间戳（Unix 秒）",
+            ["model"],
+            registry=self.registry,
+        )
         self._gauge_by_ill_type = {
             ILL_RARE: self.last_rare_character,
             ILL_GARBLED: self.last_garbled,
@@ -127,6 +140,19 @@ class Metrics:
     def record_error(self) -> None:
         try:
             self.detection_errors_total.inc()
+        except Exception:
+            pass
+
+    def record_anomaly(
+        self,
+        anomaly_id: int,
+        timestamp: float,
+        model: str,
+    ) -> None:
+        """记录最近一次异常的编号与时间戳（异常全捕获，不影响客户端）。"""
+        try:
+            self.last_anomaly_id.labels(model=model).set(int(anomaly_id))
+            self.last_anomaly_timestamp.labels(model=model).set(str(timestamp*1000).split('.')[0]) # float(timestamp)
         except Exception:
             pass
 

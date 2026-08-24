@@ -57,6 +57,23 @@ def test_update_garbled_state_threshold(det):
     assert det._update_garbled_state(False) is False
 
 
+def _arrays(rows):
+    """list[{tid: logprob}] -> (logprobs_2d, token_ids_2d)，列对齐，不足补 (-100, 0)。
+
+    检测器内部按 logprob 降序重排（stable），故列顺序无关，只需 logprobs[i,j] 对齐
+    token_ids[i,j]。各位置最高 logprob 的 tid 即 top-1（检测用的 token 序列）。
+    """
+    n = len(rows)
+    k = max((len(r) for r in rows), default=0)
+    lp = np.full((n, k), -100.0, dtype=np.float32)
+    tid = np.zeros((n, k), dtype=np.int32)
+    for i, d in enumerate(rows):
+        for j, (t, v) in enumerate(d.items()):
+            tid[i, j] = t
+            lp[i, j] = v
+    return lp, tid
+
+
 # --------------------------------------------------------------------------- #
 # ill_type=1 生僻字（带词表：category 判定）
 # --------------------------------------------------------------------------- #
@@ -70,9 +87,8 @@ def _vocab_tk2cat():
 def test_detect_rare_character_with_vocab(det):
     """explogp 总和 < 0.4 且 topk 类别数 > category_thresh(2) -> 生僻字。"""
     det.set_vocabulary(_vocab_tk2cat(), 20)
-    topk = [{3: -5.0, 4: -5.5, 5: -6.0, 6: -6.5, 7: -7.0} for _ in range(10)]
-    tokens = [3] * 10  # 短序列 < stride -> 只走生僻字路径
-    res = det.detector(topk, tokens, topk_n=5)
+    lp, tid = _arrays([{3: -5.0, 4: -5.5, 5: -6.0, 6: -6.5, 7: -7.0} for _ in range(10)])
+    res = det.detector(lp, tid, topk_n=5)
     assert res.is_ill is True
     assert res.ill_type == 1
 
@@ -80,23 +96,23 @@ def test_detect_rare_character_with_vocab(det):
 def test_detect_rare_character_with_vocab_filtered_out(det):
     """topk 类别被过滤（english_latin/whitespace/punct）-> 不计为生僻字。"""
     det.set_vocabulary({str(i): "english_latin" for i in range(2, 20)}, 20)
-    topk = [{2: -5.0, 3: -5.5, 4: -6.0, 5: -6.5, 6: -7.0} for _ in range(10)]
-    res = det.detector(topk, [2] * 10, topk_n=5)
+    lp, tid = _arrays([{2: -5.0, 3: -5.5, 4: -6.0, 5: -6.5, 6: -7.0} for _ in range(10)])
+    res = det.detector(lp, tid, topk_n=5)
     assert res.is_ill is False  # 全部 latin -> 不触发
 
 
 def test_detect_rare_character_no_vocab_uses_top1_logp(det):
     """无词表降级：top1 logp < rare_top1_logp_thresh(-6) 即生僻字。"""
-    topk = [{1: -10.0, 2: -11.0, 3: -12.0} for _ in range(10)]
-    res = det.detector(topk, [1] * 10, topk_n=3)
+    lp, tid = _arrays([{1: -10.0, 2: -11.0, 3: -12.0} for _ in range(10)])
+    res = det.detector(lp, tid, topk_n=3)
     assert res.is_ill is True
     assert res.ill_type == 1
 
 
 def test_short_normal_sequence_no_rare(det):
     """短序列 + 高概率 topk -> 正常（假阳性控制）。"""
-    topk = [{1: -0.1, 2: -0.2, 3: -0.3} for _ in range(8)]
-    res = det.detector(topk, [1, 1, 1, 1, 1, 1, 1, 1], topk_n=3)
+    lp, tid = _arrays([{1: -0.1, 2: -0.2, 3: -0.3} for _ in range(8)])
+    res = det.detector(lp, tid, topk_n=3)
     assert res.is_ill is False
     assert res.ill_type == 0
 
@@ -107,10 +123,9 @@ def test_short_normal_sequence_no_rare(det):
 def test_detect_garbled_no_vocab(det):
     """整窗 top1 logp 极低（<-5）占比 > 0.2 -> 乱码。长序列走滑窗。"""
     n = 140  # > stride=64，进入滑窗检测
-    topk = [{1000: -20.0, 1001: -21.0, 1002: -22.0, 1003: -23.0, 1004: -24.0}
-            for _ in range(n)]
-    tokens = [1000] * n
-    res = det.detector(topk, tokens, topk_n=5)
+    lp, tid = _arrays([{1000: -20.0, 1001: -21.0, 1002: -22.0, 1003: -23.0, 1004: -24.0}
+                      for _ in range(n)])
+    res = det.detector(lp, tid, topk_n=5)
     assert res.is_ill is True
     assert res.ill_type == 2
 
@@ -118,30 +133,28 @@ def test_detect_garbled_no_vocab(det):
 def test_detect_garbled_no_vocab_ratio_below_thresh(det):
     """低概率占比 <= 0.2 且 logp 未达 rare 阈值(-6) -> 乱码/生僻字均不触发。"""
     n = 100
-    # 前 15 个 logp=-5.5（-6 < -5.5 < -5），占比 0.15 <= 0.2；
-    # -5.5 > rare_top1_thresh(-6) -> 不触发生僻字；占比 <= 0.2 -> 不触发乱码
-    topk = []
+    rows = []
     for i in range(n):
         if i < 15:
-            topk.append({1: -5.5, 2: -6.0})
+            rows.append({1: -5.5, 2: -6.0})
         else:
-            topk.append({1: -0.1, 2: -0.2})
-    tokens = [1] * n
-    res = det.detector(topk, tokens, topk_n=2)
+            rows.append({1: -0.1, 2: -0.2})
+    lp, tid = _arrays(rows)
+    res = det.detector(lp, tid, topk_n=2)
     assert res.is_ill is False
 
 
 def test_detect_garbled_no_vocab_ratio_above_thresh(det):
     """低概率占比 > 0.2 且 logp 介于 (-6, -5) -> 仅乱码触发（ill_type=2）。"""
     n = 100
-    topk = []
+    rows = []
     for i in range(n):
         if i < 25:  # 占比 0.25 > 0.2
-            topk.append({1: -5.5, 2: -6.0})
+            rows.append({1: -5.5, 2: -6.0})
         else:
-            topk.append({1: -0.1, 2: -0.2})
-    tokens = [1] * n
-    res = det.detector(topk, tokens, topk_n=2)
+            rows.append({1: -0.1, 2: -0.2})
+    lp, tid = _arrays(rows)
+    res = det.detector(lp, tid, topk_n=2)
     assert res.is_ill is True
     assert res.ill_type == 2
 
@@ -152,18 +165,16 @@ def test_detect_garbled_no_vocab_ratio_above_thresh(det):
 def test_detect_repetition_trajectory_only(det):
     """长序列全相同 token + 高 logp -> distinct_n 低 -> 重复。"""
     n = 1024  # 提供 > single_window_thresh(14) 个完整窗口
-    topk = [{1: -0.1, 2: -1.0, 3: -2.0} for _ in range(n)]
-    tokens = [1] * n
-    res = det.detector(topk, tokens, topk_n=3)
+    lp, tid = _arrays([{1: -0.1, 2: -1.0, 3: -2.0} for _ in range(n)])
+    res = det.detector(lp, tid, topk_n=3)
     assert res.is_ill is True
     assert res.ill_type == 3
 
 
 def test_detect_repetition_short_sequence_normal(det):
-    """短序列无重复 -> 正常。"""
-    topk = [{1: -0.1, 2: -0.2} for _ in range(20)]
-    res = det.detector(topk, [1, 2, 1, 2, 1, 2, 1, 2, 1, 2,
-                              1, 2, 1, 2, 1, 2, 1, 2, 1, 2], topk_n=2)
+    """短序列（< stride）-> 仅生僻字路径，不进重复检测 -> 正常。"""
+    lp, tid = _arrays([{1: -0.1, 2: -0.2} for _ in range(20)])
+    res = det.detector(lp, tid, topk_n=2)
     assert res.is_ill is False
 
 
@@ -171,15 +182,15 @@ def test_detect_repetition_short_sequence_normal(det):
 # ill_type=4 NaN（logprob 出现 nan/inf）
 # --------------------------------------------------------------------------- #
 def test_detect_nan_value(det):
-    topk = [{1: float("nan"), 2: -1.0, 3: -2.0} for _ in range(5)]
-    res = det.detector(topk, [1, 1, 1, 1, 1], topk_n=3)
+    lp, tid = _arrays([{1: float("nan"), 2: -1.0, 3: -2.0} for _ in range(5)])
+    res = det.detector(lp, tid, topk_n=3)
     assert res.is_ill is True
     assert res.ill_type == 4
 
 
 def test_detect_inf_value(det):
-    topk = [{1: float("inf"), 2: -1.0, 3: -2.0} for _ in range(5)]
-    res = det.detector(topk, [1, 1, 1, 1, 1], topk_n=3)
+    lp, tid = _arrays([{1: float("inf"), 2: -1.0, 3: -2.0} for _ in range(5)])
+    res = det.detector(lp, tid, topk_n=3)
     assert res.is_ill is True
     assert res.ill_type == 4
 
@@ -188,8 +199,8 @@ def test_detect_inf_value(det):
 # run()：多请求并行返回，一请求异常不影响其他
 # --------------------------------------------------------------------------- #
 def test_run_multi_request_isolation(det):
-    nan_topk = [{1: float("nan")} for _ in range(5)]
-    normal_topk = [{1: -0.1, 2: -0.2} for _ in range(5)]
-    results = det.run([normal_topk, nan_topk, normal_topk],
-                      [[1] * 5, [1] * 5, [1] * 5], topk_n=2)
+    normal_lp, normal_tid = _arrays([{1: -0.1, 2: -0.2} for _ in range(5)])
+    nan_lp, nan_tid = _arrays([{1: float("nan")} for _ in range(5)])
+    results = det.run([normal_lp, nan_lp, normal_lp],
+                      [normal_tid, nan_tid, normal_tid], topk_n=2)
     assert results == [[False, 0], [True, 4], [False, 0]]

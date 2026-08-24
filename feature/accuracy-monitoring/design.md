@@ -73,7 +73,8 @@ project_root/
     ├── token_resolver.py      # TokenTextResolver + tokenizer 获取（env/argv/缓存自动发现）+ parse_vllm_argv
     ├── token_categorizer.py   # token 分类纯函数 + 启动期 generate_tk2cat（§3.11）
     ├── detector.py            # ILLDetector 检测器本体（set_vocabulary + topk_n 参数）
-    └── detector_runner.py     # DetectorRunner（进程池+共享内存+调度+词表注入）
+    ├── detector_runner.py     # DetectorRunner（进程池+共享内存+调度+词表注入）
+    └── anomaly_store.py       # 异常信息本地保存（编号分配 + pickle 落盘，§3.12）
 ```
 
 ### 2.3 职责划分
@@ -264,6 +265,9 @@ N=4 → 注入 10、每 token 10 项；送检测截前 4 项，返回客户端 1
   `vllm serve --model` 的实际值或 `--tokenizer` 的值（本地目录路径或 HF repo id）。覆盖 served 名为裸 basename /
   本地目录部署。未设则自动从同进程 `sys.argv` 解析 `vllm serve` 命令行：
   `--tokenizer` → `--model` 位置参数 → HF 缓存扫描（§3.10，不含 HTTP loopback）。
+- `VLLM_ANOMALY_SAVE_PATH`（默认未设）：异常信息本地保存路径（绝对路径）。未设→不落盘，
+  仅维护内存异常编号；设置且以 `.pkl` 结尾→文件模式；否则→文件夹模式（文件名=`<served_model_name>.pkl`）。
+  启动期校验目录/父目录存在性（fail-fast），见 §3.12。
 
 校验（启动期）：`top_logprobs∈[1,20]`、`monitor_rate∈[0.0,1.0]`、`detector_workers≥1`。
 越界 → raise 终止服务启动（含中文错误提示，见 §3.9）。
@@ -425,6 +429,40 @@ resolver 恒可用时第一层即返回，二三层仅个别 decode 失败时触
 **降级**：检测器 `get_tk2cat()` 返回预计算映射或 `(None, None)`；后者降级为**无词表检测**：
 rare/garbled 走 top1 logp 路径（按概率阈值判异常），repetition/acf/trajectory 不受影响。
 tk2cat 为 None 时 worker 的 `set_vocabulary` 不调用，检测器走无词表路径。
+
+### 3.12 异常信息本地保存
+
+当某被检测请求的某候选检出异常（`is_ill and ill_type != 0`）时，把异常现场保存为本地
+pickle 文件（dict，key=异常编号，value=异常信息）。环境变量 `VLLM_ANOMALY_SAVE_PATH` 控制
+是否落盘；不设置则不落盘，异常编号仍由内存计数器累加（重启归零）。
+
+**配置**（`env.py`）：新增 `VLLM_ANOMALY_SAVE_PATH`（绝对路径）。值以 `.pkl` 结尾→文件模式
+（路径即文件名）；否则→文件夹模式（文件名=`<served_model_name>.pkl`，served 名经
+`parse_vllm_argv().model` 净化）。非绝对路径→启动期 raise。启动期 fail-fast：文件夹模式目录
+必须预先存在；文件模式父目录必须预先存在；文件本身首次保存创建（`AnomalyStore.__init__` 校验）。
+
+**AnomalyStore**（新增 `anomaly_store.py`）：异常编号分配 + pickle 落盘 + 内存镜像 `_data`。
+- 编号：落盘开启时首次保存读文件取 `max(内存计数器, max(int keys))` 同步计数器后累加（防重启覆盖）；
+  关闭时仅内存计数器累加。编号自增不回退。
+- 保存执行：编号自增 + `_data` 更新在事件循环内（锁内、瞬时、原子）；磁盘写经
+  `loop.run_in_executor` offload 到线程，`asyncio.Lock` 串行化，事件循环不阻塞、客户端不受影响。
+  首次读文件做编号同步是一次性同步读。
+- 降级：保存失败（IO/权限/pickle）→ catch + log，不影响客户端/检测/后续请求，不回退编号，
+  不设不可用（遵循「检测优先 / 推理期降级」）。
+
+**数据采集**：`prompt` 在 `__call__` 从请求体取（chat `messages` / completions `prompt`），存
+`RequestContext.prompt`；`text` 在 `ResponseInterceptor` 取——非流式 `choices[].message.content` /
+`choices[].text`，流式 `SSEStreamProcessor` 累积 `delta.content` / `text`（`get_choice_texts()`，
+按 choice index 升序与 `get_detection_data` 对齐）。
+
+**检测调度**（`detector_runner.py`）：`schedule_detection` 增 `anomaly_store`/`prompt`/`texts`
+三个可选 kw（向后兼容）。`_run()` 在检测计时之外（不计入检测耗时）遍历异常候选，构建记录
+（`topk_logprobs`/`tokens_ids` 用 `.tolist()`），`await anomaly_store.save(record)`，
+`metrics.record_anomaly(aid, ts, model)`。
+
+**指标**（`metrics.py`）：新增 `vllm_anomaly_last_id{model}` 与
+`vllm_anomaly_last_timestamp_seconds{model}` 两个 Gauge，**不改动现有指标/标签**（webui
+collector 只解析已知指标，不受影响）。
 
 ## 4. 关键组件设计
 
