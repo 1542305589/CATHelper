@@ -52,7 +52,7 @@ def _nan_fn(nan_choice=0, n=1):
 
 
 async def test_detection_normal(client_factory):
-    client, fake, mw = client_factory(_normal_fn())
+    client, fake, mw = client_factory(_normal_fn(), real_runner=True)
     resp = await client.post(
         "/v1/chat/completions", json={"model": "glm-4-7", "messages": []}
     )
@@ -70,7 +70,7 @@ async def test_detection_normal(client_factory):
 
 
 async def test_detection_nan_reports_ill_type_4(client_factory):
-    client, fake, mw = client_factory(_nan_fn(nan_choice=0, n=1))
+    client, fake, mw = client_factory(_nan_fn(nan_choice=0, n=1), real_runner=True)
     resp = await client.post(
         "/v1/chat/completions", json={"model": "glm-4-7", "messages": []}
     )
@@ -88,7 +88,7 @@ async def test_detection_nan_reports_ill_type_4(client_factory):
 
 async def test_detection_n3_anomaly_not_overwritten(client_factory):
     # n=3：choice1 NaN 异常；多候选异常分别上报，不覆盖
-    client, fake, mw = client_factory(_nan_fn(nan_choice=1, n=3))
+    client, fake, mw = client_factory(_nan_fn(nan_choice=1, n=3), real_runner=True)
     resp = await client.post(
         "/v1/chat/completions",
         json={"model": "glm-4-7", "messages": [], "n": 3},
@@ -135,7 +135,7 @@ async def test_detection_empty_response_skipped(client_factory):
 
 async def test_concurrent_requests_all_detected(client_factory):
     """并发 5 请求（spec §2.7：检测串行、任务不丢）-> 全部计数、零错误。"""
-    client, fake, mw = client_factory(_normal_fn())
+    client, fake, mw = client_factory(_normal_fn(), real_runner=True)
     await asyncio.gather(*[
         client.post("/v1/chat/completions",
                     json={"model": "glm-4-7", "messages": [], "n": 2})

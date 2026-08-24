@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, List, Optional, Set, Tuple
 import numpy as np
 
 from .env import PluginConfig, resolve_config_path
+from .anomaly_store import AnomalyStore
 from .detector_runner import DetectorRunner, schedule_detection
 from .extractor import (
     OriginalParams,
@@ -42,6 +43,7 @@ class RequestContext:
     request_id: str
     will_detect: bool
     top_logprobs: int
+    prompt: Any = None
 
 
 # --------------------------------------------------------------------------- #
@@ -118,6 +120,7 @@ class ResponseInterceptor:
         metrics: Metrics,
         pending_tasks: Set,
         resolver: Any = None,
+        anomaly_store: Any = None,
     ) -> None:
         self._send = send
         self._ctx = ctx
@@ -125,6 +128,7 @@ class ResponseInterceptor:
         self._metrics = metrics
         self._pending_tasks = pending_tasks
         self._resolver = resolver
+        self._anomaly_store = anomaly_store
         self._is_streaming = False
         self._start_msg: Optional[dict] = None
         self._body_buf = bytearray()
@@ -132,6 +136,7 @@ class ResponseInterceptor:
         self._finished = False
         self._detection_scheduled = False
         self._detection_results: List[Tuple[np.ndarray, np.ndarray]] = []
+        self._choice_texts: List[Any] = []
 
     async def __call__(self, message: dict) -> None:
         t = message.get("type")
@@ -210,6 +215,20 @@ class ResponseInterceptor:
             return raw  # 非 JSON（错误页）→ 原样透传，不注入检测
         if not isinstance(data, dict):
             return raw
+        choices = data.get("choices")
+        if isinstance(choices, list):
+            self._choice_texts = []
+            for c in choices:
+                if not isinstance(c, dict):
+                    self._choice_texts.append(None)
+                    continue
+                if self._ctx.is_chat:
+                    msg = c.get("message")
+                    self._choice_texts.append(
+                        msg.get("content") if isinstance(msg, dict) else None
+                    )
+                else:
+                    self._choice_texts.append(c.get("text"))
         if self._ctx.is_chat:
             self._detection_results = extract_chat_response(
                 data, self._ctx.top_logprobs
@@ -226,6 +245,12 @@ class ResponseInterceptor:
                 recompute_text_offset=True,
             )
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+    def get_choice_texts(self) -> List[Any]:
+        """per-choice 输出文本（非流式取 _choice_texts；流式取 SSE 累积）。"""
+        if self._is_streaming:
+            return self._sse.get_choice_texts() if self._sse is not None else []
+        return list(self._choice_texts)
 
     async def _send_start(self, final: bytes) -> None:
         msg = self._start_msg
@@ -269,6 +294,9 @@ class ResponseInterceptor:
                 model=self._ctx.model,
                 metrics=self._metrics,
                 pending_tasks=self._pending_tasks,
+                anomaly_store=self._anomaly_store,
+                prompt=self._ctx.prompt,
+                texts=self.get_choice_texts(),
             )
         except RuntimeError as exc:
             # 无运行事件循环等：记录后跳过（不影响客户端）
@@ -298,15 +326,29 @@ class AnomalyMiddleware:
         self._tk2cat = None
         self._vocab_size: Optional[int] = None
         self._runner: Optional[DetectorRunner] = None
+        self._anomaly_store: Any = None
 
         if not self.config.enabled:
             # ② enabled=False → skip all checks, pure passthrough
             return
 
-        # ③ resolve_config_path() — fail-fast on missing
+        # ③ 构造 AnomalyStore（异常本地保存路径校验，fail-fast，先于重活）
+        #    save_path 未设则仅维护内存异常编号；设置则校验目录存在性。
+        from .token_resolver import parse_vllm_argv
+        info = parse_vllm_argv()
+        served_name = info.model if info is not None else None
+        self._anomaly_store = AnomalyStore(self.config.save_path, served_name)
+        if self.config.save_path is not None:
+            logger.info(
+                "异常本地保存已开启, 落盘路径: %s", self._anomaly_store.file_path
+            )
+        else:
+            logger.info("异常本地保存未开启, 仅维护内存异常编号")
+
+        # ④ resolve_config_path() — fail-fast on missing
         cfg_path = resolve_config_path()
 
-        # ④ 加载 tokenizer — fail-fast on failure
+        # ⑤ 加载 tokenizer — fail-fast on failure
         from .token_resolver import acquire_tokenizer_sync, TokenTextResolver
         tok = acquire_tokenizer_sync(explicit=self.config.tokenizer_model)
         self._resolver = TokenTextResolver(tok)
@@ -374,6 +416,7 @@ class AnomalyMiddleware:
         # 由 vLLM 原生处理（Bug #3 原则：中间件不做额外判断）。
         is_chat = _is_chat_path(path)
         orig = save_original_params(body, is_chat)
+        prompt = body.get("messages") if is_chat else body.get("prompt")
         new_body = inject_params(body, is_chat, self.config.top_logprobs)
         new_scope = _patch_scope_content_length(scope, len(new_body))
         request_id = uuid.uuid4().hex
@@ -385,6 +428,7 @@ class AnomalyMiddleware:
             request_id=request_id,
             will_detect=True,
             top_logprobs=self.config.top_logprobs,
+            prompt=prompt,
         )
         replay = _make_replay_receive(receive, new_body)
         interceptor = ResponseInterceptor(
@@ -394,6 +438,7 @@ class AnomalyMiddleware:
             metrics=self.metrics,
             pending_tasks=self._pending_tasks,
             resolver=self._resolver,
+            anomaly_store=self._anomaly_store,
         )
         await self.app(new_scope, replay, interceptor)
 

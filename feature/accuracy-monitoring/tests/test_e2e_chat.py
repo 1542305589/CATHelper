@@ -139,7 +139,7 @@ async def test_chat_inject_max_client_vs_n(client_factory):
 
 async def test_chat_detect_truncate_n_vs_client(client_factory):
     # 客户端 logprobs=10, N=4 → 注入 10；检测截前 4；返回客户端 10
-    client, fake, mw = client_factory(_chat_resp_fn(n_top=10), top_logprobs=4)
+    client, fake, mw = client_factory(_chat_resp_fn(n_top=10), top_logprobs=4, real_runner=True)
     resp = await client.post(
         "/v1/chat/completions",
         json={"model": "glm-4-7", "messages": [], "logprobs": True, "top_logprobs": 10},

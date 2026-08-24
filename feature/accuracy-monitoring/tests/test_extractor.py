@@ -115,23 +115,20 @@ def test_extract_chat_truncates_to_n():
     data = build_chat_response("glm-4-7", [e])
     res = extract_chat_response(data, n_detect=4)
     assert len(res) == 1
-    topk_list, tokens = res[0]
-    assert tokens == [100]
-    assert len(topk_list) == 1
-    assert len(topk_list[0]) == 4  # 截断到 N=4
+    logprobs, token_ids = res[0]  # 2D: (num_tokens, n_detect)
+    assert token_ids[:, 0].tolist() == [10000]  # top-1 候选 id（logprob 最高）
+    assert logprobs.shape == (1, 4)  # 1 token, 截断到 N=4
     # 按 logprob 降序，第一项最大
-    vals = list(topk_list[0].values())
-    assert vals == sorted(vals, reverse=True)
+    assert logprobs[0].tolist() == sorted(logprobs[0].tolist(), reverse=True)
 
 
 def test_extract_completions_truncates_to_n():
     data = build_completions_response("glm-4-7", [100, 200], [-0.1, -0.2], n_top=20)
     res = extract_completions_response(data, n_detect=4)
     assert len(res) == 1
-    topk_list, tokens = res[0]
-    assert tokens == [100, 200]
-    assert len(topk_list) == 2
-    assert all(len(d) == 4 for d in topk_list)
+    logprobs, token_ids = res[0]  # 2D: (num_tokens, n_detect)
+    assert token_ids[:, 0].tolist() == [10000, 10000]  # top-1 候选 id（每位置最高）
+    assert logprobs.shape == (2, 4)  # 2 token, 每位置截断到 N=4
 
 
 # --------------------------- strip chat --------------------------- #
@@ -403,17 +400,19 @@ def test_extract_completions_n_choices_all_returned():
                                       n_top=20, n=3)
     res = extract_completions_response(data, n_detect=4)
     assert len(res) == 3  # per choice
-    for topk_list, tokens in res:
-        assert tokens == [100, 200]
-        assert len(topk_list) == 2
+    for logprobs, token_ids in res:
+        assert token_ids[:, 0].tolist() == [10000, 10000]  # top-1 候选 id
+        assert logprobs.shape[0] == 2  # 2 token per choice
 
 
 def test_extract_completions_none_position_handled():
-    # top_logprobs 中某位置为 None -> 抽取为 {}，不崩溃
+    # top_logprobs 中某位置为 None -> 抽取为填充 (-100.0, 0)，不崩溃
     data = build_completions_response("glm-4-7", [100, 200], [-0.1, -0.2], n_top=20)
     data["choices"][0]["logprobs"]["top_logprobs"][1] = None
     res = extract_completions_response(data, n_detect=4)
-    topk_list, tokens = res[0]
-    assert tokens == [100, 200]
-    assert len(topk_list) == 2
-    assert topk_list[1] == {}
+    logprobs, token_ids = res[0]
+    assert logprobs.shape == (2, 4)
+    # pos 0 正常 top-1 候选 = 10000；pos 1 = None -> 填充 token_id=0
+    assert token_ids[:, 0].tolist() == [10000, 0]
+    assert token_ids[1].tolist() == [0, 0, 0, 0]
+    assert logprobs[1].tolist() == [-100.0, -100.0, -100.0, -100.0]

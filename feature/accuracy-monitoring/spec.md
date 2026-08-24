@@ -264,6 +264,40 @@ resolver 恒可用。单 token `decode([id])` 报错时 `resolve()` 返回 None�
 - 客户端设 `return_tokens_as_token_ids=True` → 原样保留 `token_id:NNN`（不变）。
 - 多候选 `n>1` → 每 choice 同上。
 
+### 2.16 异常信息本地保存
+
+当某被检测请求的某候选检出异常（`is_ill and ill_type != 0`）时，把异常现场保存为本地
+pickle 文件（dict，key=异常编号，value=异常信息）。环境变量 `VLLM_ANOMALY_SAVE_PATH`
+控制是否落盘。
+
+- 异常信息字段：`time`（检出时间 Unix 秒）、`prompt`（请求 prompt 字段：chat 取 `messages`、
+  completions 取 `prompt`）、`ill_type`（检出类型，数值型）、`topk_logprobs`（topk 信息，列表）、
+  `tokens_ids`（输出 token_id 数据，列表）、`text`（该候选输出文本）、`model_name`（模型名）。
+- 保存粒度：按异常候选，每个异常候选独立编号、独立记录；正常候选不保存。
+- 路径模式：值以 `.pkl` 结尾→文件模式（路径即文件名）；否则→文件夹模式（文件名=`<served_model_name>.pkl`）。
+- 启动期路径校验（fail-fast）：文件夹模式目录必须预先存在；文件模式父目录必须预先存在；
+  文件本身可在首次保存时创建。不存在→报错终止启动，提示「保存的路径不存在」。
+  值非绝对路径→启动期报错（与其它 env 校验一致）。
+- 异常编号：落盘开启时，首次保存读文件取 max(内存计数器, 文件 key 最大值) 同步计数器后累加
+  （防重启覆盖）；落盘关闭时仅内存计数器累加（重启归零，无文件可覆盖）。
+- 保存不阻塞客户端：检测在响应发完后 fire-and-forget 调度；磁盘写经 `run_in_executor` offload
+  到线程，`asyncio.Lock` 串行化，事件循环不阻塞。
+- 保存失败 → log，不影响客户端/检测/后续请求，不回退编号。
+- `/anomaly/metrics` 新增 `vllm_anomaly_last_id{model}` 与 `vllm_anomaly_last_timestamp_seconds{model}`
+  两个 Gauge，不改动现有指标/标签。
+
+**验收**
+- 设 `VLLM_ANOMALY_SAVE_PATH=/data/save`（目录存在）→ 首次异常产生 `/data/save/<model>.pkl`，
+  内含 `{1: {time,prompt,ill_type,topk_logprobs,tokens_ids,text,model_name}}`；重启后再异常编号从
+  文件 max-key+1 续接（不覆盖）。
+- 设 `VLLM_ANOMALY_SAVE_PATH=/data/x.pkl`（父目录存在）→ 落 `/data/x.pkl`。
+- 目录/父目录不存在 → vllm serve 启动失败，提示「保存的路径不存在」。
+- 不设 env → 服务正常启动；异常仍编号（内存，重启归零）；`/anomaly/metrics` 出现
+  `vllm_anomaly_last_id` / `vllm_anomaly_last_timestamp_seconds`。
+- 单请求多候选多异常 → 多条记录、多个编号，互不覆盖。
+- 保存失败 → log，客户端响应/检测/后续请求不受影响。
+- 现有指标结构、webui 解析不受影响。
+
 ## 3. 输入输出契约
 
 ### 3.1 构造与调用

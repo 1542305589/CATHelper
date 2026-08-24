@@ -449,6 +449,8 @@ class SSEStreamProcessor:
         self._chat_acc: Dict[int, List[Dict[str, Any]]] = {}
         # completions 累积：choice_index -> {tokens, token_logprobs, top_logprobs}
         self._comp_acc: Dict[int, Dict[str, List[Any]]] = {}
+        # 文本累积（choice_index -> 拼接后的输出文本），用于异常保存
+        self._text_acc: Dict[int, str] = {}
 
     # ---- 转发接口 ---- #
     def feed(self, chunk: bytes) -> bytes:
@@ -533,6 +535,17 @@ class SSEStreamProcessor:
             # 流式 n>1 时每个 chunk 通常只带一个 choice（带 index 字段），
             # 必须按真实 choice.index 分组，不能按 chunk 内位置（否则 n 个候选合并成一组）
             cidx = choice.get("index", ci)
+            # 文本累积（供异常保存；与 logprobs 累积独立）
+            if self._is_chat:
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    c = delta.get("content")
+                    if isinstance(c, str):
+                        self._text_acc[cidx] = self._text_acc.get(cidx, "") + c
+            else:
+                c = choice.get("text")
+                if isinstance(c, str):
+                    self._text_acc[cidx] = self._text_acc.get(cidx, "") + c
             lp = choice.get("logprobs")
             if lp is None:
                 continue
@@ -581,6 +594,14 @@ class SSEStreamProcessor:
             )
 
     # ---- 检测数据 ---- #
+    def get_choice_texts(self) -> List[Optional[str]]:
+        """返回 per-choice 输出文本，按 choice index 升序（与 get_detection_data 对齐）。"""
+        if self._is_chat:
+            keys = sorted(self._chat_acc.keys())
+        else:
+            keys = sorted(self._comp_acc.keys())
+        return [self._text_acc.get(ci) for ci in keys]
+
     def get_detection_data(
         self,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:

@@ -6,14 +6,27 @@ from unittest.mock import patch
 
 import pytest
 
-from _helpers import build_chat_response, chat_top_entry
+from _helpers import FakeVLLM, build_chat_response, chat_top_entry
 from anomaly_middleware.env import PluginConfig, resolve_config_path
 from anomaly_middleware.detector_runner import DetectorRunner
+from anomaly_middleware import AnomalyMiddleware
 from anomaly_middleware.metrics import METRICS_CONTENT_TYPE
 from conftest import drain
 
 NI = "你"
 pytestmark = pytest.mark.asyncio
+
+
+class _BrokenRunner:
+    """检测即失败的假 runner（模拟子进程崩溃，spec §2.10 检测异常隔离）。"""
+
+    _topk_n = 20
+
+    async def run_async(self, logprobs_list, token_ids_list):
+        raise RuntimeError("forced broken for test")
+
+    def shutdown(self):
+        pass
 
 
 def _chat_fn(model="glm-4-7", n_top=20):
@@ -52,7 +65,7 @@ async def test_monitor_rate_zero_passthrough(client_factory):
 
 async def test_monitor_rate_one_all_injected(client_factory):
     # 采样率 1.0 → 每请求都注入检测
-    client, fake, mw = client_factory(_chat_fn(), monitor_rate=1.0)
+    client, fake, mw = client_factory(_chat_fn(), monitor_rate=1.0, real_runner=True)
     await client.post("/v1/chat/completions", json={"model": "m", "messages": []})
     await client.post("/v1/chat/completions", json={"model": "m", "messages": []})
     for scope, body in fake.received:
@@ -68,7 +81,7 @@ async def test_monitor_rate_partial_with_patched_random(client_factory, monkeypa
 
     seq = iter([0.1, 0.5])
     monkeypatch.setattr(mwmod.random, "random", lambda: next(seq))
-    client, fake, mw = client_factory(_chat_fn(), monitor_rate=0.3)
+    client, fake, mw = client_factory(_chat_fn(), monitor_rate=0.3, real_runner=True)
     r1 = await client.post("/v1/chat/completions", json={"model": "m", "messages": []})
     r2 = await client.post("/v1/chat/completions", json={"model": "m", "messages": []})
     b1 = json.loads(fake.received[0][1])
@@ -80,40 +93,24 @@ async def test_monitor_rate_partial_with_patched_random(client_factory, monkeypa
     assert "vllm_anomaly_requests_total 1" in text  # 仅 1 次检测
 
 
-async def test_degrade_when_paths_unresolvable(client_factory, monkeypatch):
-    # 模拟路径解析失败 → 永久降级透传 + 指标端点仍 200 报零
+async def test_degrade_when_paths_unresolvable(monkeypatch):
+    # detector.yaml 不可解析 → 构造期 fail-fast（spec §2.13）。
+    # 旧"永久降级透传"行为已移除：缺失配置直接启动失败，不再软降级。
     import anomaly_middleware.middleware as mwmod
 
-    monkeypatch.setattr(mwmod, "resolve_config_path", lambda: None)
-    client, fake, mw = client_factory(_chat_fn())
-    resp = await client.post(
-        "/v1/chat/completions", json={"model": "m", "messages": []}
-    )
-    assert resp.status_code == 200
-    # 降级：body 未注入
-    injected = json.loads(fake.received[0][1])
-    assert "return_tokens_as_token_ids" not in injected
-    # 永久降级
-    assert mw.config.enabled is False
-    # 指标端点仍可达报零
-    mresp = await client.get("/anomaly/metrics")
-    assert mresp.status_code == 200
-    assert b"vllm_anomaly_requests_total 0" in mresp.content
-    # 后续请求原样转发
-    await client.post("/v1/chat/completions", json={"model": "m", "messages": []})
-    assert "return_tokens_as_token_ids" not in json.loads(fake.received[1][1])
+    def _raise():
+        raise FileNotFoundError("detector.yaml not found")
+
+    monkeypatch.setattr(mwmod, "resolve_config_path", _raise)
+    monkeypatch.delenv("VLLM_ANOMALY_ENABLED", raising=False)
+    with pytest.raises(FileNotFoundError):
+        AnomalyMiddleware(FakeVLLM(lambda *a: None))
 
 
 async def test_detection_error_isolation(client_factory):
-    # 预置不可用 runner：检测快速失败计 error，客户端响应不受影响
+    # 即失败 runner：检测失败计 error，客户端响应不受影响（spec §2.10）
     client, fake, mw = client_factory(_chat_fn())
-    # 强制 runner 不可用
-    paths = resolve_config_path()
-    runner = DetectorRunner(paths, max_workers=1)
-    runner._unusable = True
-    runner._unusable_reason = "forced for test"
-    mw._runner = runner
-    mw._runner_inited = True
+    mw._runner = _BrokenRunner()
     resp = await client.post(
         "/v1/chat/completions", json={"model": "glm-4-7", "messages": []}
     )
@@ -131,7 +128,6 @@ async def test_detection_error_isolation(client_factory):
     await drain(mw)
     text2 = mw.metrics.render_metrics().decode()
     assert "vllm_anomaly_detection_errors_total 2" in text2
-    runner.shutdown()
 
 
 async def test_disabled_master_switch_passthrough(client_factory):

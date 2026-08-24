@@ -61,6 +61,7 @@ class PluginConfig:
     monitor_rate: float = MONITOR_RATE_DEFAULT
     detector_workers: int = DETECTOR_WORKERS_DEFAULT
     tokenizer_model: Optional[str] = None
+    save_path: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "PluginConfig":
@@ -79,6 +80,11 @@ class PluginConfig:
             raise ValueError(
                 f"VLLM_ANOMALY_DETECTOR_WORKERS 必须为正整数, 当前值: {workers}"
             )
+        save_path = _env_str("VLLM_ANOMALY_SAVE_PATH")
+        if save_path is not None and not os.path.isabs(save_path):
+            raise ValueError(
+                f"VLLM_ANOMALY_SAVE_PATH 必须为绝对路径, 当前值: {save_path}"
+            )
         return cls(
             enabled=_env_bool("VLLM_ANOMALY_ENABLED", True),
             top_logprobs=top_logprobs,
@@ -86,6 +92,7 @@ class PluginConfig:
             monitor_rate=monitor_rate,
             detector_workers=workers,
             tokenizer_model=_env_str("VLLM_ANOMALY_TOKENIZER_MODEL"),
+            save_path=save_path,
         )
 
 
