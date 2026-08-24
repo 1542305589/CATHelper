@@ -107,7 +107,8 @@ func TestSpaceFreqAbsentCardNotFlagged(t *testing.T) {
 // A card at 0 MHz among 1800 MHz peers: the 0 is clamped to zeroFloor (not
 // dropped) and participates — min run flags 1 (the zero card), max run flags
 // 7 (the working cards above the floor) → minority = the zero card, reported
-// with a huge ratio (1800 / zeroFloor).
+// with the unified cluster/baseline ratio ≈ zeroFloor/1800 (far below the
+// 0.5 anomaly edge).
 func TestSpaceFreqZeroDownclock(t *testing.T) {
 	cfg := DefaultDetectionConfig()
 	cardIDs := freqCardIDs(8)

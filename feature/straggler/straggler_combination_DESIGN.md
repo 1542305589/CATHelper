@@ -6,7 +6,7 @@
 >
 > **相关代码**：
 > - 底座：`CATMonitor/`（Go module `github.com/Computing-Availability-Tools/CATMonitor`）
-> - straggler：`feature/straggler/`（待重构为独立 Go module）
+> - straggler：`feature/straggler/`（独立 Go module）
 > - 参考：EEP 整合 `feature/elastic-ep/EEP_combination_DESIGN.md`、faultsub `CATMonitor/features/faultsub/faultsub_SPEC.md`
 
 ---
@@ -19,7 +19,7 @@ straggler 是 AI 智算集群中识别性能劣化 NPU 卡的**两道防线**检
 
 | 防线 | 包 | 输入 | 方法 | 输出 |
 |------|----|------|------|------|
-| 第一道（KPI 资源检测） | `resource/` | KPI 时序 CSV/JSONL（`kpi_collect.sh`/CATMonitor 采集，10 秒聚合） | 空间 peer 对比（kmeans 簇比例 / 绝对阈值） | JSON + 文本报告 |
+| 第一道（KPI 资源检测） | `resource/` | KPI 时序 CSV/JSONL（`kpi_collect.sh`/CATMonitor 采集，10 秒聚合） | 空间 peer 对比（kmeans 簇比例 / 绝对阈值，双方向投票） | JSON + 文本报告 |
 | 第二道（Profiler 检测） | `profiling/` | Ascend PyTorch Profiler `.db` SQLite（应用级、按需触发） | 均质化聚类：慢计算/慢通信/慢CPU/Bubble | JSON + 文本报告 |
 
 ### 1.2 核心问题
@@ -32,7 +32,7 @@ straggler 第一道防线**自带 `kpi_collect.sh` 采集 KPI**，与 CATMonitor
 |---|------|------|
 | 1 | 接入范围 | **仅第一道（KPI）** 接入 CATMonitor；第二道（Profiler）保留独立 |
 | 2 | KPI 数据获取 | CATMonitor **新增 opt-in 的 straggler 专用 KPI 文件**（启用才输出，不启用零影响）；straggler 读该文件 |
-| 3 | 运行模式 | straggler **保留 CLI/定时调度**（检测本质是批量，需历史窗+基线，不适合作实时 tap） |
+| 3 | 运行模式 | straggler **保留 CLI/定时调度**（检测是批量/全量判定：聚合全部历史后取最后一个聚合点做空间 peer 对比，读取窗口由文件保留期决定，不适合作实时 tap） |
 | 4 | 模块结构 | straggler 作为 **`feature/straggler` 独立 Go module**（自带 go.mod，重构 import），外部消费 CATMonitor 数据，与 EEP 结构一致 |
 | 5 | 结果消费 | **报告 + 回注 faultsub**：straggler 检测命中后，把"慢卡事件"POST 给 CATMonitor faultsub（faultsub 新增事件 ingest 端点），供 EEP/运维据此触发卡隔离 |
 
@@ -49,23 +49,26 @@ straggler 第一道防线**自带 `kpi_collect.sh` 采集 KPI**，与 CATMonitor
 
 ### 2.1 straggler 第一道 KPI 指标需求 vs CATMonitor 覆盖
 
-straggler `resource/types.go` 定义 11 项 KPI（`CSVRow`）：
+straggler `resource/types.go` 定义 11 项参与检测的 KPI（`CSVRow`；另解析 `nic_rx_all_pkg` 与 `cpu_average`，后者不参与卡级检测）：
 
-| straggler 指标 | 类别 | 方向 | CATMonitor 指标 | 状态 |
+| straggler 指标 | 类别 | 异常方向 | CATMonitor 指标 | 状态 |
 |---|---|---|---|---|
-| `temp` | 计算 | 高异常 | `npu/temperature` | ✓ |
-| `power` | 计算 | 高异常 | `npu/power_draw` | ✓ |
-| `aicore_freq` | 计算 | 低异常 | `npu/aicore_freq` | ✓ |
-| `aicore_util` | 计算 | 低异常 | `npu/utilization` | ✓ 名称映射 |
-| `hbm_util` | 计算 | 低异常 | `npu/memory_usage` | ✓ 名称映射 |
-| `tx_bandwidth` | 通信 | 低异常 | `npu/net_tx_bandwidth` | ✓ 名称映射 |
-| `rx_pfc_pkt` | 通信(计数器) | 高异常 | `npu/mac_rx_pfc_pkt_num` | ✓ 名称映射 |
-| `roce_tx_err_pkt` | 通信(计数器) | 高异常 | `npu/roce_tx_err_pkt_num` | ✓ 精确 |
-| `roce_out_of_order` | 通信(计数器) | 高异常 | `npu/roce_out_of_order_num` | ✓ 精确 |
-| `roce_new_pkt_rty` | 通信(计数器) | 高异常 | （无） | **✗ 缺口** |
-| `cpu_average` | 主机 | — | `cpu/usage` | ✓ 名称映射 |
+| `temp` | 计算 | 双方向自适应 | `npu/temperature` | ✓ |
+| `power` | 计算 | 双方向自适应 | `npu/power_draw` | ✓ |
+| `aicore_freq` | 计算 | 双方向自适应 | `npu/aicore_freq` | ✓ |
+| `aicore_util` | 计算 | 双方向自适应 | `npu/utilization` | ✓ 名称映射 |
+| `hbm_bandwidth_util` | 计算 | 双方向自适应 | `npu/hbm_bandwidth_util` | ✓ 名称映射 |
+| `hbm_util` | 计算 | 双方向自适应 | `npu/memory_usage` | ✓ 名称映射 |
+| `tx_bandwidth` | 通信 | 双方向自适应 | `npu/net_tx_bandwidth` | ✓ 名称映射 |
+| `rx_pfc_pkt` | 通信(计数器) | 双方向自适应 | `npu/mac_rx_pfc_pkt_num` | ✓ 名称映射 |
+| `roce_tx_err_pkt` | 通信(计数器) | 双方向自适应 | `npu/roce_tx_err_pkt_num` | ✓ 精确 |
+| `roce_out_of_order` | 通信(计数器) | 双方向自适应 | `npu/roce_out_of_order_num` | ✓ 精确 |
+| `roce_new_pkt_rty` | 通信(计数器) | 双方向自适应 | （无） | **✗ 缺口** |
+| `nic_rx_all_pkg` | 通信(计数器) | —（只解析不检测） | （可选填充） | ✓ 不影响检测 |
 
-**覆盖 10/11，缺口 1 项**（`roce_new_pkt_rty`，RoCE 重传计数器）。计数器语义：straggler 把后 4 项当累计计数器处理（聚合时累加），CATMonitor 的 hccn_tool 统计指标本就是累计计数器，语义一致。
+**覆盖 10/11，缺口 1 项**（`roce_new_pkt_rty`，RoCE 重传计数器）。计数器语义：straggler 对 4 个错误计数器在 10 秒聚合窗口内取**增量（counter delta）**（处理回绕），CATMonitor 的 hccn_tool 统计指标本就是累计计数器，语义一致（写入侧写原值，straggler 侧算增量）。
+
+> 异常方向说明：KPI 层**双方向投票**——kmeans 比例检测对每个指标同时跑 max 方向（基线=最小均值簇）与 min 方向（基线=最大均值簇），标记数少的一方为异常，相等不上报；因此无需为每个指标声明"高异常/低异常"。
 
 ### 2.2 straggler 数据格式 vs CATMonitor 输出
 
@@ -75,8 +78,8 @@ straggler `resource/types.go` 定义 11 项 KPI（`CSVRow`）：
 
 ### 2.3 工程问题
 
-1. **模块路径**：straggler 现 import `github.com/Computing-Availability-Tools/CATMonitor/features/straggler/...`，但已移至 `feature/straggler`（与 elastic-ep 并列），需重构为独立 module。
-2. **基线保留期**：straggler 默认 15 天基线；CATMonitor 现默认 `max_file_age=168h`(7 天)。straggler KPI 文件需独立保留期（默认 15 天）。
+1. **模块路径**：straggler 现 import `github.com/Computing-Availability-Tools/CATHelper/feature/straggler/...`，为独立 module（自带 go.mod），与 elastic-ep 并列。
+2. **KPI 文件保留期**：straggler 检测聚合全部历史、取最后一个聚合点判定，数据深度由文件保留期决定；CATMonitor 现默认 `max_file_age=168h`(7 天)。straggler KPI 文件需独立保留期（默认 15 天）。
 3. **SQLite 依赖**：straggler 第二道用 `modernc.org/sqlite`（纯 Go，无 CGo），独立 module 需自带该依赖。
 
 ---
@@ -168,9 +171,9 @@ sequenceDiagram
     SO->>KPI: 追加写当日 straggler_kpi_{date}.jsonl
 
     Note over ST,EEP: 定时检测（如每 1h）
-    ST->>KPI: 读最近 15 天文件
+    ST->>KPI: 读保留期内文件
     KPI-->>ST: KPI 时序
-    ST->>ST: 聚合/空间检测/输出
+    ST->>ST: 10s 聚合/空间检测/输出
     ST->>ST: 生成报告
     ST->>FS: POST /faultsub/events (慢卡事件, 每命中卡一条)
     FS->>EEP: 推送给订阅者 (webhook)
@@ -225,14 +228,14 @@ func (s *StragglerStorage) Write(metrics []collector.Metric) error {
 
 - 仅处理 `component=="npu"` 批次；其它 component 透传。
 - 内存缓冲 + 周期 flush（默认 60s），避免每 3s 重写文件。
-- 计数器指标（rx_pfc_pkt 等）写**原始累计值**，由 straggler 侧聚合时累加（语义对齐 straggler 现有逻辑）。
+- 计数器指标（rx_pfc_pkt 等）写**原始累计值**，由 straggler 侧聚合时算窗口增量（语义对齐 straggler 现有逻辑）。
 
 #### 4.1.3 KPI 样本格式契约（sample.go）
 
 每条样本 = 一个时刻的"全部卡 × 11 项指标"，与 straggler `CSVRow` 1:1 对应。文件为 **JSONL**（每行一个 JSON 样本，追加友好、日级轮转，与 CATMonitor 既有 JSONL 风格一致）：
 
 ```json
-{"ts":1784547926,"vals":{"0":{"temp":47,"power":1628,"aicore_freq":1800,"aicore_util":45,"hbm_util":50,"tx_bandwidth":1250,"rx_pfc_pkt":0,"roce_tx_err_pkt":0,"roce_out_of_order":0,"roce_new_pkt_rty":0},"1":{...}},"cpu_avg":{"cpu1":"4.26"}}
+{"ts":1784547926,"vals":{"0":{"temp":47,"power":1628,"aicore_freq":1800,"aicore_util":45,"hbm_bandwidth_util":70,"hbm_util":50,"tx_bandwidth":1250,"rx_pfc_pkt":0,"roce_tx_err_pkt":0,"roce_out_of_order":0,"roce_new_pkt_rty":0},"1":{...}},"cpu_avg":{"cpu1":"4.26"}}
 ```
 
 > **为何 JSONL 而非单体 JSON**：单体 JSON 追加需重写全文；JSONL 每行独立、追加 O(1)、日级轮转天然适配、读取流式。文件名 `straggler_kpi_{date}.jsonl`，目录 `{data_dir}/straggler/`，保留期 `straggler_output.retention`（默认 360h=15 天）。
@@ -245,6 +248,7 @@ func (s *StragglerStorage) Write(metrics []collector.Metric) error {
 | power | `power_draw` | npu |
 | aicore_freq | `aicore_freq` | npu |
 | aicore_util | `utilization` | npu |
+| hbm_bandwidth_util | `hbm_bandwidth_util` | npu |
 | hbm_util | `memory_usage` | npu |
 | tx_bandwidth | `net_tx_bandwidth` | npu |
 | rx_pfc_pkt | `mac_rx_pfc_pkt_num` | npu (hccn_tool) |
@@ -293,6 +297,7 @@ straggler_output:
     - power
     - aicore_freq
     - aicore_util
+    - hbm_bandwidth_util
     - hbm_util
     - tx_bandwidth
     - rx_pfc_pkt
@@ -336,7 +341,7 @@ Storage 链：`Scheduler → StragglerStorage(若启用) → FaultStorage(若启
 ### 5.1 独立 Go module + import 重构
 
 - `feature/straggler/go.mod`（新）：`module github.com/Computing-Availability-Tools/CATHelper/feature/straggler`，依赖 `modernc.org/sqlite`（第二道用）。
-- 全部 `.go` 的 import 路径 `github.com/Computing-Availability-Tools/CATMonitor/features/straggler/X` → `github.com/Computing-Availability-Tools/CATHelper/feature/straggler/X`（机械重构，main.go + 5 子包）。
+- 全部 `.go` 的 import 路径 `github.com/Computing-Availability-Tools/CATHelper/feature/straggler/X`（main.go + 子包）。
 - straggler **不 import CATMonitor 包**（外部消费其文件/REST），与 EEP 一致。
 
 ### 5.2 新增 JSON reader（替代/并存 CSV parser）
@@ -344,30 +349,38 @@ Storage 链：`Scheduler → StragglerStorage(若启用) → FaultStorage(若启
 `resource/json_reader.go`（新）：读目录内全部 `straggler_kpi_{date}.jsonl`，产出与 `ParseCSV` 相同的 `*TimeSeriesData`，复用后续聚合/空间检测管线（零改动）：
 
 ```go
-// ReadKPIFiles(dir string, since, until time.Time) (*TimeSeriesData, error)
-//   遍历目录内全部 straggler_kpi_{date}.jsonl，逐行反序列化 KPISample
-//   → CSVRow（11 项 dict + CPUAvg），合并、按 ts 排序、收集 cardIDs
+// ReadKPIFiles(dir string) (*TimeSeriesData, error)
+//   遍历目录内全部 straggler_kpi_{date}.jsonl（含多节点子目录布局），
+//   逐行反序列化 KPISample → CSVRow（11 项 dict + CPUAvg），
+//   合并、按 ts 排序、收集 cardIDs
 ```
 
-`main.go` 入口参数：`--kpi-jsonl-dir=DIR` 与 `--kpi-path=DIR`（遗留 kpi_collect.sh CSV 目录）二选一；JSONL 模式读取目录内全部 `straggler_kpi_{date}.jsonl` 文件（无基线/检测窗口）。
+`main.go` 入口参数：`--kpi-jsonl-dir=DIR` 与 `--kpi-path=DIR`（遗留 kpi_collect.sh CSV 目录）二选一；JSONL 模式读取目录内全部 `straggler_kpi_{date}.jsonl` 文件（`--kpi-jsonl-dir` 优先于 `--kpi-path`）。
 
 ### 5.3 检测命中回注 faultsub
 
-`resource/emit.go`（新）：检测完成后，对每个 `QuadConfirmedAnomaly`/`QuadEarlyDegradation` 卡构造 `FaultEvent` 并 POST 给 faultsub：
+`resource/emit.go`（新）：检测完成后，对**每张异常卡**构造 `FaultEvent`（detail 聚合该卡全部异常指标→score）并 POST 给 faultsub：
 
 ```go
-type FaultEvent struct {  // 与 CATMonitor faultsub 契约一致（JSON）
-    EventID   string            `json:"event_id"`
-    Type      string            `json:"type"`        // "straggler_detected"
-    Component string            `json:"component"`   // "npu"
-    NPUID     string            `json:"npu_id"`
-    Severity  string            `json:"severity"`    // critical|warning
-    Detail    map[string]string `json:"detail"`      // 指标 → score
-    Timestamp time.Time         `json:"timestamp"`
+type FaultEvent struct {  // 与 CATMonitor faultsub 契约一致（JSON，straggler 本地副本）
+    EventID   string            `json:"event_id"`           // 空则 faultsub 侧填充
+    Type      string            `json:"type"`               // "straggler_detected"
+    Component string            `json:"component"`          // "npu"
+    NPUID     string            `json:"npu_id"`             // "节点名:卡ID"
+    Severity  string            `json:"severity"`           // 卡最差空间 score ≥ 5 → critical，否则 warning
+    Detail    map[string]string `json:"detail,omitempty"`   // 指标 → score
+    Timestamp time.Time         `json:"timestamp"`          // zero 则 faultsub 侧填充
     Recovered bool              `json:"recovered"`
 }
 
-// EmitToFaultSub(results, faultsubURL, timeout): 逐卡 POST /faultsub/events
+type EmitConfig struct {
+    URL     string        // faultsub REST base URL，如 http://localhost:9101
+    Timeout time.Duration // 单请求超时（默认 10s）
+}
+
+// EmitToFaultSub(result *DetectionResult, cfg EmitConfig):
+//   逐异常卡 POST {URL}/faultsub/events；请求头 X-CatMonitor-Event: straggler_detected；
+//   失败仅告警不阻断检测；无异常卡或 URL 为空 → 不发送。
 ```
 
 新增 CLI 参数 `--faultsub-url=http://localhost:9101`（回注目标，空=不回注，仅出报告）。
@@ -407,12 +420,14 @@ go run . --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
 
 ```
 POST /faultsub/events
-{ "type":"straggler_detected", "component":"npu", "npu_id":"3",
+{ "type":"straggler_detected", "component":"npu", "npu_id":"86:3",
   "severity":"critical",
   "detail":{"temp":"3.2","aicore_freq":"5.0"},
   "timestamp":"2026-07-28T11:00:00Z" }
 → 202 Accepted
 ```
+
+（`npu_id` 为 `节点名:卡ID` 格式；`event_id` 可省略，faultsub 侧填充。）
 
 ### 6.3 异常卡 → 订阅者(EEP/运维)动作
 
@@ -420,6 +435,7 @@ POST /faultsub/events
 |---|---|
 | detail 含计算类指标（temp/power/freq/util 等） | 排查硬件/计算（散热、频率、利用率等） |
 | detail 含通信类指标（PFC/重传/带宽等） | 排查网络（PFC、重传、带宽等） |
+| score ≥ 5（critical） | 优先处理（最差空间 score 决定 severity） |
 | 需要精查 | 触发 Profiler 深查 或 卡隔离 |
 
 ---
@@ -436,7 +452,7 @@ POST /faultsub/events
 ### 7.2 straggler（Go，独立 module）
 
 - `json_reader_test`：构造 `straggler_kpi_*.jsonl` → `ReadKPIFiles` 产出 `TimeSeriesData` 与 `ParseCSV` 等价（用同源数据双跑比对）。
-- `emit_test`：mock faultsub server，验证命中卡回注事件字段/数量。
+- `emit_test`：mock faultsub server，验证命中卡回注事件字段/数量/severity。
 - 既有检测算法单测保持通过（import 重构后）。
 
 ### 7.3 端到端
@@ -476,7 +492,7 @@ POST /faultsub/events
 | opt-in 默认关闭 | `straggler_output.enabled` 默认 false，不启用时 daemon 零回归；KPI 文件不产生 |
 | 文件量 | 3s 采样 × 8 卡 × 11 指标 ≈ 5.7MB/天/卡组；JSONL 追加写 + 60s flush，I/O 可控；15 天 ≈ 86MB，定时检测读取可接受 |
 | 保留期 | KPI 文件独立保留期（默认 15 天），与 JSONL `max_file_age`(7 天) 解耦 |
-| 计数器语义 | hccn_tool 统计为累计计数器，straggler 聚合时累加，语义一致；stragglerout 写原值（不做 delta） |
+| 计数器语义 | hccn_tool 统计为累计计数器，straggler 聚合时算窗口增量，语义一致；stragglerout 写原值（不做 delta） |
 | roce_new_pkt_rty | 依赖 hccn_tool 真机提供该字段；若无则降级映射 `roce_rx_cnp_pkt_num` 并标注代理（待真机确认） |
 | faultsub 回注 | straggler→faultsub 经 REST ingest；straggler 与 CATMonitor 可跨机（URL 可配） |
 | 模块独立 | straggler 独立 go.mod，不 import CATMonitor 包，边界清晰，与 EEP 同构 |
@@ -491,7 +507,7 @@ POST /faultsub/events
 | 接入范围 | 仅第一道(KPI) | CATMonitor 已采集 KPI；第二道(Profiler)属应用级，超底座定位 |
 | KPI 数据获取 | CATMonitor opt-in 写专用 KPI JSONL 文件 | 用户决策；CATMonitor 做格式聚合，straggler 只读，契约清晰 |
 | 文件格式 | JSONL（每行一样本） | 追加 O(1)、日级轮转、流式读；与 CATMonitor 既有 JSONL 风格一致 |
-| 运行模式 | CLI/定时 | 检测需历史窗+基线，批量本质，不适合作实时 tap |
+| 运行模式 | CLI/定时 | 检测为批量/全量判定（聚合全部历史→最后一个聚合点做空间对比），读取窗口由保留期决定，不适合作实时 tap |
 | 模块结构 | feature/straggler 独立 go module | 与 EEP 顶层特性结构一致；不污染 CATMonitor 模块 |
 | 结果消费 | 报告 + 回注 faultsub | 闭环采集→检测→响应；faultsub ingest 端点复用其分发能力 |
 | 事件类型 | 新增 straggler_detected | detail 为 指标→score；订阅者按异常指标决策 |
@@ -499,4 +515,4 @@ POST /faultsub/events
 
 ---
 
-*文档版本：v1.0 · 整合对象：CATMonitor v0.3.3 + straggler（feature/straggler_detection 分支）*
+*文档版本：v1.1 · 整合对象：CATMonitor + straggler（feature/new-straggler-detection 分支）*

@@ -51,14 +51,26 @@ func ReadKPIFiles(dir string) (*TimeSeriesData, error) {
 			if nc.Node == "" {
 				return nil, fmt.Errorf("node_config.json: folder %q missing node name", folder)
 			}
-			if info, serr := os.Stat(filepath.Join(dir, folder)); serr != nil || !info.IsDir() {
-				return nil, fmt.Errorf("node_config.json folder %q missing in %s", folder, dir)
+			folderPath := filepath.Join(dir, folder)
+			info, serr := os.Stat(folderPath)
+			if serr != nil {
+				// os.Stat follows symlinks, so this fires for a genuinely
+				// absent path OR a broken/dangling symlink (target missing, or
+				// invisible in this process's mount namespace). Surface the
+				// underlying error instead of a bare "missing", and keep
+				// reading the other nodes' data.
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] node_config.json folder %q in %s: %v, skipping\n", folder, dir, serr)
+				continue
+			}
+			if !info.IsDir() {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] [WARN] node_config.json folder %q in %s is not a directory, skipping\n", folder, dir)
+				continue
 			}
 			allowed := make(map[int]bool, len(nc.Cards))
 			for _, c := range nc.Cards {
 				allowed[c] = true
 			}
-			for _, path := range listJSONLFiles(filepath.Join(dir, folder)) {
+			for _, path := range listJSONLFiles(folderPath) {
 				fileRows, rerr := readKPIFile(path, idx, nc.Node, allowed)
 				if rerr != nil {
 					return nil, rerr

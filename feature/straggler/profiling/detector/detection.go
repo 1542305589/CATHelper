@@ -22,7 +22,10 @@ func DelimitDetection(
 	parallels map[string][][]int,
 	validRanks []int,
 ) config.DegradationData {
-	if len(stepData) == 0 || len(parallels) == 0 || len(validRanks) == 0 {
+	// Parallels may be empty when the profiler data has no registered group
+	// names; GetCalDetectionGroup degrades to a single all-ranks group so
+	// cal-only detection can still run.
+	if len(stepData) == 0 || len(validRanks) == 0 {
 		return nil
 	}
 
@@ -79,6 +82,13 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
 		if len(filtered) > 0 {
 			return domain, filtered
 		}
+	}
+	// No recognized parallel domain (e.g. group names not registered in the
+	// profiler data, or only unknown domains like "mc2" present): degrade to
+	// a single group of all ranks so cal-only detection can still run. Slow
+	// comm/CPU/bubble have no data without group names and stay silent.
+	if len(curNpus) >= minRanksInGroup {
+		return defaultGroupParallelDomainName, [][]int{curNpus}
 	}
 	return "", nil
 }

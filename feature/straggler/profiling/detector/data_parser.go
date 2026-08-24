@@ -45,6 +45,22 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 		}
 	}
 
+	// No parallel topology (group names not registered in the profiler data):
+	// fall back to collecting ranks from global_rank_*.csv files (written
+	// unconditionally) so that cal-only detection can still run.
+	if len(rankSet) == 0 {
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, "global_rank_") && strings.HasSuffix(name, ".csv") {
+				trimmed := strings.TrimPrefix(name, "global_rank_")
+				trimmed = strings.TrimSuffix(trimmed, ".csv")
+				if rank, err := strconv.Atoi(trimmed); err == nil {
+					rankSet[rank] = true
+				}
+			}
+		}
+	}
+
 	if len(rankSet) == 0 {
 		return nil, nil
 	}
@@ -97,11 +113,13 @@ func getCurRankTopo(filePath string) map[string]interface{} {
 }
 
 // getDetectionJobParallelInfo collects all rank groups for a given domain name
-// across all rank topology files, with deduplication.
+// across all rank topology files, with deduplication. Each rank's topology file
+// may list the same group (one group_info_{N}.json per rank), so a group whose
+// ranks are already assigned to this domain is skipped.
 func getDetectionJobParallelInfo(rankSet map[int]bool, jsonPaths []string, target string) [][]int {
 	var groups [][]int
-	// parallelInfo tracks which ranks have already been assigned to a group.
-	parallelInfo := make(map[int]map[int]bool)
+	// assigned tracks which ranks already belong to a group of this domain.
+	assigned := make(map[int]bool)
 
 	for _, jp := range jsonPaths {
 		topo := getCurRankTopo(jp)
@@ -133,15 +151,14 @@ func getDetectionJobParallelInfo(rankSet map[int]bool, jsonPaths []string, targe
 			if len(npuGroup) == 0 {
 				continue
 			}
-			// Dedup: if any rank in this group already appears in another group, skip.
-			if checkRankParallelExist(&parallelInfo, npuGroup) {
+			// Dedup: groups of one parallel domain partition the ranks; if any
+			// rank is already assigned, this is the same group listed in
+			// another rank's topology file — skip it.
+			if rankAlreadyAssigned(assigned, npuGroup) {
 				continue
 			}
-			// Mark these ranks.
 			for _, rank := range npuGroup {
-				if parallelInfo[rank] == nil {
-					parallelInfo[rank] = make(map[int]bool)
-				}
+				assigned[rank] = true
 			}
 			sort.Ints(npuGroup)
 			groups = append(groups, npuGroup)
@@ -150,11 +167,11 @@ func getDetectionJobParallelInfo(rankSet map[int]bool, jsonPaths []string, targe
 	return groups
 }
 
-// checkRankParallelExist returns true if any rank in npuGroup already appears
-// in the parallelInfo tracking set.
-func checkRankParallelExist(parallelInfo *map[int]map[int]bool, npuGroup []int) bool {
+// rankAlreadyAssigned reports whether any rank of npuGroup is already assigned
+// to a group of this parallel domain.
+func rankAlreadyAssigned(assigned map[int]bool, npuGroup []int) bool {
 	for _, rank := range npuGroup {
-		if (*parallelInfo)[rank] != nil && len((*parallelInfo)[rank]) > 0 {
+		if assigned[rank] {
 			return true
 		}
 	}

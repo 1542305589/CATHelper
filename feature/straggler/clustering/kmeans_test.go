@@ -69,11 +69,11 @@ func TestDetectBimodal(t *testing.T) {
 }
 
 // min direction: baseline = max-mean cluster; the low cluster is flagged with
-// baseline/cluster ratio.
+// the unified cluster/baseline ratio (10/40 = 0.25 < 1/threshold = 0.5).
 func TestDetectMinDirection(t *testing.T) {
 	vals := []float64{40, 40, 40, 40, 40, 40, 10, 10}
 	res := Detect(vals, 2.0, false)
-	assertFlagged(t, res, map[int]float64{6: 4.0, 7: 4.0})
+	assertFlagged(t, res, map[int]float64{6: 0.25, 7: 0.25})
 }
 
 // Recursive replacement: the top-level anomaly cluster {40,40,60} recurses and

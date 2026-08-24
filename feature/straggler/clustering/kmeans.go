@@ -12,8 +12,10 @@
 //  4. kmeans++ initialization (first centroid = data[0], D² weighted sampling).
 //  5. Lloyd iteration (≤ 300 rounds, empty-cluster handling, converge 1e-9).
 //  6. Baseline cluster = direction extreme cluster (max → min-mean cluster;
-//     min → max-mean cluster); a cluster whose mean ratio exceeds the ratio
-//     threshold is anomalous.
+//     min → max-mean cluster). Score = cluster mean / baseline mean, unified
+//     for both directions; a cluster is anomalous when its score exceeds the
+//     ratio threshold (max direction) or falls below its reciprocal (min
+//     direction, e.g. < 0.5 with the default threshold 2.0).
 //  7. No anomalous cluster → exit.
 //  8. Recurse into anomalous clusters (depth ≤ 10); a deeper anomaly replaces
 //     the parent cluster, deeper silence keeps the parent.
@@ -39,7 +41,7 @@ const kmeansSeed int64 = 42
 // Result is one detected anomalous data point.
 type Result struct {
 	Index int     // index into the original input values
-	Ratio float64 // degradation ratio (cluster mean / baseline mean; min direction → baseline / cluster mean)
+	Ratio float64 // cluster mean / baseline mean, unified for both directions (max side: > 1, worse when larger; min side: < 1, worse when smaller)
 }
 
 // Detect finds anomalous points in values using recursive kmeans ratio
@@ -66,8 +68,9 @@ type DiagnoseEntry struct {
 // Diagnose runs one top-level kmeans level on values and reports EVERY point's
 // cluster, ratio and flag — the debug counterpart of Detect, showing why a
 // point was or wasn't flagged. Values ≤ 0 are filtered (Cluster = -1, Ratio 0).
-// Ratio is computed for every point (normal points sit near 1.0, filtered 0);
-// Flagged is true only when the ratio exceeds the threshold on the anomaly side.
+// Ratio is cluster mean / baseline mean for every point (normal points sit
+// near 1.0, filtered 0); Flagged is true when the ratio exceeds the ratio
+// threshold on the max side, or falls below its reciprocal on the min side.
 // It does not recurse, so the flagged set is the first-level decision only.
 func Diagnose(values []float64, ratioThreshold float64, highIsAnomaly bool) []DiagnoseEntry {
 	entries := make([]DiagnoseEntry, len(values))
@@ -105,14 +108,17 @@ func Diagnose(values []float64, ratioThreshold float64, highIsAnomaly bool) []Di
 		}
 		entries[i].Cluster = cid
 		m := clusterMeans[cid]
-		var ratio float64
-		if highIsAnomaly {
-			ratio = m / baseMean
-		} else {
-			ratio = baseMean / m
-		}
+		// Unified score: cluster mean / baseline mean for BOTH directions.
+		// The anomaly side differs: max direction flags ratios ABOVE the
+		// threshold, min direction flags ratios BELOW its reciprocal (e.g.
+		// < 0.5 with the default threshold 2.0).
+		ratio := m / baseMean
 		entries[i].Ratio = ratio
-		entries[i].Flagged = ratio > ratioThreshold
+		if highIsAnomaly {
+			entries[i].Flagged = ratio > ratioThreshold
+		} else {
+			entries[i].Flagged = ratio < 1.0/ratioThreshold
+		}
 	}
 	return entries
 }
@@ -145,8 +151,10 @@ func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly b
 		baseMean = math.SmallestNonzeroFloat64
 	}
 
-	// Step 6-7: baseline = direction extreme cluster; cluster mean ratio >
-	// threshold → anomalous cluster.
+	// Step 6-7: baseline = direction extreme cluster. Score = cluster mean /
+	// baseline mean (unified for both directions); max direction flags scores
+	// ABOVE the threshold, min direction flags scores BELOW its reciprocal
+	// (e.g. < 0.5 with the default threshold 2.0).
 	var anomalyClusters [][]int
 	var anomalyMeans []float64
 	for i, cl := range clusters {
@@ -154,17 +162,13 @@ func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly b
 			continue
 		}
 		m := clusterMean(cl, vals)
-		var ratio float64
+		var anomalous bool
 		if highIsAnomaly {
-			if m > baseMean {
-				ratio = m / baseMean
-			}
+			anomalous = m > baseMean && m/baseMean > threshold
 		} else {
-			if m < baseMean {
-				ratio = baseMean / m
-			}
+			anomalous = m < baseMean && m/baseMean < 1.0/threshold
 		}
-		if ratio > threshold {
+		if anomalous {
 			anomalyClusters = append(anomalyClusters, cl)
 			anomalyMeans = append(anomalyMeans, m)
 		}
@@ -188,12 +192,7 @@ func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly b
 			results = append(results, deeper...)
 			continue
 		}
-		var ratio float64
-		if highIsAnomaly {
-			ratio = anomalyMeans[i] / baseMean
-		} else {
-			ratio = baseMean / anomalyMeans[i]
-		}
+		ratio := anomalyMeans[i] / baseMean
 		for _, li := range cl {
 			results = append(results, Result{Index: indices[li], Ratio: ratio})
 		}

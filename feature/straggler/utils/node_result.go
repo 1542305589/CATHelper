@@ -81,6 +81,10 @@ type nodeAccumulator struct {
 // diagnostic scores too.
 func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error) {
 	includeAll := debug != nil
+	// Degraded mode: no parallel topology (group names not registered) — only
+	// cal has input data; comm/CPU/bubble are not judged and must not be
+	// reported as "normal" just because their data is absent.
+	calOnly := len(parallels) == 0
 	var metaRanks []int
 	if includeAll {
 		metaRanks = debug.ValidRanks
@@ -206,7 +210,20 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 		nodeResults = append(nodeResults, nr)
 	}
 
-	printNodeSummary(finalResult)
+	// Build comm group display labels ("tp[0,1]") so the stdout summary shows
+	// which parallel domain a slow group belongs to, not just its rank list.
+	commLabels := make(map[string]string, len(finalResult["comm"]))
+	for groupKey := range finalResult["comm"] {
+		ranks := stringToRanks(groupKey)
+		domain := findDomainForRanks(ranks, parallels)
+		if domain == "" {
+			commLabels[groupKey] = "[" + groupKey + "]"
+		} else {
+			commLabels[groupKey] = domain + "[" + groupKey + "]"
+		}
+	}
+
+	printNodeSummary(finalResult, calOnly, commLabels)
 	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}, nil
 }
 
@@ -250,13 +267,28 @@ func readRankMeta(rank int) rankMeta {
 			}
 		}
 	}
+	npuOK := false
 	if raw, err := os.ReadFile(filepath.Join(metricDir, "npu_info_"+strconv.Itoa(rank)+".json")); err == nil {
 		var ni struct {
 			ID int `json:"id"`
 		}
 		if json.Unmarshal(raw, &ni) == nil {
 			m.npuID = ni.ID
+			npuOK = true
 		}
+	}
+
+	// No host metadata (HOST_INFO table missing or empty in the source .db):
+	// fall back to a synthetic per-rank node identity so detected anomalies
+	// still appear in node_result instead of being silently dropped. Per-rank
+	// keys never merge distinct physical nodes incorrectly.
+	if m.hostname == "" {
+		m.hostname = fmt.Sprintf("node-%d", rank)
+	}
+	// No NPU metadata (NPU_INFO missing): use the rank as the NPU id so
+	// per-rank entries on the same node do not collide on id 0.
+	if !npuOK {
+		m.npuID = rank
 	}
 	return m
 }
@@ -305,20 +337,27 @@ func sortedNpuIDs(npus map[int]*NpuResult) []int {
 // Print helpers
 // ---------------------------------------------------------------------------
 
-func printNodeSummary(finalResult map[string]map[string]float64) {
+func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool, commLabels map[string]string) {
 	// Slow-CPU needs ≥2 physical nodes to be meaningful: hostUid-based trimming
 	// collapses a single node's ranks to identical values, so no straggler can
 	// be found. Skip its line entirely in that case.
-	cpuDetectable := physicalNodeCount() >= 2
+	cpuDetectable := PhysicalNodeCount() >= 2
+
+	// Degraded mode (no parallel topology, cal-only): state it explicitly and
+	// only report cal — the other categories have no input data, so "无异常"
+	// would be misleading.
+	if calOnly {
+		fmt.Printf("检测已降级为仅慢计算 (cal): 未注册组名,无并行拓扑;慢通信/慢CPU/Bubble 无数据,不做判定\n")
+	}
 
 	categories := []struct {
 		key, label string
 		skip       bool
 	}{
 		{"cal", "慢计算 (cal)", false},
-		{"comm", "慢通信 (comm)", false},
-		{"cpu", "慢CPU (cpu)", !cpuDetectable},
-		{"npu_bubble", "Bubble (npu_bubble)", false},
+		{"comm", "慢通信 (comm)", calOnly},
+		{"cpu", "慢CPU (cpu)", calOnly || !cpuDetectable},
+		{"npu_bubble", "Bubble (npu_bubble)", calOnly},
 	}
 
 	for _, cat := range categories {
@@ -337,17 +376,26 @@ func printNodeSummary(finalResult map[string]map[string]float64) {
 		sort.Strings(keys)
 		var parts []string
 		for _, k := range keys {
-			parts = append(parts, fmt.Sprintf("%s: %.2fx", k, data[k]))
+			label := k
+			if cat.key == "comm" {
+				// Show the parallel domain (e.g. "tp[0,1]") instead of a bare
+				// rank list like "0,1" — the group key alone is opaque.
+				if l, ok := commLabels[k]; ok {
+					label = l
+				}
+			}
+			parts = append(parts, fmt.Sprintf("%s: %.2fx", label, data[k]))
 		}
 		fmt.Printf("%s: 异常 (%d) %s\n", cat.label, len(data), strings.Join(parts, "; "))
 	}
 }
 
-// physicalNodeCount returns the number of distinct physical nodes, read from
+// PhysicalNodeCount returns the number of distinct physical nodes, read from
 // op_metric/host_info_{N}.json (hostName, falling back to hostUid). It scans
 // ALL rank metadata files, not just anomalous ones, so slow-CPU detectability
-// (needs ≥2 nodes) is judged on the whole system.
-func physicalNodeCount() int {
+// (needs ≥2 nodes) and the report's cross-node sections are judged on the
+// whole system.
+func PhysicalNodeCount() int {
 	metricDir := filepath.Join(config.FilePath, "op_metric")
 	entries, err := os.ReadDir(metricDir)
 	if err != nil {
