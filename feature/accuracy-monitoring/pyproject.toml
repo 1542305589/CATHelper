@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anomaly_middleware"
+version = "0.1.0"
+description = "vLLM 推理精度异常检测 ASGI 中间件（透明拦截 + 后台检测 + Prometheus 指标）"
+readme = "docs/README.md"
+requires-python = ">=3.8"
+license = { text = "Mulan PSL v2" }
+dependencies = [
+    "prometheus_client>=0.16",
+    "pyyaml>=5.4",
+    "numpy>=1.20",
+    "httpx>=0.24",
+    "colorlog>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "httpx>=0.24",
+    "anyio>=3.0",
+]
+
+[tool.setuptools]
+package-dir = {"anomaly_middleware" = "anomaly_middleware"}
+packages = ["anomaly_middleware","webui","tests"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
