@@ -1,0 +1,5 @@
+# straggler 构建/运行时产物（不入库）
+slowNodeDetection
+slownode_*
+straggler_output.json
+daemon_results/

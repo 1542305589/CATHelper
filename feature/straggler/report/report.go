@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/detector"
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
 )
 
 // ---------------------------------------------------------------------------
@@ -64,6 +67,11 @@ func GenerateReport(
 ) string {
 	var sb strings.Builder
 
+	// Degraded mode: no parallel topology (group names not registered). Only
+	// cal has input data — comm/CPU/bubble are not judged and must not be
+	// reported as "normal" just because their data is absent.
+	calOnly := len(parallels) == 0
+
 	// Header.
 	sb.WriteString(sepLine("慢节点检测报告", reportSep))
 	sb.WriteString(fmt.Sprintf("\n  数据目录: %s\n", inputPath))
@@ -72,14 +80,18 @@ func GenerateReport(
 
 	// Topology summary.
 	sb.WriteString(sepLine("并行域拓扑", 60))
-	for domain, groups := range parallels {
-		sb.WriteString(fmt.Sprintf("  %s: %d 个 Group\n", domain, len(groups)))
+	if calOnly {
+		sb.WriteString("  未注册组名,无并行拓扑(检测降级为仅慢计算)\n")
+	} else {
+		for domain, groups := range parallels {
+			sb.WriteString(fmt.Sprintf("  %s: %d 个 Group\n", domain, len(groups)))
+		}
 	}
 	sb.WriteString("\n")
 
 	// Detection summary.
 	sb.WriteString(sepLine("检测结果摘要", reportSep))
-	sb.WriteString(detectionSummary(detectionResult, validRanks, degradation))
+	sb.WriteString(detectionSummary(detectionResult, validRanks, degradation, calOnly))
 	sb.WriteString("\n")
 
 	// ZP_Kernel section.
@@ -89,26 +101,32 @@ func GenerateReport(
 		sb.WriteString("\n")
 	}
 
-	// ZP_Host section.
-	if hostData, ok := stepData["ZP_Host"]; ok {
-		abnormal := abnormalSingleRanks(detectionResult["cpu"])
-		sb.WriteString(metricSection("ZP_Host 耗时排序", hostData, abnormal))
-		sb.WriteString("\n")
+	// ZP_Host section. Host time is a NODE-level metric: ranks of one physical
+	// node share the host (detection smooths them by hostUid), so ranking raw
+	// per-rank values is meaningless. The section renders per-node aggregates
+	// and only appears with ≥2 physical nodes — the same gate the detection
+	// uses — otherwise cross-node comparison is impossible.
+	if !calOnly && utils.PhysicalNodeCount() >= 2 {
+		if hostData, ok := stepData["ZP_Host"]; ok {
+			sb.WriteString(hostSection(hostData, validRanks, inputPath))
+			sb.WriteString("\n")
+		}
 	}
 
-	// Communication sections.
-	sb.WriteString(commTotalSection(stepData, parallels))
-	sb.WriteString("\n")
-
-	for domain, groups := range parallels {
-		if domain == "pp" || domain == "embd" {
-			continue
-		}
-		colName := domain + "_Duration"
-		if commData, ok := stepData[colName]; ok {
-			abnormalGroups := abnormalCommGroups(detectionResult["comm"])
-			sb.WriteString(commSection(domain, groups, commData, abnormalGroups))
-			sb.WriteString("\n")
+	// Communication sections (skipped in degraded mode: no input data).
+	// Slow communication is compared PER GROUP, never per rank, so there is
+	// no per-rank "总通信时间" ranking — only the per-domain group tables.
+	if !calOnly {
+		for domain, groups := range parallels {
+			if domain == "pp" || domain == "embd" {
+				continue
+			}
+			colName := domain + "_Duration"
+			if commData, ok := stepData[colName]; ok {
+				abnormalGroups := abnormalCommGroups(detectionResult["comm"])
+				sb.WriteString(commSection(domain, groups, commData, abnormalGroups))
+				sb.WriteString("\n")
+			}
 		}
 	}
 
@@ -142,9 +160,10 @@ func metricSection(metricName string, data map[int]float64, abnormalRanks map[in
 	sb.WriteString(sepLine(metricName, 80))
 
 	top := sorted
-	bottom := sorted[max(0, len(sorted)-bottomN):]
+	var bottom []kv
 	if len(sorted) > topN+bottomN {
 		top = sorted[:topN]
+		bottom = sorted[len(sorted)-bottomN:]
 	}
 
 	var values []float64
@@ -179,10 +198,9 @@ func metricSection(metricName string, data map[int]float64, abnormalRanks map[in
 
 	if len(sorted) > topN+bottomN {
 		sb.WriteString(fmt.Sprintf("  ...  (省略 %d 个)\n", len(sorted)-topN-bottomN))
-	}
-
-	for i, kv := range bottom {
-		printRank(len(sorted)-len(bottom)+i, kv)
+		for i, kv := range bottom {
+			printRank(len(sorted)-len(bottom)+i, kv)
+		}
 	}
 
 	return sb.String()
@@ -263,16 +281,70 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 	return sb.String()
 }
 
-func commTotalSection(stepData map[string]map[int]float64, parallels map[string][][]int) string {
-	// Try to use ZP_Duration or individual domain durations.
-	data, ok := stepData["ZP_Duration"]
-	if !ok {
+// hostSection renders ZP_Host as a per-NODE table: ranks of one physical node
+// share the host, so the meaningful comparison is across nodes, not across
+// ranks. Each row is one physical node (hostUid from host_info_{N}.json),
+// showing min/mean/max of its ranks' ZP_Host. Returns "" when fewer than two
+// nodes have data (nothing to compare).
+func hostSection(data map[int]float64, ranks []int, inputPath string) string {
+	hostOf := detector.GetHostUidMapping(inputPath, ranks)
+
+	nodeVals := make(map[string][]float64)
+	for _, r := range ranks {
+		v, ok := data[r]
+		if !ok || v <= 0 {
+			continue
+		}
+		h := hostOf[r]
+		if h == "" {
+			h = "unknown"
+		}
+		nodeVals[h] = append(nodeVals[h], v)
+	}
+	if len(nodeVals) < 2 {
 		return ""
 	}
 
+	type nodeStat struct {
+		name       string
+		min, mean  float64
+		max        float64
+	}
+	hosts := make([]string, 0, len(nodeVals))
+	for h := range nodeVals {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+
+	var stats []nodeStat
+	var maxMean float64
+	for _, h := range hosts {
+		vals := nodeVals[h]
+		sort.Float64s(vals)
+		st := nodeStat{name: h, min: vals[0], max: vals[len(vals)-1]}
+		var sum float64
+		for _, v := range vals {
+			sum += v
+		}
+		st.mean = sum / float64(len(vals))
+		stats = append(stats, st)
+		if st.mean > maxMean {
+			maxMean = st.mean
+		}
+	}
+	if maxMean == 0 {
+		maxMean = 1
+	}
+
 	var sb strings.Builder
-	sb.WriteString(metricSection("总通信时间 (ZP_Duration)", data, nil))
-	_ = parallels
+	sb.WriteString(sepLine("ZP_Host 节点对比 (跨节点)", 80))
+	sb.WriteString(fmt.Sprintf("  %-24s  %8s  %8s  %8s  %s\n", "Node", "Min", "Mean", "Max", "柱状图"))
+	sb.WriteString(fmt.Sprintf("  %-24s  %8s  %8s  %8s  %s\n",
+		strings.Repeat("-", 24), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", barMaxWidth)))
+	for _, st := range stats {
+		sb.WriteString(fmt.Sprintf("  %-24s  %8s  %8s  %8s  %s\n",
+			st.name, fmtNs(st.min), fmtNs(st.mean), fmtNs(st.max), bar(st.mean, maxMean)))
+	}
 	return sb.String()
 }
 
@@ -280,6 +352,7 @@ func detectionSummary(
 	detectionResult map[string]map[string]float64,
 	validRanks []int,
 	degradation float64,
+	calOnly bool,
 ) string {
 	var sb strings.Builder
 
@@ -288,7 +361,9 @@ func detectionSummary(
 	sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8s  %s\n", "检测类型", "状态", "异常数", "异常详情"))
 	sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8s  %s\n", strings.Repeat("-", 22), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 30)))
 
-	// Ordered categories.
+	// Ordered categories. In degraded mode (no parallel topology) only cal has
+	// input data; the other categories are omitted instead of being reported
+	// as "normal" without data.
 	categories := []struct {
 		key, label string
 	}{
@@ -296,6 +371,9 @@ func detectionSummary(
 		{"comm", "慢通信 (comm)"},
 		{"cpu", "慢CPU (cpu)"},
 		{"npu_bubble", "Bubble (npu_bubble)"},
+	}
+	if calOnly {
+		categories = categories[:1]
 	}
 
 	for _, cat := range categories {
@@ -325,6 +403,10 @@ func detectionSummary(
 		}
 
 		sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8d  %s\n", cat.label, status, count, detailStr))
+	}
+
+	if calOnly {
+		sb.WriteString(fmt.Sprintf("  注: 未注册组名,无并行拓扑 — 检测降级为仅慢计算;慢通信/慢CPU/Bubble 无数据,本次不做判定。\n"))
 	}
 
 	return sb.String()
