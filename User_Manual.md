@@ -28,10 +28,13 @@ python feature/elastic-ep/examples/fault_tolerance_scale/scale_down_demo.py \
     --npu-ids 0,1,2,3 --catmonitor-host localhost --catmonitor-rest-port 9101 \
     --callback-port 9102 --advertise-url http://localhost:9102/fault_event --port 8006
 
-# 6.（可选）慢节点检测：CATMonitor 启用 straggler_output 后，定时跑 straggler CLI
+# 6.（可选）慢节点检测：CATMonitor 启用 straggler_output 后，跑 straggler
 cd feature/straggler && go build -o slowNodeDetection .
-./slowNodeDetection --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
-    --faultsub-url=http://localhost:9101 --baseline-hours=360 --detection-hours=1
+# 一次性模式（KPI 空间检测；或加 path=<profiler_dir> 联合 Profiler）
+./slowNodeDetection --kpi-jsonl-dir=/var/lib/catmonitor/straggler
+# 守护进程模式（aarch64 + Ascend，周期自动采集+检测，HTTP :8080）
+bash build.sh && ./slowNodeDetection --daemon \
+    --profiler-dir=/data/profiler --kpi-dir=/var/lib/catmonitor/straggler --interval=600
 ```
 
 ## 目录
@@ -291,35 +294,62 @@ Straggler 是两道防线慢节点检测器（独立 Go module，`feature/stragg
 
 ### 6.1 启用 CATMonitor KPI 输出（第一道数据来源）
 
-编辑 `catmonitor.yaml`，开启 `straggler_output`（替代 straggler 自带 `kpi_collect.sh`）：
+编辑 `catmonitor.yaml`，开启 `straggler_output`：
 
 ```yaml
 straggler_output:
   enabled: true
   data_dir: /var/lib/catmonitor/straggler   # 产出 straggler_kpi_{date}.jsonl
-  retention: 360h            # 保留 15 天（匹配基线窗口）
+  retention: 360h            # 保留 15 天（历史用于 10 秒聚合；空间检测只取最后一个聚合点）
   flush_interval: 60s
 ```
 
 daemon 启动后会持续写 `straggler_kpi_{YYYY-MM-DD}.jsonl`（每时刻含全部卡的 11 项 KPI）。
 
-### 6.2 运行 straggler 检测（CLI/定时）
+### 6.2 运行 straggler 检测（一次性 / 守护进程）
+
+**一次性模式**（手动按需运行，任意平台可编译）：
 
 ```bash
 cd feature/straggler
 go build -o slowNodeDetection .
-./slowNodeDetection \
-    --kpi-jsonl-dir=/var/lib/catmonitor/straggler \
-    --faultsub-url=http://localhost:9101 \
-    --baseline-hours=360 --detection-hours=1 \
-    [degradation=0.3]
+# 仅 KPI 空间检测（读最近 KPI 的最后一个聚合点）
+./slowNodeDetection --kpi-jsonl-dir=/var/lib/catmonitor/straggler
+# KPI + Profiler 联合（先 KPI，未命中则 fallback Profiler）
+./slowNodeDetection --kpi-jsonl-dir=/var/lib/catmonitor/straggler path=/data/profiler_output degradation=0.3
+# 仅 Profiler
+./slowNodeDetection path=/data/profiler_output degradation=0.3
 ```
 
-读最近 15 天 KPI → 第一道检测 → 报告（`npu_resource_detection_result.json` + 文本报告）+ 命中卡回注 faultsub。建议由 cron/定时器周期调度（如每 1h）。
+可选旋钮：`--space-ratio-threshold=2.0`（空间簇比例阈值，默认 2.0）、`--debug-output`（全量诊断输出）。
+
+**守护进程模式**（`--daemon`，常驻运行，需 aarch64 + Ascend NPU + CANN + `torch_npu`）：
+
+```bash
+cd feature/straggler
+bash build.sh          # 首次：架构检查 + 装 dyno/dynolog(.deb) + Python wheel + Go 工具链 + go build
+./slowNodeDetection --daemon \
+    --profiler-dir=/data/profiler \         # 必填：采集落盘根目录（传给 dyno --log-file）
+    --kpi-dir=/var/lib/catmonitor/straggler \  # 可选：缺省则每轮只跑 Profiler
+    --interval=600 \                       # 可选：检测周期（秒，≥60，默认 600）
+    --collect-wait=60 \                    # 可选：触发成功后等待采集完成秒数
+    --daemon-port=8080 \                   # 可选：HTTP 端口（默认 8080）
+    --degradation=0.3                      # 可选：灵敏度（与一次性模式同义）
+```
+
+每周期自动完成「dyno 触发采集 → python analyse 转 .db → 解析 → KPI+Profiler 检测」，结果落盘 `daemon_results/<start>/`，周期结束删除整个 `--profiler-dir`（防堆积）。HTTP 接口见下表，查询只看本次会话内存 store（重启归零）。`Ctrl-C`/`SIGTERM` 优雅退出。
+
+| 方法 & 路径 | 作用 |
+|---|---|
+| `GET /healthz` / `GET /status` | 存活探针 / 状态总览（state/interval/cycles/last_cycle/next_run_at） |
+| `GET /straggler/results/latest` / `/history?limit=N` / `/{id}` | 最近/全部历史/指定周期合并结果 JSON |
+| `GET /straggler/report/latest` / `/{id}` | 最近/指定周期 Profiler 文本报告 |
+| `POST /daemon/start` / `/pause` / `/trigger` | 恢复 / 暂停 / 立即补跑一轮（已有周期在跑 → 409） |
+| `POST /daemon/interval` | 改周期（body `{"interval_sec":300}`，60–86400） |
 
 ### 6.3 第二道 Profiler 检测（按需，独立）
 
-KPI 未发现异常但怀疑性能问题时，启用 Profiler：
+KPI 未发现异常但怀疑性能问题时，启用 Profiler（一次性 `path=` 或 daemon 模式由 dyno 自动采集）：
 
 ```bash
 ./slowNodeDetection path=/data/profiler_output degradation=0.3
@@ -330,9 +360,12 @@ KPI 未发现异常但怀疑性能问题时，启用 Profiler：
 
 > **慢CPU 检测机制**：从每张卡的 `.db` 文件 `HOST_INFO` 表读取 `hostUid`，将相同 hostUid 的卡归为同一物理节点，节点内截尾均值（去 min/max）预处理后均质化聚类，消除节点内差异暴露节点间差异；`HOST_INFO` 表缺失的卡跳过预处理。详见 [feature/straggler/DESIGN.md](feature/straggler/DESIGN.md)。
 
-### 6.4 回注 faultsub 与闭环
+### 6.4 守护进程模式部署要点
 
-`--faultsub-url` 非空时，straggler 把每个命中卡作为 `straggler_detected` 事件 POST 给 faultsub（`POST /faultsub/events`），由 faultsub 推送给订阅者（EEP/运维）。root_cause（thermal_throttle/network_link_issue/straggler/...）放在 `detail`，订阅者据此决策卡隔离/排查。
+- **前置条件**：训练进程须以 `MSMONITOR_USE_DAEMON=1` 启动（dyno 才能命中并触发采集）；Python 3.9–3.12 + `torch_npu`（`build.sh` 自动装 `mindstudio_monitor` wheel）。
+- **目录布局**：`--kpi-dir` 与 `--kpi-jsonl-dir` 共用同一读取逻辑——目录有 `node_config.json` 时按多节点子目录布局读，否则按平铺单节点读（顶层散放 jsonl）。`--kpi-dir` 应指向 CATMonitor 的 `straggler_output.data_dir`。
+- **查询只看本次会话**：daemon 重启后 store 清空，看不到历史；`/status` 的 `cycles_total`/`cycles_failed` 同样本进程内累计。
+- **结果消费**：v0.2.3 起不再回注 faultsub，命中慢卡经 daemon HTTP 接口或 `daemon_results/<start>/straggler_output.json` 消费。
 
 ---
 
@@ -398,7 +431,7 @@ kill -9 <worker_pid>
 | `faultsub.rules.*` | 各故障判定规则开关 |
 | `straggler_output.enabled` | 是否启用慢节点检测 KPI 文件输出（默认 false） |
 | `straggler_output.data_dir` | KPI 文件目录（默认 `/var/lib/catmonitor/straggler`） |
-| `straggler_output.retention` | KPI 文件保留期（默认 15 天，匹配基线窗口） |
+| `straggler_output.retention` | KPI 文件保留期（默认 15 天；历史用于 10 秒聚合，空间检测只取最后一个聚合点） |
 | `straggler_output.flush_interval` | 内存缓冲 flush 周期（默认 60s） |
 
 ### 8.2 端口一览
@@ -412,7 +445,7 @@ kill -9 <worker_pid>
 | `9102` | EEP 故障管理中心 | 接收 CATMonitor webhook |
 | `8006` | vLLM | 推理服务 + 容错 REST API |
 | `22867` | vLLM | 引擎健康 ZMQ PUB |
-| — | straggler CLI | 无监听端口；读 KPI 文件 + `--faultsub-url` 回注（定时调度） |
+| `8080` | straggler daemon | 守护进程 HTTP（查询 `/status`/`/straggler/*` + 控制 `/daemon/*`）；一次性模式无端口 |
 
 ---
 
@@ -428,12 +461,15 @@ kill -9 <worker_pid>
 | GPU/NPU/Chassis 无数据 | 对应命令缺失即优雅降级返回空，非错误；NPU 仍输出 `npu_num=0` |
 | 容错缩容失败 | 见 [feature/elastic-ep/Release_Notes.md §已知问题](feature/elastic-ep/Release_Notes.md)；冗余专家数须满足约束 |
 | 持续故障重复推送 | faultsub 为变迁驱动（仅出现/恢复推送）；如仍重复检查 `debounce_ms` 是否为 0 |
-| straggler 无 KPI 文件可读 | 检查 `straggler_output.enabled: true`；确认 `data_dir` 与 `--kpi-jsonl-dir` 一致；保留期内有数据 |
-| straggler 回注 faultsub 失败 | 检查 `--faultsub-url` 正确且 faultsub 已启用；faultsub 不可用时 straggler 仍出报告（best-effort 回注） |
-| straggler 构建失败（modernc.org/sqlite） | 首次 `go mod tidy` 拉取依赖；离线环境需预置模块缓存 |
+| straggler 无 KPI 文件可读 | 检查 `straggler_output.enabled: true`；确认 `data_dir` 与 `--kpi-jsonl-dir`/`--kpi-dir` 一致；保留期内有数据（目录有 `node_config.json` 时按多节点子目录布局读，顶层散放 jsonl 会被忽略） |
+| daemon 每轮失败 `error` 含 `processesMatched empty` | 训练进程未设 `MSMONITOR_USE_DAEMON=1`，dyno 没命中 → 检查训练启动参数 |
+| daemon 周期失败含 `python analyse` | `torch_npu` 未装或版本不匹配 → 重跑 `build.sh` 装 `mindstudio_monitor` wheel |
+| `POST /daemon/trigger` 返回 409 | 已有周期在跑（single-flight），稍后再试 |
+| daemon 查不到历史结果 | 查询只看本次会话内存 store，daemon 重启后清空，不读磁盘历史 |
+| straggler 构建失败（modernc.org/sqlite） | 首次 `go mod tidy` 拉取依赖；离线环境需预置模块缓存；daemon 模式需先 `bash build.sh`（aarch64） |
 
 > 底座更多排错见 [CATMonitor/docs/User_Manual.md §11](CATMonitor/docs/User_Manual.md)，EEP 已知问题见 [feature/elastic-ep/Release_Notes.md](feature/elastic-ep/Release_Notes.md)，Straggler 见 [feature/straggler/README.md](feature/straggler/README.md)。
 
 ---
 
-*文档版本：v2.0 · 对应 CATHelper v0.2.2*
+*文档版本：v2.1 · 对应 CATHelper v0.2.3*

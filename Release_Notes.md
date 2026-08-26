@@ -4,6 +4,54 @@
 
 ---
 
+## v0.2.3
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.3 |
+| 发布时间 | 2026-08-26 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器（daemon 模式需 aarch64 + Ascend NPU + CANN） |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**）+ 上层特性 Elastic EP v0.1.0（**版本号不变**）+ Straggler 慢节点检测 v0.2.2 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.2 基础上，合入 `straggler-detection` 分支（30+ 提交）对 Straggler 特性做重大升级：新增**常驻守护进程模式（daemon）**、KPI 检测算法重构为纯空间维度、新增 `build.sh` 一键构建、引入 msmonitor 子模块。**底座 CATMonitor 与 EEP 版本号不变**，仅 Straggler 由 v0.2.1 升至 v0.2.2。
+
+### 主要变更
+
+#### 上层特性 — Straggler 慢节点检测 v0.2.2
+
+- **常驻守护进程模式（`--daemon`）**：新增 `daemon/` 包（`daemon.go`/`dyno.go`/`server.go`/`store.go`/`types.go`），周期性自动完成「触发采集（dynolog/dyno）→ 转 .db（python analyse）→ 解析 → KPI+Profiler 检测」全链路，结果通过 HTTP 查询与运维控制，适合接入手管/调度系统持续巡检。HTTP 接口：`GET /healthz`/`/status`/`/straggler/results/{latest,history,{id}}`/`/straggler/report/{latest,{id}}`、`POST /daemon/{start,pause,interval,trigger}`（默认端口 `:8080`）。每周期结果落盘 `daemon_results/<start>/`，周期结束删除整个 `--profiler-dir` 防堆积；查询只看本次会话内存 store（重启归零）。
+- **KPI 检测算法重构（resource 模块）**：移除时间维度、历史基线、检测窗口、根因定界（删除 `emit.go`/`fusion.go`/`rootcause.go`/`time_detector.go`/`baseline.go`），异常**完全由空间维度 peer 对比**（取最后一个聚合点，同节点卡互比）判定；空间检测统一走共享 `clustering` 包的 kmeans 比例检测（双方向各检一次，标记数少的为异常簇）；新增 `utils/node_result.go` 节点级结果聚合。
+- **共享聚类包 `clustering/kmeans.go`**：KPI 空间检测与 Profiler 均质化聚类共用同一 kmeans 比例算法（z-score 标准化 + 肘部法选 k + kmeans++ Lloyd 迭代，固定种子结果确定）。
+- **移除 faultsub 回注**：移除 `--faultsub-url` 参数及向 faultsub 回注 `straggler_detected` 事件的逻辑（与守护进程结果上报重复）。命中慢卡不再回注 faultsub，改由 daemon 的 HTTP 接口或结果文件消费。
+- **CLI 参数变更（破坏性）**：移除 `--faultsub-url`/`--baseline-hours`/`--detection-hours`/`--space-method`/`--space-z-threshold`/`--time-z-threshold`/`--time-weight`/`--no-trend`/`--no-fallback`/`--always-profiling` 等旧 flag；新增 `--space-ratio-threshold`（空间簇比例阈值，默认 2.0，独立旋钮）、`--debug-output`（全量数据诊断）、守护进程参数 `--profiler-dir`/`--kpi-dir`/`--daemon-port`/`--interval`/`--collect-wait`。
+- **一键构建 `build.sh`**（aarch64 必需）：架构检查 → 安装 dyno/dynolog（`.deb`，系统包管理器）→ Python 版本检查（3.9–3.12）→ 安装 `mindstudio_monitor` wheel → Go 工具链（缺失/过旧从阿里云镜像安装）→ `CGO_ENABLED=0 go build`。Go 编译不再依赖 dyno/dynolog 二进制（已无 embed），任何平台可出包；daemon 模式运行时才要求 aarch64 主机装好 dyno/dynolog。
+- **msmonitor 子模块**：新增 `feature/straggler/3rdparty/msmonitor`（Ascend/msmonitor，`build.sh` 安装流程引用）。
+- **Bug 修复与测试修正**：修复并行拓扑去重失效（tp 重复组）、`idToXp` 键空间错误导致慢通信不可检测、dataparse 通信组 Duration 反向映射键空间错位、node_result 为空与报告排序重复、dyno 采集判定与 dump 目录定位、守护进程暂停期间定时器继续走导致恢复后提前触发（`f0d456e`）；修正 `TestSpaceFreqSingleDownclock` 期望为原始比 0.444（`0169472`）。
+- **文档同步**：`feature/straggler/` 下 README/DESIGN/DESIGN_NPU_RESOURCE/SPEC/straggler_combination_DESIGN 全面重写；根目录 `README.md`/`SPEC.md`/`User_Manual.md` 同步新算法、daemon 模式、新 CLI 与构建流程。
+
+#### 底座 — CATMonitor / 上层特性 — EEP
+
+- **无变更**：底座 CATMonitor（v0.3.3）与 EEP（v0.1.0）代码与版本号均不变，仅根目录文档同步 Straggler 新特性描述。
+
+### 测试
+
+- **Straggler（独立 Go module，Go 1.23.4）**：`go build`（CGO_ENABLED=0，产物 14.9MB）/`go vet ./...`/`go test ./...` 全绿，clustering + resource 包测试通过（含此前失败的 `TestSpaceFreqSingleDownclock`，已随 `0169472` 修正）。
+- **合并验证**：本地 `main` ← `origin/straggler-detection` 试合并，16 处冲突全部位于 `feature/straggler/`（10 内容冲突 + 6 modify/delete），按"以 straggler-detection 为准"对齐解决；elastic-ep 与 accuracy-monitoring 零冲突。验证未推送至远端前已完成。
+
+### 已知限制
+
+1. **daemon 模式需 aarch64 真机**：依赖 Ascend NPU + CANN + `torch_npu` + `mindstudio_monitor` wheel，dyno/dynolog 须由 `build.sh` 装到系统 PATH；跨平台（amd64/windows）编译产物仅支持一次性模式。
+2. **KPI 时间维度已移除**：仅靠空间 peer 对比判定异常，无历史基线兜底；单节点在场卡 < 2 时该节点 score=0；`aicore_freq` 轻度降频（< 空间簇比例阈值 2.0×）不被标记。
+3. **回注 faultsub 已移除**：命中慢卡不再经 faultsub 闭环，需通过 daemon HTTP 接口或 `straggler_output.json` 自行消费。
+4. **msmonitor 子模块需初始化**：克隆仓库后需 `git submodule update --init feature/straggler/3rdparty/msmonitor`（`build.sh` 引用），Go 编译本身不依赖。
+5. **未推送到远端**：本次发布暂在本地完成。
+
+---
+
 ## v0.2.2
 
 | 项目 | 说明 |

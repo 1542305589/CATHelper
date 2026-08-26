@@ -23,7 +23,7 @@ CATHelper 采用"**底座 + 上层特性**"的分层架构：
 │   │  Elastic EP (EEP)    │   │  Straggler 慢节点检测     │   │
 │   │  推理卡级弹性容错     │   │  KPI 资源检测 + Profiling │   │
 │   └──────────┬───────────┘   └──────────┬───────────────┘   │
-│              │ 故障订阅(Webhook)        │ KPI 文件 + 事件回注 │
+│              │ 故障订阅(Webhook)        │ KPI 文件 + 守护进程 HTTP │
 ├──────────────┼──────────────────────────┼──────────────────┤
 │              ▼                          ▼                    │
 │   底座 — CATMonitor (CATMonitor/)                            │
@@ -37,17 +37,17 @@ CATHelper 采用"**底座 + 上层特性**"的分层架构：
 ```
 
 - **底座（CATMonitor）**：成熟的全栈指标采集守护进程，提供故障信息的采集、判定与对外推送能力，供上层特性消费。
-- **上层特性**：基于底座的指标/故障信息，面向特定高可用场景实现容错恢复与性能劣化检测逻辑。当前已交付 **EEP**（推理卡级弹性容错，v0.1.0）与 **Straggler 慢节点检测**（v0.2.1）。
+- **上层特性**：基于底座的指标/故障信息，面向特定高可用场景实现容错恢复与性能劣化检测逻辑。当前已交付 **EEP**（推理卡级弹性容错，v0.1.0）与 **Straggler 慢节点检测**（v0.2.2）。
 
 ### 1.3 版本
 
 | 项目 | 说明 |
 |------|------|
-| 当前版本 | v0.2.2 |
+| 当前版本 | v0.2.3 |
 | 底座版本 | CATMonitor v0.3.3 |
 | EEP 版本 | Elastic EP v0.1.0 |
-| Straggler 版本 | Straggler 慢节点检测 v0.2.1 |
-| 平台支持 | Linux (x86_64)，NPU 容错/检测特性需华为昇腾 A3 服务器 |
+| Straggler 版本 | Straggler 慢节点检测 v0.2.2 |
+| 平台支持 | Linux (x86_64)，NPU 容错/检测特性需华为昇腾 A3 服务器（straggler daemon 模式需 aarch64 + Ascend NPU + CANN） |
 | 许可证 | Apache-2.0 |
 
 ---
@@ -168,12 +168,14 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 
 ### 4.1 功能能力
 
-两道防线检测体系：
+两道防线检测体系，既支持一次性手动运行，也支持**常驻守护进程模式**（`--daemon`）周期自动采集+检测，结果经 HTTP 查询与控制：
 
 | 防线 | 输入 | 方法 | 输出 |
 |------|------|------|------|
-| 第一道（KPI 资源检测） | NPU KPI 时序（15 天基线 + 1h 检测窗） | 时间×空间双维 Z-score + 二维交叉验证 + 根因定界 | JSON + 文本报告 |
+| 第一道（KPI 资源检测） | NPU KPI 时序（取最后一个聚合点） | 空间 peer 对比（同节点卡互比，共享 kmeans 比例检测，无历史基线/检测窗口） | JSON + stdout 报告 |
 | 第二道（Profiler 检测） | Ascend PyTorch Profiler `.db`（按需） | 均质化聚类：慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble | JSON + 文本报告 |
+
+两道结果合并为一份 `straggler_output.json`（只跑到的维度才有对应键）。守护进程模式默认端口 `:8080`，提供 `GET /status`/`/straggler/results/{latest,history,{id}}`/`/straggler/report/{latest,{id}}` 与 `POST /daemon/{start,pause,interval,trigger}`。
 
 ### 4.2 检测指标与底座覆盖
 
@@ -181,19 +183,21 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 
 ### 4.3 与底座的整合
 
-- **数据接入（第一道）**：CATMonitor 经 opt-in 的 `stragglerout` 模块输出专用 KPI 时序文件 `straggler_kpi_{date}.jsonl`（按时刻×按卡聚合，保留 15 天），straggler CLI 读该文件替代自带 `kpi_collect.sh`。
-- **结果回注**：straggler 检测命中后，把慢卡作为 `straggler_detected` 事件 POST 给 faultsub（`POST /faultsub/events` ingest 端点），由 faultsub 推送给订阅者（EEP/运维），触发卡隔离/排查。闭环"采集→检测→响应"。
+- **数据接入（第一道）**：CATMonitor 经 opt-in 的 `stragglerout` 模块输出专用 KPI 时序文件 `straggler_kpi_{date}.jsonl`（按时刻×按卡聚合，保留 15 天），straggler 读该文件做空间 peer 对比。
+- **守护进程模式**：straggler 以 `--daemon` 常驻运行，周期性自动完成「dyno 触发采集 → python analyse 转 .db → 解析 → KPI+Profiler 检测」，结果落盘 `daemon_results/<start>/` 并经 HTTP 查询/控制，适合运维/调度系统持续巡检。每周期 KPI 与 Profiler 同时检测（未提供 `--kpi-dir` 时只跑 Profiler）。
+- **结果消费**：v0.2.3 起不再向 faultsub 回注 `straggler_detected` 事件，命中慢卡由 daemon HTTP 接口或 `straggler_output.json` 自行消费。
 - **第二道独立**：Profiler `.db` 属应用级数据，CATMonitor 不采集，straggler 保留独立读取。
 
-### 4.4 root_cause → 动作映射
+### 4.4 异常指标 → 建议动作映射
 
-| straggler root_cause | 建议动作 |
+| straggler 命中指标/类别 | 建议动作 |
 |---|---|
-| thermal_throttle / cooling_insufficient | 排查散热/风道 |
-| forced_downclock | 排查驱动/固件频率策略 |
-| network_link_issue / network_packet_loss | 排查光模块/光纤/CRC |
-| straggler | 触发 Profiler 精查 或 卡隔离 |
-| hardware_fault | 隔离卡，硬件诊断 |
+| `temp`（温度异常） / `power`（功耗异常） | 排查散热/风道 |
+| `aicore_freq`（频率降档） | 排查驱动/固件频率策略 |
+| `tx_bandwidth` / `rx_pfc_pkt` / `roce_*`（通信类异常） | 排查光模块/光纤/CRC |
+| `hbm_*`（HBM 带宽/使用率异常） | 排查 HBM 负载/容量 |
+| 慢计算 `cal` / 慢CPU `cpu` / Bubble `npu_bubble` | 触发 Profiler 精查 或 卡隔离 |
+| 慢通信 `comm` | 排查通信拓扑/链路 |
 
 整合设计详见 [feature/straggler/straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)。
 
@@ -205,7 +209,7 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 |------|------|------|
 | CATMonitor 底座 | 已交付 (v0.3.3) | 全栈采集 + 健康度 + Prometheus + 故障订阅 + KPI 输出 |
 | Elastic EP | 已交付 (v0.1.0) | 推理卡级弹性容错，已与 CATMonitor 整合 |
-| Straggler 慢节点检测 | 已交付 (v0.2.1) | 两道防线检测，第一道接入 CATMonitor + 回注 faultsub |
+| Straggler 慢节点检测 | 已交付 (v0.2.2) | 两道防线检测，第一道接入 CATMonitor + 守护进程模式（--daemon） |
 | SGLang 支持 | 规划中 | EEP 后续计划支持 SGLang 框架 |
 | 真机验证 | 进行中 | NPU 真实采集 / Profiler 解析 / 端到端链路在昇腾 A3 复测 |
 
@@ -217,10 +221,10 @@ CATHelper 设计为"方便被集成"：
 
 - **作为整体部署**：底座 daemon + EEP 容错框架 + 外部故障管理中心 + straggler 检测器协同运行（见 [User_Manual.md](User_Manual.md)）。
 - **底座独立集成**：CATMonitor 可作为独立指标采集组件被任意监控系统通过 Prometheus `/metrics` 或 JSONL 集成。
-- **故障信息集成**：第三方故障管理者可按 faultsub 订阅契约（REST + Webhook）接入 CATMonitor 的故障事件流；外部检测器可经 `POST /faultsub/events` 回注命中事件。
-- **KPI 数据集成**：第三方检测器可消费 `stragglerout` 输出的 KPI 时序文件，或按 faultsub 事件契约接入。
+- **故障信息集成**：第三方故障管理者可按 faultsub 订阅契约（REST + Webhook）接入 CATMonitor 的故障事件流；`POST /faultsub/events` ingest 端点仍可接收外部检测器回注的命中事件（v0.2.3 起 straggler 自身不再使用该端点）。
+- **KPI 数据集成**：第三方检测器可消费 `stragglerout` 输出的 KPI 时序文件，或经 straggler daemon 的 HTTP 接口（`/straggler/results/*`）查询检测结果。
 - **特性定制**：上层特性可基于底座的故障订阅/KPI 输出能力开发专用检测/容错逻辑。
 
 ---
 
-*文档版本：v2.0 · 对应 CATHelper v0.2.2*
+*文档版本：v2.1 · 对应 CATHelper v0.2.3*
