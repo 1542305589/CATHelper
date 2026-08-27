@@ -116,3 +116,21 @@ type cycleSummary struct {
 type historyResponse struct {
 	Cycles []*cycleSummary `json:"cycles"`
 }
+
+// opMetricViewResponse is the aggregated op_metric view served by
+// /straggler/op_metric/latest and /straggler/op_metric/{id}: ranks → parsed
+// per-rank files.
+type opMetricViewResponse struct {
+	Cycle int                     `json:"cycle"`
+	Dir   string                  `json:"dir"`
+	Ranks map[string]opMetricRank `json:"ranks"`
+}
+
+// opMetricRank is one rank's three op_metric artifacts. group_info/host_info
+// are the JSON files as parsed; global_rank is the CSV turned into a JSON
+// object (single row) or array (multiple rows).
+type opMetricRank struct {
+	GroupInfo  map[string]any `json:"group_info"`
+	HostInfo   map[string]any `json:"host_info"`
+	GlobalRank any            `json:"global_rank"`
+}

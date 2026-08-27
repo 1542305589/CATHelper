@@ -241,6 +241,18 @@ func (d *Daemon) runCycle(id int) {
 			d.logf("cycle %d copy report: %v", cr.ID, err)
 		}
 	}
+
+	// 9. Copy op_metric/ into the archive dir as the durable detector-input
+	//    snapshot (group_info_*.json, host_info_*.json, global_rank_*.csv).
+	//    cleanupDump (deferred below) removes the whole --profiler-dir, so
+	//    without this copy the per-rank topology + metric CSVs are gone every
+	//    cycle. Best effort — detection already produced cr.Report/Result.
+	srcOpMetric := filepath.Join(root, "op_metric")
+	if fileExistsDir(srcOpMetric) {
+		if err := copyDir(srcOpMetric, archive); err != nil {
+			d.logf("cycle %d copy op_metric: %v", cr.ID, err)
+		}
+	}
 }
 
 // detectKPI reads the latest KPI data from --kpi-dir and runs the same
@@ -429,6 +441,35 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0644)
+}
+
+// copyDir recursively copies src into dst (dst/src's basename is created).
+// Errors are collected per-file; a non-nil error is returned only when the
+// top-level src cannot be walked — individual file failures do not abort the
+// copy so a partial op_metric still survives.
+func copyDir(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(dst, info.Name())
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	return filepath.Walk(src, func(path string, fi os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		out := filepath.Join(target, rel)
+		if fi.IsDir() {
+			return os.MkdirAll(out, fi.Mode())
+		}
+		return copyFile(path, out)
+	})
 }
 
 // cleanupDump removes the entire --profiler-dir at the end of every cycle,
