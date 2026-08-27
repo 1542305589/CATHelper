@@ -197,6 +197,12 @@ func (d *Daemon) runCycle(id int) {
 	cr.DBs = len(dbFiles)
 
 	// 4. Parse (StartProcess — not DataParsing, which os.Exit's on zero files).
+	// Reset the per-path sync.Once dedup table: it is a package-level global
+	// keyed by absolute path, and cleanupDump removed --profiler-dir last
+	// cycle, so without a reset the stale Once objects make this cycle's
+	// group_info_/host_info_ JSON writes no-ops → topology lost → slow
+	// comm/CPU/bubble detection silently drops. One-shot mode is unaffected.
+	dataparse.ResetFileWriteOnce()
 	if err := dataparse.StartProcess(dbFiles, root); err != nil {
 		cr.Error = fmt.Sprintf("StartProcess: %v", err)
 		return
