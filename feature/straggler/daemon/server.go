@@ -31,6 +31,7 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("GET /straggler/op_metric/{id}/{file}", d.handleOpMetricFile)
 	mux.HandleFunc("POST /daemon/start", d.handleDaemonStart)
 	mux.HandleFunc("POST /daemon/pause", d.handleDaemonPause)
+	mux.HandleFunc("POST /daemon/stop", d.handleDaemonStop)
 	mux.HandleFunc("POST /daemon/interval", d.handleDaemonInterval)
 	mux.HandleFunc("POST /daemon/trigger", d.handleDaemonTrigger)
 	return &http.Server{Addr: fmt.Sprintf(":%d", d.cfg.Port), Handler: mux}
@@ -349,6 +350,15 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "triggered"})
+}
+
+// handleDaemonStop requests a graceful daemon shutdown: Run's select sees the
+// closed stopCh and stops the HTTP server, waits for an in-flight cycle, and
+// kills the dynolog child we spawned. The response is flushed before the
+// server shuts down.
+func (d *Daemon) handleDaemonStop(w http.ResponseWriter, r *http.Request) {
+	d.Stop()
+	writeJSON(w, map[string]string{"status": "stopping"})
 }
 
 func toCycleSummary(c *CycleResult) *cycleSummary {
