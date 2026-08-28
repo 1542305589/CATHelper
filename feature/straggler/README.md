@@ -216,6 +216,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,NPU_CARD_AICORE_UTIL
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 检测周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
+| `--profiler-iterations` | int | 否 | 5 | dyno nputrace 采集迭代数（传给 dyno 的 `--iterations`） |
 
 `--daemon` 模式用法与 HTTP 接口详见[五、守护进程模式](#五守护进程模式常驻检测)。`degradation`、`--debug-output` 在该模式下语义不变（作用于每轮检测）。
 
@@ -275,6 +276,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
     --kpi-dir=/data/kpi \             # 可选：KPI 数据目录（CATMonitor JSONL；缺省则只跑 Profiler）
     --interval=600 \                  # 可选：检测周期（秒，≥60）
     --collect-wait=60 \               # 可选：触发成功后等待采集完成的秒数
+    --profiler-iterations=5 \         # 可选：dyno 采集迭代数（默认 5）
     --daemon-port=8080 \              # 可选：HTTP 端口
     --degradation=0.3                 # 可选：灵敏度（与一次性模式同义）
 ```

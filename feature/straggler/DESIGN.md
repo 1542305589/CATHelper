@@ -357,6 +357,7 @@ go run . --daemon \
     --profiler-dir=/home/nf/data \  # profiler 采集落盘根目录（必填；即传给 dyno 的 --log-file）
     [--kpi-dir=/home/nf/kpi] \      # KPI 数据目录（可选；CATMonitor JSONL，同 --kpi-jsonl-dir 语义；缺省只跑 Profiler）
     [--collect-wait=60] \           # dyno 触发成功后的等待秒数，默认 60
+    [--profiler-iterations=5] \     # dyno nputrace 采集迭代数，默认 5（传给 dyno 的 --iterations）
 ```
 
 `--daemon` 进入常驻模式：从 PATH 解析 dyno/dynolog 并拉起 dynolog、启动 HTTP 服务，随后等待一个 interval 再开始周期循环（首个周期不在启动时立即执行）。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
@@ -371,9 +372,10 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
 
 2. 发起采集（每周期）：
    dyno --certs-dir NO_CERTS nputrace \
-        --start-step -1 --iterations 5 \
+        --start-step -1 --iterations <N> \
         --activities NPU,CPU --profiler-level Level0 \
         --msprof-tx --export-type Db --log-file <profiler-dir>
+   # N = 守护进程 CLI 的 --profiler-iterations，默认 5
    # dyno 自身的参数名就是 --log-file；守护进程 CLI 用 --profiler-dir 指同一路径
 
 3. 解析 dyno stdout 中的 JSON（形如 "response = {...}"；stdout 还带前导
@@ -392,7 +394,7 @@ profiler 数据由 dynolog（NPU 版）采集；vllm 服务进程需 `export MSM
    processesMatched 为空          -> 目标进程未匹配（vllm 未运行或未设
                                       MSMONITOR_USE_DAEMON=1），周期失败并提示
 
-4. 固定等待 --collect-wait（默认 60s），让 --iterations 个迭代完成落盘
+4. 固定等待 --collect-wait（默认 60s），让 --iterations（默认 5，--profiler-iterations 可调）个迭代完成落盘
 
 5. 数据目录 = **整个 --profiler-dir 根目录**（不是某个 rank 子目录）。dyno 在根下
    **每个 rank 写一个 master_<pid>_<ts>_ascend_pt 子目录**，所以根目录就是本轮全部
