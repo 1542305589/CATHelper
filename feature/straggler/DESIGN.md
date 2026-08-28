@@ -337,10 +337,10 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 │  ├ POST /daemon/start             │  ├ StartProcess 解析       │
 │  ├ POST /daemon/pause             │  ├ KPI 读取 + 检测         │
 │  ├ POST /daemon/interval          │  └ detect + report         │
-│  └ POST /daemon/trigger           │        │                   │
-│         │                         │        v                   │
-│         └──── 控制命令 ───────────>│  结果 JSON 落盘            │
-│                                   │  （查询接口的数据源）       │
+│  ├ POST /daemon/trigger           │        │                   │
+│  └ POST /daemon/stop              │        v                   │
+│         │                         │  结果 JSON 落盘            │
+│         └──── 控制命令 ───────────>│  （查询接口的数据源）       │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -487,10 +487,12 @@ POST /daemon/pause  -> paused = true（进行中的周期自然跑完，不再�
 POST /daemon/start  -> paused = false + 重置 ticker（interval 后触发下一周期）
 POST /daemon/interval -> 校验 [60, 86400] 秒 -> 更新 interval + 重置 ticker
 POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
+POST /daemon/stop   -> 关闭 stopCh -> Run 走 shutdown（停 HTTP + 等周期结束 + 杀 dynolog + 删除 daemon_results/ 全部落盘结果）
 ```
 
 - 所有状态变更经同一把 mutex；周期执行本身不持锁（长任务不阻塞 HTTP）
-- 优雅退出：SIGINT/SIGTERM -> `http.Server.Shutdown` + 停止 ticker + 等待进行中周期结束（超时 10 分钟）
+- 优雅退出：SIGINT/SIGTERM -> `http.Server.Shutdown` + 停止 ticker + 等待进行中周期结束（超时 10 分钟）+ 杀掉拉起的 dynolog（保留落盘结果）
+- `POST /daemon/stop`：在上述基础上再删除 `daemon_results/`（所有周期 dump_dir 的落盘结果一并清掉）
 
 ### HTTP API
 
@@ -507,6 +509,7 @@ POST /daemon/trigger -> 立即执行一个周期；若正在运行返回 409
 | GET | `/straggler/report/{id}` | 指定周期的文本报告（`text/plain`） |
 | POST | `/daemon/start` | 恢复循环 |
 | POST | `/daemon/pause` | 暂停循环 |
+| POST | `/daemon/stop` | 优雅关闭守护进程（停 HTTP + 等周期结束 + 杀 dynolog + 删除 daemon_results/ 全部落盘结果） |
 | POST | `/daemon/interval` | 修改循环周期 |
 | POST | `/daemon/trigger` | 立即触发一个周期 |
 

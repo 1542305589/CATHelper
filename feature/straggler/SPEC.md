@@ -532,6 +532,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | `GET /straggler/report/{id}` | 指定周期文本报告 | 200 text/plain | 400 id 非法 / 404 无该周期 / 404 该周期无报告 |
 | `POST /daemon/start` | 恢复运行 | 200 `{"state":"running"}` | — |
 | `POST /daemon/pause` | 暂停（在跑周期跑完） | 200 `{"state":"paused"}` | — |
+| `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | 200 `{"status":"stopping"}` | — |
 | `POST /daemon/interval` | 改周期 | 200 `{"interval_sec":N}` | 400 越界 [60,86400] / body 非法 |
 | `POST /daemon/trigger` | 立即补跑一轮 | 200 `{"status":"triggered"}` | 409 已有周期在跑 / 已暂停 |
 

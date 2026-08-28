@@ -304,6 +304,7 @@ bash build.sh          # 首次构建（见九、构建与部署）
 | `GET /straggler/report/{id}` | 指定周期 id 的 Profiler 文本报告（text/plain） | — |
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
 | `POST /daemon/pause` | 暂停（在跑的周期跑完，不再排新的） | — |
+| `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
 | `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
 
@@ -323,6 +324,7 @@ curl -s -X POST localhost:8080/daemon/pause
 curl -s -X POST localhost:8080/daemon/trigger
 curl -s -X POST localhost:8080/daemon/interval -d '{"interval_sec": 300}'
 curl -s -X POST localhost:8080/daemon/start
+curl -s -X POST localhost:8080/daemon/stop
 ```
 
 **`GET /status` 响应示例**：

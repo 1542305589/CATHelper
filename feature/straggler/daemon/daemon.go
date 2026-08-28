@@ -34,6 +34,9 @@ type Daemon struct {
 	cycleInFlight bool
 	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
 	dynolog       *exec.Cmd     // dynolog child to kill on shutdown (nil = reusing existing)
+	stopOnce      sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
+	stopCh        chan struct{} // closed by POST /daemon/stop to request graceful shutdown
+	removeResults bool          // set by Stop(): delete all daemon_results/ on shutdown
 }
 
 // New creates a Daemon. detect is the shared profiler pipeline
@@ -55,6 +58,7 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
 		state:    "running",
 		interval: cfg.Interval,
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -110,6 +114,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			return d.shutdown(srv)
+		case <-d.stopCh:
 			return d.shutdown(srv)
 		case err := <-srvErr:
 			return err
@@ -394,6 +400,13 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 		_ = d.dynolog.Process.Kill()
 		_, _ = d.dynolog.Process.Wait()
 	}
+	if d.removeResults {
+		if err := os.RemoveAll("daemon_results"); err != nil {
+			d.logf("remove daemon_results: %v", err)
+		} else {
+			d.logf("removed all daemon_results (dump_dir) files")
+		}
+	}
 	d.logf("daemon stopped")
 	return nil
 }
@@ -458,6 +471,20 @@ func (d *Daemon) Trigger() error {
 	d.startCycle()
 	d.resetTimer()
 	return nil
+}
+
+// Stop requests a graceful shutdown of the daemon: Run's select observes the
+// closed stopCh and runs shutdown (HTTP server close, in-flight cycle wait,
+// dynolog child kill). Idempotent — repeated calls are no-ops. All archived
+// result files under daemon_results/ (each cycle's dump_dir) are removed as
+// part of the shutdown.
+func (d *Daemon) Stop() {
+	d.stopOnce.Do(func() {
+		d.mu.Lock()
+		d.removeResults = true
+		d.mu.Unlock()
+		close(d.stopCh)
+	})
 }
 
 // stopTimer stops the cycle timer, draining any stale fire so a later Reset
