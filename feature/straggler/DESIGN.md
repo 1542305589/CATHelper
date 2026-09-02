@@ -352,13 +352,26 @@ go run . path=/data/dir [degradation=0.3] ...
 
 # 守护进程模式（无需 path=，数据目录来自每周期采集）
 go run . --daemon \
-    [--daemon-port=8080] \          # HTTP 监听端口
-    [--interval=600] \              # 循环周期（秒），默认 600
-    --profiler-dir=/home/nf/data \  # profiler 采集落盘根目录（必填；即传给 dyno 的 --log-file）
-    [--kpi-dir=/home/nf/kpi] \      # KPI 数据目录（可选；CATMonitor JSONL，同 --kpi-jsonl-dir 语义；缺省只跑 Profiler）
-    [--collect-wait=60] \           # dyno 触发成功后的等待秒数，默认 60
-    [--profiler-iterations=5] \     # dyno nputrace 采集迭代数，默认 5（传给 dyno 的 --iterations）
+    --profiler-dir=/home/nf/data \
+    --kpi-dir=/home/nf/kpi \
+    --interval=600 \
+    --collect-wait=60 \
+    --profiler-iterations=5 \
+    --daemon-port=8080
 ```
+
+参数说明：
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--profiler-dir` | 是 | — | profiler 采集落盘根目录（即传给 dyno 的 `--log-file`） |
+| `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL，同 `--kpi-jsonl-dir` 语义；缺省只跑 Profiler） |
+| `--interval` | 否 | 600 | 循环周期（秒），默认 600 |
+| `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数，默认 60 |
+| `--profiler-iterations` | 否 | 5 | dyno nputrace 采集迭代数（传给 dyno 的 `--iterations`） |
+| `--daemon-port` | 否 | 8080 | HTTP 监听端口 |
+
+> 注意：命令为可直接执行写法（续行 `\` 后不留注释/空格）；参数语义见上表。
 
 `--daemon` 进入常驻模式：从 PATH 解析 dyno/dynolog 并拉起 dynolog、启动 HTTP 服务，随后等待一个 interval 再开始周期循环（首个周期不在启动时立即执行）。`degradation` 等其余参数语义不变；每周期**同时检测 profiler 与 KPI**，二者结果合并为一份 JSON 落盘。
 

@@ -272,14 +272,28 @@ cd feature/straggler
 bash build.sh          # 首次构建（见九、构建与部署）
 
 ./slowNodeDetection --daemon \
-    --profiler-dir=/data/profiler \   # 必填：采集落盘根目录（传给 dyno 的 --log-file）
-    --kpi-dir=/data/kpi \             # 可选：KPI 数据目录（CATMonitor JSONL；缺省则只跑 Profiler）
-    --interval=600 \                  # 可选：检测周期（秒，≥60）
-    --collect-wait=60 \               # 可选：触发成功后等待采集完成的秒数
-    --profiler-iterations=5 \         # 可选：dyno 采集迭代数（默认 5）
-    --daemon-port=8080 \              # 可选：HTTP 端口
-    --degradation=0.3                 # 可选：灵敏度（与一次性模式同义）
+    --profiler-dir=/data/profiler \
+    --kpi-dir=/data/kpi \
+    --interval=600 \
+    --collect-wait=60 \
+    --profiler-iterations=5 \
+    --daemon-port=8080 \
+    --degradation=0.3
 ```
+
+参数说明：
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--profiler-dir` | 是 | — | 采集落盘根目录（传给 dyno 的 `--log-file`） |
+| `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL；缺省则每轮只跑 Profiler） |
+| `--interval` | 否 | 600 | 检测周期（秒，≥60） |
+| `--collect-wait` | 否 | 60 | 触发成功后等待采集完成的秒数 |
+| `--profiler-iterations` | 否 | 5 | dyno 采集迭代数（默认 5） |
+| `--daemon-port` | 否 | 8080 | HTTP 端口 |
+| `--degradation` | 否 | 0.3 | 灵敏度（与一次性模式同义） |
+
+> 注意：上方命令是**可直接复制执行**的写法（续行 `\` 后不留注释/空格）。若需给参数加注释，请写到注释区或参数表里，不要插在命令续行内——`\` 后跟注释会让续行失效，参数会被 shell 拆分。
 
 `--profiler-dir` 必填；`--kpi-dir` 可选（缺省时每轮只跑 Profiler 检测，合并 JSON 不含 `kpi` 键）。日志打到 stderr。
 
