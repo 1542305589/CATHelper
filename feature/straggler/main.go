@@ -54,7 +54,7 @@ func main() {
 	daemonPort := 8080
 	intervalSec := 600
 	collectWait := 60
-	profilerIterations := 5
+	profilerIterations := 1
 	profilerDir := ""
 	kpiDir := ""
 
@@ -98,7 +98,7 @@ func main() {
 			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
 				profilerIterations = parsed
 			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --profiler-iterations value, using default 5\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --profiler-iterations value, using default 1\n")
 			}
 		case "--profiler-dir":
 			profilerDir = val
@@ -137,7 +137,7 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────
 	if daemonMode {
 		if profilerDir == "" {
-			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=5]\n")
+			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=1]\n")
 			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir (--kpi-dir is optional; omit to run profiler-only cycles)\n")
 			os.Exit(1)
 		}
