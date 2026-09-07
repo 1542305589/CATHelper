@@ -61,11 +61,12 @@ bash build.sh
 ./slowNodeDetection path=/nonexistent    # 应报"Invalid directory"而非"dyno not found"
 dyno --help >/dev/null && echo "dyno OK"
 dynolog --help >/dev/null && echo "dynolog OK"
+python3 -c "import msmonitor; print('mindstudio_monitor OK')"
 ```
 
 ### 1.4 只手动编译（不改采集依赖）
 
-若只想出包、不装 dyno/dynolog，可跳过 `build.sh` 直接编译（Go 编译不依赖这两个二进制）：
+若只想出包、不装 dyno/dynolog 和 mindstudio_monitor，可跳过 `build.sh` 直接编译（Go 编译不依赖这些）：
 
 ```bash
 cd feature/straggler
