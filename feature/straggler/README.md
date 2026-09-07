@@ -30,6 +30,8 @@ AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一
 |----|------|
 | 硬件 | **aarch64（ARM64）** Linux + Ascend NPU + CANN（守护进程模式需要） |
 | Python | 3.9 / 3.10 / 3.11 / 3.12 之一，带 `pip` |
+| C++ | gcc 8.5.0+（msmonitor wheel 编译用；缺失则回退下载预编译 wheel） |
+| Rust | Rust ≥ 1.81（dyno/dynolog 编译用；缺失则回退下载预编译安装包） |
 | 包管理器 | `dpkg`（Debian/Ubuntu，推荐）或 `rpm + alien` |
 | 下载工具 | `wget`（Go / dynolog / wheel 兜底下载需要） |
 | 网络 | 能访问模块代理（`modernc.org/sqlite`）、OBS / Aliyun 镜像 |
