@@ -366,16 +366,15 @@ func detectFromParsedData(inputPath string, degradation float64, debugOutput boo
 }
 
 // summarizeProfiler counts anomalies per profiler category for the cycle
-// summary. Units: cal = 卡, comm = 通信组, cpu = 物理节点数（同节点 rank 共享
-// host，按 hostUid 去重），npu_bubble = 卡。
-func summarizeProfiler(result config.DegradationData) daemon.CycleSummary {
-	return daemon.CycleSummary{
-		Profiler: map[string]int{
-			"cal":        len(result["cal"]),
-			"comm":       len(result["comm"]),
-			"cpu":        countCPUNodes(result["cpu"]),
-			"npu_bubble": len(result["npu_bubble"]),
-		},
+// summary (a flat map merged with per-metric KPI counts by the daemon). Units:
+// cal = 卡, comm = 通信组, cpu = 物理节点数（同节点 rank 共享 host，按 hostUid
+// 去重），npu_bubble = 卡。
+func summarizeProfiler(result config.DegradationData) map[string]int {
+	return map[string]int{
+		"cal":        len(result["cal"]),
+		"comm":       len(result["comm"]),
+		"cpu":        countCPUNodes(result["cpu"]),
+		"npu_bubble": len(result["npu_bubble"]),
 	}
 }
 
