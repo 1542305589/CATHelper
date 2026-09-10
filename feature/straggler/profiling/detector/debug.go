@@ -13,8 +13,8 @@ import (
 // DebugRankScores computes, for every valid rank, its per-category diagnostic
 // score so that --debug-output can show NORMAL ranks' values alongside flagged
 // ones:
-//   - cal:        top-level kmeans ratio of ZP_Kernel (max) or, when ZP_Kernel is
-//     missing, ZP_Duration (min) — a normal rank sits near 1.0
+//   - cal:        top-level kmeans ratio of ZP_Kernel (max) — a normal rank
+//     sits near 1.0
 //   - cpu:        top-level kmeans ratio of ZP_Host (max)
 //   - npu_bubble: raw ZP_Bubble value
 //
@@ -32,10 +32,6 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
 
 	if kernel, ok := stepData[zpKernelColumn]; ok {
 		for r, ratio := range rankRatios(kernel, config.CalThreshold, true) {
-			set(r, "cal", ratio)
-		}
-	} else if dur, ok := stepData[zpDurationColumn]; ok {
-		for r, ratio := range rankRatios(dur, config.CalThreshold, false) {
 			set(r, "cal", ratio)
 		}
 	}

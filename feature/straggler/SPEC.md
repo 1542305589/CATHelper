@@ -359,14 +359,14 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 
 | 类别 | 标签 | 指标 | 方向 | 阈值 | 结果粒度 |
 |------|------|------|------|------|---------|
-| 慢计算 | `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | max / min | CalThreshold | 单卡 |
+| 慢计算 | `cal` | ZP_Kernel | max | CalThreshold | 单卡 |
 | 慢通信 | `comm` | `{domain}_Duration`（各域独立） | max | CommThreshold | 卡组 |
 | 慢CPU | `cpu` | ZP_Host（按 hostUid 平滑预处理） | max | CalThreshold | 单卡 |
 | NPU Bubble | `npu_bubble` | ZP_Bubble | — | 固定 < 5000ns | 单卡 |
 
 #### 检测方法
 
-**慢计算**：对主检测组内每组卡，优先使用 ZP_Kernel（要求组内所有 rank 都有且 > 0；方向 max，值大 = 计算慢）；否则降级为 ZP_Duration（方向 min，值小 = 计算慢导致通信时间短）。组内有效卡 < 2 → 跳过该组。
+**慢计算**：对主检测组内每组卡，使用 ZP_Kernel（方向 max，值大 = 计算慢）；要求组内所有 rank 都有且 > 0，否则跳过该组（不降级）。组内有效卡 < 2 → 跳过该组。
 
 **慢通信**：对每个非 PP/非 embd 并行域，每组取通信时间最小的卡为代表，按 PP stage 分桶后均质化聚类（方向 max），异常代表卡映射回完整组上报。代表卡 < 2 或桶内 < 2 → 跳过该部分。
 
@@ -468,7 +468,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | 场景 | 处理 |
 |------|------|
 | 无 .db 文件 | 递归查找失败 → 退出 |
-| ZP_Kernel 数据不全 | 慢计算降级为 ZP_Duration + 方向 "min" |
+| ZP_Kernel 数据不全 | 慢计算跳过该组（无降级指标） |
 | 通信算子缺失 | 除 ZP_Host 外所有指标填充 -99999；ZP_Host 回退用 KERNEL_AICORE Host 耗时 |
 | 通信耗时 > step 总耗时 | ZP_Device 钳位到 0 |
 | 组内有效卡 < 2 | 跳过该组/该桶检测（minRanksInGroup = 2） |

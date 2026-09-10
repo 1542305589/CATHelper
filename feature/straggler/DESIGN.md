@@ -112,7 +112,7 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 对主检测组每个子组：
   1. 检查 ZP_Kernel 可用性（组内所有卡 > 0）
      ✓ → 指标 = ZP_Kernel，方向 = "max"
-     ✗ → 指标 = ZP_Duration，方向 = "min"
+     ✗ → 跳过该组（无降级指标）
   2. 收集非零值，要求 >= minRanksInGroup(2)
   3. kmeans 比例检测 → AddSingle("cal", rank, degradation)
 ```

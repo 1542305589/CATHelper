@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CATHelper 慢节点检测控制台</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --border: #e2e4e8;
+    --text: #1f2328; --muted: #6b7280; --primary: #2563eb;
+    --green: #16a34a; --amber: #d97706; --red: #dc2626;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+  header { background: var(--card); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; }
+  .badge.running { background: var(--green); }
+  .badge.paused { background: var(--amber); }
+  .refresh { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .wrap { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+  .card h2 { font-size: 13px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; }
+  .card .body { padding: 12px 14px; }
+  .kv { display: grid; grid-template-columns: 120px 1fr; row-gap: 6px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-all; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 7px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all .15s; }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+  button.danger { color: var(--red); }
+  button.danger:hover:not(:disabled) { border-color: var(--red); }
+  input { border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; width: 90px; }
+  .interval-form { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--card); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #eef2ff; }
+  tbody tr.selected { background: #dbeafe; }
+  .err { color: var(--red); font-weight: 600; }
+  .sum { display: inline-block; margin: 1px 4px 1px 0; padding: 1px 7px; border-radius: 4px; background: #eef2ff; color: #3730a3; font-size: 11px; }
+  .sum.bad { background: #fee2e2; color: #991b1b; }
+  .tabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--border); }
+  .tabs button { border: none; border-radius: 0; background: none; padding: 9px 14px; border-bottom: 2px solid transparent; font-size: 13px; color: var(--muted); }
+  .tabs button.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+  .tab-body { padding: 14px; }
+  pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 70vh; overflow: auto; background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #111827; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transform: translateY(8px); transition: all .2s; z-index: 100; }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.ok { background: var(--green); }
+  .toast.fail { background: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <h1>慢节点检测控制台</h1>
+  <span id="stateBadge" class="badge">—</span>
+  <span class="refresh">每 5s 自动刷新</span>
+</header>
+
+<div class="wrap">
+  <div class="col">
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="body">
+        <dl class="kv">
+          <dt>检测周期</dt><dd id="vInterval">—</dd>
+          <dt>已运行周期</dt><dd id="vTotal">—</dd>
+          <dt>失败周期</dt><dd id="vFailed">—</dd>
+          <dt>下次运行</dt><dd id="vNext">—</dd>
+          <dt>Profiler 目录</dt><dd id="vProfilerDir">—</dd>
+          <dt>KPI 目录</dt><dd id="vKpiDir">—</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>控制</h2>
+      <div class="body">
+        <div class="controls">
+          <button class="primary" id="btnStart">启动</button>
+          <button id="btnPause">暂停</button>
+          <button id="btnTrigger">立即触发</button>
+          <button class="danger" id="btnStop">关闭守护进程</button>
+        </div>
+        <div class="interval-form" style="margin-top:12px;">
+          周期(秒):
+          <input id="intervalInput" type="number" min="60">
+          <button id="btnInterval">设置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h2>周期历史 <span id="histCount" style="color:var(--muted);font-weight:400;"></span></h2>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>DB</th><th>异常摘要</th><th>KPI</th><th>状态</th></tr></thead>
+          <tbody id="histBody"></tbody>
+        </table>
+      </div>
+      <div id="histEmpty" class="empty">加载中…</div>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button id="tabReport" class="active">检测报告</button>
+        <button id="tabResult">结果 JSON</button>
+        <button id="tabOpMetric">op_metric</button>
+      </div>
+      <div class="tab-body">
+        <pre id="detail">请选择左侧历史周期查看详情。</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let selectedId = null;
+
+function fmtNs(us) { return us + 'us'; }
+
+function toast(msg, ok) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'ok' : 'fail');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.className = 'toast', 2500);
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + ' ' + (await r.text().catch(()=>'')));
+  return r.json();
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: body ? {'Content-Type':'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const txt = await r.text().catch(()=> '');
+  let data = {};
+  try { data = txt ? JSON.parse(txt) : {}; } catch(e) {}
+  if (!r.ok) throw new Error(r.status + (txt ? ' ' + txt : ''));
+  return data;
+}
+
+function timeFmt(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d)) return s;
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function msFmt(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+function renderStatus(s) {
+  $('stateBadge').textContent = (s.state || '—').toUpperCase();
+  $('stateBadge').className = 'badge ' + (s.state === 'running' ? 'running' : 'paused');
+  $('vInterval').textContent = s.interval_sec != null ? s.interval_sec + ' s' : '—';
+  $('vTotal').textContent = s.cycles_total != null ? s.cycles_total : '—';
+  $('vFailed').textContent = s.cycles_failed != null ? s.cycles_failed : '—';
+  $('vNext').textContent = timeFmt(s.next_run_at);
+  $('vProfilerDir').textContent = s.profiler_dir || '—';
+  $('vKpiDir').textContent = s.kpi_dir || '（未启用）';
+  if (!$('intervalInput').value) $('intervalInput').value = s.interval_sec || 600;
+  $('btnStart').disabled = s.state === 'running';
+  $('btnPause').disabled = s.state !== 'running';
+}
+
+function renderSummary(el, summary) {
+  if (!summary || !Object.keys(summary).length) return '—';
+  const order = ['cal','comm','cpu','npu_bubble'];
+  const parts = [];
+  for (const k of order) {
+    if (summary[k] != null && summary[k] > 0) parts.push(`<span class="sum bad">${k}:${summary[k]}</span>`);
+  }
+  for (const [k,v] of Object.entries(summary)) {
+    if (order.includes(k)) continue;
+    if (v > 0) parts.push(`<span class="sum">${k}:${v}</span>`);
+  }
+  return parts.length ? parts.join('') : '正常';
+}
+
+function renderHistory(cycles) {
+  $('histBody').innerHTML = '';
+  $('histEmpty').style.display = cycles.length ? 'none' : 'block';
+  $('histEmpty').textContent = cycles.length ? '' : '暂无周期记录';
+  $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
+  for (const c of cycles) {
+    const tr = document.createElement('tr');
+    tr.onclick = () => select(c.id);
+    if (c.id === selectedId) tr.className = 'selected';
+    const cells = [
+      c.id,
+      timeFmt(c.started_at),
+      msFmt(c.duration_ms),
+      c.dbs != null ? c.dbs : '—',
+      c.error ? `<span class="err">失败</span>` : renderSummary(null, c.summary),
+      c.kpi_status || '—',
+    ];
+    cells.forEach((h, i) => {
+      const td = document.createElement('td');
+      if (i === 4) td.innerHTML = h; else td.textContent = h;
+      tr.appendChild(td);
+    });
+    $('histBody').appendChild(tr);
+  }
+}
+
+function renderDetail() {
+  $('detail').textContent = '请选择左侧历史周期查看详情。';
+  $('tabReport').classList.add('active');
+  $('tabResult').classList.remove('active');
+  $('tabOpMetric').classList.remove('active');
+}
+
+async function select(id) {
+  selectedId = id;
+  document.querySelectorAll('#histBody tr').forEach(tr => tr.classList.remove('selected'));
+  const rows = document.querySelectorAll('#histBody tr');
+  // find and mark
+  await loadDetail(id, activeTab());
+}
+
+async function loadDetail(id, tab) {
+  try {
+    if (tab === 'report') {
+      const r = await fetch('/straggler/report/' + id);
+      if (!r.ok) throw new Error('报告不可用：' + r.status);
+      $('detail').textContent = await r.text();
+    } else if (tab === 'result') {
+      const r = await fetch('/straggler/results/' + id);
+      if (!r.ok) throw new Error('结果不可用：' + r.status);
+      $('detail').textContent = JSON.stringify(await r.json(), null, 2);
+    } else if (tab === 'opMetric') {
+      const r = await fetch('/straggler/op_metric/' + id);
+      if (!r.ok) throw new Error('op_metric 不可用：' + r.status);
+      $('detail').textContent = JSON.stringify(await r.json(), null, 2);
+    }
+  } catch (e) {
+    $('detail').textContent = '加载失败：' + e.message;
+  }
+}
+
+function activeTab() {
+  if ($('tabResult').classList.contains('active')) return 'result';
+  if ($('tabOpMetric').classList.contains('active')) return 'opMetric';
+  return 'report';
+}
+
+async function refresh() {
+  try {
+    const [s, h] = await Promise.all([getJSON('/status'), getJSON('/straggler/results/history')]);
+    renderStatus(s);
+    renderHistory(h.cycles || []);
+  } catch (e) {
+    $('stateBadge').textContent = 'ERROR';
+    $('stateBadge').className = 'badge paused';
+    toast('刷新失败：' + e.message, false);
+  }
+}
+
+async function control(kind) {
+  try {
+    if (kind === 'stop') {
+      if (!confirm('确定关闭守护进程？关闭后将删除所有落盘结果。')) return;
+    }
+    await post('/daemon/' + kind);
+    toast('已发送：' + kind, true);
+    setTimeout(refresh, 500);
+  } catch (e) {
+    toast('操作失败：' + e.message, false);
+  }
+}
+
+$('btnStart').onclick = () => control('start');
+$('btnPause').onclick = () => control('pause');
+$('btnTrigger').onclick = () => control('trigger');
+$('btnStop').onclick = () => control('stop');
+$('btnInterval').onclick = async () => {
+  const v = parseInt($('intervalInput').value, 10);
+  if (!v || v < 60 || v > 86400) { toast('周期需在 [60, 86400] 秒之间', false); return; }
+  try {
+    await post('/daemon/interval', { interval_sec: v });
+    toast('周期已更新为 ' + v + 's', true);
+    refresh();
+  } catch (e) { toast('设置失败：' + e.message, false); }
+};
+
+['tabReport','tabResult','tabOpMetric'].forEach(id => {
+  $(id).onclick = () => {
+    ['tabReport','tabResult','tabOpMetric'].forEach(t => $(t).classList.remove('active'));
+    $(id).classList.add('active');
+    if (selectedId != null) loadDetail(selectedId, activeTab());
+  };
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

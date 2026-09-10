@@ -20,6 +20,7 @@ func (d *Daemon) httpServer() *http.Server {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
+	mux.HandleFunc("GET /{$}", d.handleConsole)
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /straggler/results/latest", d.handleResultsLatest)
 	mux.HandleFunc("GET /straggler/results/history", d.handleResultsHistory)
