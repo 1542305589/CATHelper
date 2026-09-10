@@ -17,18 +17,19 @@
 //     ratio threshold (max direction) or falls below its reciprocal (min
 //     direction, e.g. < 0.5 with the default threshold 2.0).
 //  7. No anomalous cluster → exit.
-//  8. Recurse into anomalous clusters (depth ≤ 10); a deeper anomaly replaces
-//     the parent cluster, deeper silence keeps the parent.
-//  9. Return the deepest anomalous clusters.
+//  8. Remove the anomalous clusters and re-cluster the remainder. With the
+//     (larger-for-max / smaller-for-min) anomalies gone, the baseline becomes
+//     progressively stricter, so edge cases that were borderline against the
+//     first, looser baseline get caught in later rounds — this iterates until
+//     no new anomaly appears, never dropping an already-flagged card.
+//  9. Every flagged point's ratio uses the FINAL baseline (the baseline of the
+//     anomaly-free remainder), so all anomalies share one reference.
 package clustering
 
 import (
 	"math"
 	"math/rand"
 )
-
-// maxDepth bounds the recursive cluster refinement.
-const maxDepth = 10
 
 // maxIter bounds the Lloyd iteration count.
 const maxIter = 300
@@ -41,19 +42,22 @@ const kmeansSeed int64 = 42
 // Result is one detected anomalous data point.
 type Result struct {
 	Index int     // index into the original input values
-	Ratio float64 // cluster mean / baseline mean, unified for both directions (max side: > 1, worse when larger; min side: < 1, worse when smaller)
+	Ratio float64 // value / final baseline, unified for both directions (max side: > 1, worse when larger; min side: < 1, worse when smaller)
 }
 
-// Detect finds anomalous points in values using recursive kmeans ratio
-// detection. highIsAnomaly selects the direction: true means larger is worse
+// Detect finds anomalous points in values by iteratively clustering, removing
+// the anomalous clusters, and re-clustering the remainder until no new anomaly
+// appears. highIsAnomaly selects the direction: true means larger is worse
 // (baseline = min-mean cluster), false means smaller is worse (baseline =
-// max-mean cluster). Values ≤ 0 are ignored.
+// max-mean cluster). Values ≤ 0 are ignored. Every flagged point's Ratio uses
+// the final baseline (the anomaly-free remainder's baseline), giving all
+// anomalies a common reference.
 func Detect(values []float64, ratioThreshold float64, highIsAnomaly bool) []Result {
 	idx, vals := filterPositive(values)
 	if len(vals) < 2 {
 		return nil
 	}
-	return detectRec(vals, idx, ratioThreshold, highIsAnomaly, 0)
+	return detectIterative(vals, idx, ratioThreshold, highIsAnomaly)
 }
 
 // DiagnoseEntry is one data point's diagnostic at a single kmeans level.
@@ -134,70 +138,122 @@ func filterPositive(values []float64) (idx []int, vals []float64) {
 	return idx, vals
 }
 
-// detectRec runs one kmeans level and recurses into anomaly clusters.
-// indices[i] is the original index of vals[i]; cluster means are computed on
-// the ORIGINAL values (not the standardized ones).
-func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly bool, depth int) []Result {
-	if len(vals) < 2 || depth > maxDepth {
+// detectIterative clusters the remaining values, flags the anomalous clusters
+// (above/below the ratio threshold), REMOVES them, and re-clusters the
+// remainder, repeating until no new anomaly appears. indices[i] is the original
+// index of vals[i]; cluster means are computed on the ORIGINAL values. Unlike
+// the old recurse-into-anomaly approach, removing anomalies tightens the
+// baseline each round, so borderline cards that were not anomalous against the
+// first, looser baseline get caught later — and an already-flagged card is
+// never dropped.
+func detectIterative(vals []float64, indices []int, threshold float64, highIsAnomaly bool) []Result {
+	n := len(vals)
+	abnormal := make([]bool, n)
+	remaining := make([]int, n)
+	for i := range remaining {
+		remaining[i] = i
+	}
+
+	for len(remaining) >= 2 {
+		subVals := make([]float64, len(remaining))
+		for i, r := range remaining {
+			subVals[i] = vals[r]
+		}
+
+		z := zscore(subVals)
+		k := elbowK(z)
+		clusters := kmeans(z, k)
+		baseIdx := pickBaselineCluster(clusters, subVals, highIsAnomaly)
+		baseMean := clusterMean(clusters[baseIdx], subVals)
+		if baseMean <= 0 {
+			baseMean = math.SmallestNonzeroFloat64
+		}
+
+		// Flag every anomalous cluster (whole cluster, never recursing into it).
+		var anomalyPos []int // positions into `remaining`
+		for i, cl := range clusters {
+			if i == baseIdx {
+				continue
+			}
+			m := clusterMean(cl, subVals)
+			var anomalous bool
+			if highIsAnomaly {
+				anomalous = m > baseMean && m/baseMean > threshold
+			} else {
+				anomalous = m < baseMean && m/baseMean < 1.0/threshold
+			}
+			if anomalous {
+				for _, li := range cl {
+					anomalyPos = append(anomalyPos, li)
+				}
+			}
+		}
+		if len(anomalyPos) == 0 {
+			break
+		}
+
+		// Remove the flagged points and tighten the baseline for the next round.
+		remove := make([]bool, len(remaining))
+		for _, li := range anomalyPos {
+			abnormal[remaining[li]] = true
+			remove[li] = true
+		}
+		next := make([]int, 0, len(remaining)-len(anomalyPos))
+		for i, r := range remaining {
+			if !remove[i] {
+				next = append(next, r)
+			}
+		}
+		remaining = next
+	}
+
+	any := false
+	for _, a := range abnormal {
+		if a {
+			any = true
+			break
+		}
+	}
+	if !any {
 		return nil
 	}
 
-	z := zscore(vals)
-	k := elbowK(z)
-	clusters := kmeans(z, k)
-	baseIdx := pickBaselineCluster(clusters, vals, highIsAnomaly)
-	baseMean := clusterMean(clusters[baseIdx], vals)
-	if baseMean <= 0 {
-		baseMean = math.SmallestNonzeroFloat64
+	// Final baseline = the anomaly-free remainder's baseline, so all flagged
+	// points share one reference.
+	finalBase := finalBaseline(vals, remaining, highIsAnomaly)
+	if finalBase <= 0 {
+		finalBase = math.SmallestNonzeroFloat64
 	}
 
-	// Step 6-7: baseline = direction extreme cluster. Score = cluster mean /
-	// baseline mean (unified for both directions); max direction flags scores
-	// ABOVE the threshold, min direction flags scores BELOW its reciprocal
-	// (e.g. < 0.5 with the default threshold 2.0).
-	var anomalyClusters [][]int
-	var anomalyMeans []float64
-	for i, cl := range clusters {
-		if i == baseIdx {
+	results := make([]Result, 0)
+	for i := 0; i < n; i++ {
+		if !abnormal[i] {
 			continue
 		}
-		m := clusterMean(cl, vals)
-		var anomalous bool
-		if highIsAnomaly {
-			anomalous = m > baseMean && m/baseMean > threshold
-		} else {
-			anomalous = m < baseMean && m/baseMean < 1.0/threshold
-		}
-		if anomalous {
-			anomalyClusters = append(anomalyClusters, cl)
-			anomalyMeans = append(anomalyMeans, m)
-		}
-	}
-	if len(anomalyClusters) == 0 {
-		return nil
-	}
-
-	// Step 8-9: recurse into each anomaly cluster; deeper anomalies replace the
-	// parent, deeper silence keeps the parent cluster's members.
-	var results []Result
-	for i, cl := range anomalyClusters {
-		subVals := make([]float64, len(cl))
-		subIdx := make([]int, len(cl))
-		for j, li := range cl {
-			subVals[j] = vals[li]
-			subIdx[j] = indices[li]
-		}
-		deeper := detectRec(subVals, subIdx, threshold, highIsAnomaly, depth+1)
-		if len(deeper) > 0 {
-			results = append(results, deeper...)
-			continue
-		}
-		ratio := anomalyMeans[i] / baseMean
-		for _, li := range cl {
-			results = append(results, Result{Index: indices[li], Ratio: ratio})
-		}
+		results = append(results, Result{Index: indices[i], Ratio: vals[i] / finalBase})
 	}
 	return results
+}
+
+// finalBaseline returns the baseline-cluster mean of the anomaly-free
+// remainder: re-cluster it and take the direction-extreme cluster's mean.
+// Falls back to the single remaining value when fewer than two points remain.
+func finalBaseline(vals []float64, remaining []int, highIsAnomaly bool) float64 {
+	if len(remaining) == 0 {
+		return 0
+	}
+	if len(remaining) == 1 {
+		return vals[remaining[0]]
+	}
+	subVals := make([]float64, len(remaining))
+	for i, r := range remaining {
+		subVals[i] = vals[r]
+	}
+	z := zscore(subVals)
+	k := elbowK(z)
+	clusters := kmeans(z, k)
+	baseIdx := pickBaselineCluster(clusters, subVals, highIsAnomaly)
+	return clusterMean(clusters[baseIdx], subVals)
 }
 
 // zscore standardizes vals to zero mean / unit std; a near-zero std is forced

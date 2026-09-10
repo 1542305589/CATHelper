@@ -76,25 +76,24 @@ func TestDetectMinDirection(t *testing.T) {
 	assertFlagged(t, res, map[int]float64{6: 0.25, 7: 0.25})
 }
 
-// Recursive replacement: the top-level anomaly cluster {40,40,60} recurses and
-// isolates the 60 (ratio 1.5 > 1.3) as the deepest anomaly, replacing the
-// parent — the 40s are dropped. With a threshold ≥ 1.5 the deeper split is
-// silent (60/40 = 1.5 is not strictly greater), so the parent survives
-// instead.
-func TestDetectRecursiveReplacement(t *testing.T) {
+// Iterative removal keeps the mild edge cards: {40,40,60} are ALL flagged (the
+// 40s are no longer dropped in favour of the 60) — removing anomalies tightens
+// the baseline each round so no already-slow card is lost. Ratio is per-card
+// value / final baseline (the leftover {10}* → mean 10), common to all.
+func TestDetectIterativeKeepsEdge(t *testing.T) {
 	vals := []float64{10, 10, 10, 10, 40, 40, 60}
 	res := Detect(vals, 1.3, true)
-	assertFlagged(t, res, map[int]float64{6: 1.5})
+	assertFlagged(t, res, map[int]float64{4: 4.0, 5: 4.0, 6: 6.0})
 
-	// Deeper silence keeps the parent: all three high cards flagged at the
-	// parent-cluster ratio 46.7/10.
-	resParent := Detect(vals, 1.5, true)
-	assertFlagged(t, resParent, map[int]float64{4: 14.0 / 3, 5: 14.0 / 3, 6: 14.0 / 3})
+	// Same flagged set at a higher threshold; the ratio is unchanged because
+	// both share the same final baseline (10).
+	resHi := Detect(vals, 1.5, true)
+	assertFlagged(t, resHi, map[int]float64{4: 4.0, 5: 4.0, 6: 6.0})
 }
 
-// Recursive silence keeps the parent: an anomaly cluster with no internal
-// structure reports all its members at the parent ratio.
-func TestDetectRecursiveKeepsParent(t *testing.T) {
+// A single clean anomaly cluster reports every member at its own value/final
+// baseline ratio (20/10 = 2.0).
+func TestDetectIterativeSingleCluster(t *testing.T) {
 	vals := []float64{10, 10, 10, 10, 20, 20, 20}
 	res := Detect(vals, 1.5, true)
 	assertFlagged(t, res, map[int]float64{4: 2.0, 5: 2.0, 6: 2.0})
