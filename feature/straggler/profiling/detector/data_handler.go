@@ -22,49 +22,26 @@ func getSlowCalculateRanks(detectionGroups [][]int, alignedData map[string]map[i
 	return nil
 }
 
-// detCalForOneGroup runs homogeneous clustering on a single compute group.
-// It prefers ZP_Kernel (direction "max"); falls back to ZP_Duration ("min").
+// detCalForOneGroup runs homogeneous clustering on a single compute group
+// using only ZP_Kernel (direction "max"). When any rank in the group is
+// missing ZP_Kernel (<= 0), the group is skipped — there is no fallback metric.
 func detCalForOneGroup(alignedData map[string]map[int]float64, npuGroup []int) ([]int, []float64) {
 	if len(npuGroup) < minRanksInGroup {
 		return nil, nil
 	}
 
-	// Determine whether ZP_Kernel is available for ALL ranks in this group.
-	useKernel := true
-	for _, npuID := range npuGroup {
-		kernelMap, ok := alignedData[zpKernelColumn]
-		if !ok {
-			useKernel = false
-			break
-		}
-		val, ok := kernelMap[npuID]
-		if !ok || val <= 0 {
-			useKernel = false
-			break
-		}
-	}
-
-	var metricName, direction string
-	if useKernel {
-		metricName = zpKernelColumn
-		direction = "max"
-	} else {
-		metricName = zpDurationColumn
-		direction = "min"
-	}
-
-	// Build data arrays aligned by rank.
-	metricMap, ok := alignedData[metricName]
+	kernelMap, ok := alignedData[zpKernelColumn]
 	if !ok {
 		return nil, nil
 	}
 
+	// Build data arrays aligned by rank; require ZP_Kernel for ALL ranks.
 	ranks := make([]int, 0, len(npuGroup))
 	values := make([]float64, 0, len(npuGroup))
 	for _, npuID := range npuGroup {
-		v, ok := metricMap[npuID]
-		if !ok || v == 0 {
-			continue
+		v, ok := kernelMap[npuID]
+		if !ok || v <= 0 {
+			return nil, nil
 		}
 		ranks = append(ranks, npuID)
 		values = append(values, v)
@@ -74,7 +51,7 @@ func detCalForOneGroup(alignedData map[string]map[int]float64, npuGroup []int) (
 		return nil, nil
 	}
 
-	return HomogenizationComparisonFunc(ranks, values, config.CalThreshold, direction)
+	return HomogenizationComparisonFunc(ranks, values, config.CalThreshold, "max")
 }
 
 // ---------------------------------------------------------------------------

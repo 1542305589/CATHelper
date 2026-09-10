@@ -264,8 +264,11 @@ daemon_results/<start>/
 
 路由无 `/api/v1` 前缀。查询类只读，控制类需 POST。以下假设端口 8080（`--daemon-port` 可改）。
 
+浏览器访问 `http://<host>:<port>/` 打开 **Web 控制台**：状态总览、周期历史、报告/结果/op_metric 查看、启停/触发/改周期等操作，都通过下面的 REST 接口完成（控制台是纯前端，接口仍可直接 curl 调用）。
+
 | 方法 & 路径 | 作用 | 请求体 |
 |-------------|------|--------|
+| `GET /` | Web 控制台页面（HTML） | — |
 | `GET /healthz` | 存活探针 | — |
 | `GET /status` | 状态总览（state / interval_sec / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
 | `GET /straggler/results/latest` | 最近一轮合并结果 JSON | — |
