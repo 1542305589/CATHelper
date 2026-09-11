@@ -80,26 +80,39 @@ type nodeAccumulator struct {
 // from the diagnostic scores even when not flagged — normal data shows its
 // diagnostic scores too.
 func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error) {
+	return buildNodeResult(finalResult, parallels, debug, nil)
+}
+
+// BuildNodeResultWithMeta is like BuildNodeResult but uses the caller-provided
+// rank identity map instead of reading op_metric/host_info|npu_info files. This
+// lets the center node build the node output from in-memory reported op_metric.
+func BuildNodeResultWithMeta(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta) (*NodeOutput, error) {
+	return buildNodeResult(finalResult, parallels, debug, meta)
+}
+
+func buildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta) (*NodeOutput, error) {
 	includeAll := debug != nil
 	// Degraded mode: no parallel topology (group names not registered) — only
 	// cal has input data; comm/CPU/bubble are not judged and must not be
 	// reported as "normal" just because their data is absent.
 	calOnly := len(parallels) == 0
-	var metaRanks []int
-	if includeAll {
-		metaRanks = debug.ValidRanks
-	} else {
-		seen := make(map[int]bool)
-		for _, cat := range []string{"cal", "cpu", "npu_bubble"} {
-			for rankStr := range finalResult[cat] {
-				if r, err := strconv.Atoi(rankStr); err == nil && !seen[r] {
-					seen[r] = true
-					metaRanks = append(metaRanks, r)
+	if meta == nil {
+		var metaRanks []int
+		if includeAll {
+			metaRanks = debug.ValidRanks
+		} else {
+			seen := make(map[int]bool)
+			for _, cat := range []string{"cal", "cpu", "npu_bubble"} {
+				for rankStr := range finalResult[cat] {
+					if r, err := strconv.Atoi(rankStr); err == nil && !seen[r] {
+						seen[r] = true
+						metaRanks = append(metaRanks, r)
+					}
 				}
 			}
 		}
+		meta = loadRankMeta(metaRanks)
 	}
-	meta := loadRankMeta(metaRanks)
 	nodes := make(map[string]*nodeAccumulator)
 
 	// cal / npu_bubble: per rank → node.npu[id].
@@ -110,11 +123,11 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 				continue
 			}
 			m, ok := meta[rank]
-			if !ok || m.hostname == "" {
+			if !ok || m.Hostname == "" {
 				continue
 			}
-			acc := ensureNodeAcc(nodes, m.hostname)
-			npu := ensureNpuAcc(acc, m.npuID)
+			acc := ensureNodeAcc(nodes, m.Hostname)
+			npu := ensureNpuAcc(acc, m.NpuID)
 			if cat == "cal" {
 				npu.Cal = &ScoreResult{Score: score}
 			} else {
@@ -131,10 +144,10 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			continue
 		}
 		m, ok := meta[rank]
-		if !ok || m.hostname == "" {
+		if !ok || m.Hostname == "" {
 			continue
 		}
-		acc := ensureNodeAcc(nodes, m.hostname)
+		acc := ensureNodeAcc(nodes, m.Hostname)
 		acc.cpu = score
 		acc.hasCPU = true
 	}
@@ -144,11 +157,11 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 	if includeAll {
 		for _, rank := range debug.ValidRanks {
 			m, ok := meta[rank]
-			if !ok || m.hostname == "" {
+			if !ok || m.Hostname == "" {
 				continue
 			}
-			acc := ensureNodeAcc(nodes, m.hostname)
-			npu := ensureNpuAcc(acc, m.npuID)
+			acc := ensureNodeAcc(nodes, m.Hostname)
+			npu := ensureNpuAcc(acc, m.NpuID)
 			sc, ok := debug.RankScores[rank]
 			if !ok {
 				continue
@@ -218,15 +231,18 @@ func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 // Rank metadata (hostname + NPU id from op_metric intermediates)
 // ---------------------------------------------------------------------------
 
-type rankMeta struct {
-	hostname string
-	npuID    int
+// RankMeta is a rank's physical identity: hostname (HOST_INFO.hostName, falling
+// back to hostUid) and NPU id (NPU_INFO.id). BuildNodeResult uses it to group
+// per-rank anomalies by node / NPU.
+type RankMeta struct {
+	Hostname string
+	NpuID    int
 }
 
 // loadRankMeta reads host_info_{N}.json (hostName) and npu_info_{N}.json (id)
 // for the given ranks.
-func loadRankMeta(ranks []int) map[int]rankMeta {
-	meta := make(map[int]rankMeta)
+func loadRankMeta(ranks []int) map[int]RankMeta {
+	meta := make(map[int]RankMeta)
 	seen := make(map[int]bool)
 	for _, rank := range ranks {
 		if seen[rank] {
@@ -238,8 +254,8 @@ func loadRankMeta(ranks []int) map[int]rankMeta {
 	return meta
 }
 
-func readRankMeta(rank int) rankMeta {
-	var m rankMeta
+func readRankMeta(rank int) RankMeta {
+	var m RankMeta
 	metricDir := filepath.Join(config.FilePath, "op_metric")
 
 	if raw, err := os.ReadFile(filepath.Join(metricDir, "host_info_"+strconv.Itoa(rank)+".json")); err == nil {
@@ -248,9 +264,9 @@ func readRankMeta(rank int) rankMeta {
 			HostName string `json:"hostName"`
 		}
 		if json.Unmarshal(raw, &hi) == nil {
-			m.hostname = hi.HostName
-			if m.hostname == "" {
-				m.hostname = hi.HostUid // fallback to the physical-node id
+			m.Hostname = hi.HostName
+			if m.Hostname == "" {
+				m.Hostname = hi.HostUid // fallback to the physical-node id
 			}
 		}
 	}
@@ -259,7 +275,7 @@ func readRankMeta(rank int) rankMeta {
 			ID int `json:"id"`
 		}
 		if json.Unmarshal(raw, &ni) == nil {
-			m.npuID = ni.ID
+			m.NpuID = ni.ID
 		}
 	}
 	return m

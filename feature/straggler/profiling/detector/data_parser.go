@@ -29,9 +29,9 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 		return nil, nil
 	}
 
-	// Collect all rank IDs from group_info filenames.
+	// Collect all rank IDs from group_info filenames, plus each file's topology.
 	rankSet := make(map[int]bool)
-	var jsonPaths []string
+	var topos []map[string]interface{}
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasPrefix(name, "group_info_") && strings.HasSuffix(name, ".json") {
@@ -41,7 +41,7 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 			if rank, err := strconv.Atoi(trimmed); err == nil {
 				rankSet[rank] = true
 			}
-			jsonPaths = append(jsonPaths, filepath.Join(metricDir, name))
+			topos = append(topos, getCurRankTopo(filepath.Join(metricDir, name)))
 		}
 	}
 
@@ -66,37 +66,7 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 	}
 
 	validRanks := sortedKeys(rankSet)
-
-	// Collect all domain names from all group_info files.
-	domainSet := make(map[string]bool)
-	for _, jp := range jsonPaths {
-		topo := getCurRankTopo(jp)
-		for _, v := range topo {
-			if m, ok := v.(map[string]interface{}); ok {
-				if gn, ok := m[dataFileFieldGroupName].(string); ok && gn != "" {
-					domainSet[gn] = true
-				}
-			}
-		}
-	}
-
-	// Build parallels map.
-	parallels := make(map[string][][]int)
-	for domain := range domainSet {
-		groups := getDetectionJobParallelInfo(rankSet, jsonPaths, domain)
-		// Filter: keep only groups with >1 cards.
-		var filtered [][]int
-		for _, g := range groups {
-			if len(g) > 1 {
-				filtered = append(filtered, g)
-			}
-		}
-		if len(filtered) > 0 {
-			parallels[domain] = filtered
-		}
-	}
-
-	return parallels, validRanks
+	return buildParallels(topos), validRanks
 }
 
 // getCurRankTopo reads a single group_info JSON file and returns the raw data.
@@ -110,61 +80,6 @@ func getCurRankTopo(filePath string) map[string]interface{} {
 		return nil
 	}
 	return data
-}
-
-// getDetectionJobParallelInfo collects all rank groups for a given domain name
-// across all rank topology files, with deduplication. Each rank's topology file
-// may list the same group (one group_info_{N}.json per rank), so a group whose
-// ranks are already assigned to this domain is skipped.
-func getDetectionJobParallelInfo(rankSet map[int]bool, jsonPaths []string, target string) [][]int {
-	var groups [][]int
-	// assigned tracks which ranks already belong to a group of this domain.
-	assigned := make(map[int]bool)
-
-	for _, jp := range jsonPaths {
-		topo := getCurRankTopo(jp)
-		if topo == nil {
-			continue
-		}
-		for _, v := range topo {
-			m, ok := v.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			gn, _ := m[dataFileFieldGroupName].(string)
-			if gn != target {
-				continue
-			}
-			ranksRaw, ok := m[dataFileFieldGlobalRanks].([]interface{})
-			if !ok {
-				continue
-			}
-			npuGroup := make([]int, 0, len(ranksRaw))
-			for _, r := range ranksRaw {
-				switch n := r.(type) {
-				case float64:
-					npuGroup = append(npuGroup, int(n))
-				case int:
-					npuGroup = append(npuGroup, n)
-				}
-			}
-			if len(npuGroup) == 0 {
-				continue
-			}
-			// Dedup: groups of one parallel domain partition the ranks; if any
-			// rank is already assigned, this is the same group listed in
-			// another rank's topology file — skip it.
-			if rankAlreadyAssigned(assigned, npuGroup) {
-				continue
-			}
-			for _, rank := range npuGroup {
-				assigned[rank] = true
-			}
-			sort.Ints(npuGroup)
-			groups = append(groups, npuGroup)
-		}
-	}
-	return groups
 }
 
 // rankAlreadyAssigned reports whether any rank of npuGroup is already assigned

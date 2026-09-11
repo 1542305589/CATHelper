@@ -31,6 +31,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/center"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/daemon"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/dataparse"
@@ -58,6 +59,12 @@ func main() {
 	profilerDir := ""
 	kpiDir := ""
 
+	// Center-mode flags.
+	centerMode := false
+	centerPort := 8080
+	centerDataDir := "center_data"
+	centerIntervalSec := 600
+
 	for _, arg := range os.Args[1:] {
 		// Bare boolean flag (no "=value").
 		if arg == "--debug-output" {
@@ -66,6 +73,10 @@ func main() {
 		}
 		if arg == "--daemon" {
 			daemonMode = true
+			continue
+		}
+		if arg == "--center" {
+			centerMode = true
 			continue
 		}
 		parts := strings.SplitN(arg, "=", 2)
@@ -104,6 +115,20 @@ func main() {
 			profilerDir = val
 		case "--kpi-dir":
 			kpiDir = val
+		case "--center-port":
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+				centerPort = parsed
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --center-port value, using default 8080\n")
+			}
+		case "--center-data-dir":
+			centerDataDir = val
+		case "--center-interval":
+			if parsed, err := strconv.Atoi(val); err == nil && parsed >= 60 {
+				centerIntervalSec = parsed
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --center-interval value (>=60), using default 600\n")
+			}
 		case "path":
 			inputPath = val
 		case "degradation":
@@ -179,6 +204,27 @@ func main() {
 		defer stop()
 		if err := d.Run(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] daemon failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// ─────────────────────────────────────────────────────────────────
+	// Center mode: manages multiple businesses (daemons) — matching,
+	// health probing, merged detection, web console.
+	// ─────────────────────────────────────────────────────────────────
+	if centerMode {
+		cfg := center.DefaultConfig()
+		cfg.Port = centerPort
+		cfg.DataDir = centerDataDir
+		cfg.Interval = time.Duration(centerIntervalSec) * time.Second
+
+		c := center.New(cfg)
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Center Mode (port=%d data=%s) ===\n", centerPort, centerDataDir)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := c.Run(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] center failed: %v\n", err)
 			os.Exit(1)
 		}
 		return
