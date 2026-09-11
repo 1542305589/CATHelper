@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CATHelper 中心节点控制台</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --border:#e2e4e8; --text:#1f2328; --muted:#6b7280; --primary:#2563eb;
+    --green:#16a34a; --amber:#d97706; --red:#dc2626; --mono:Consolas,Menlo,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--card); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:16px; margin:0; }
+  .refresh { margin-left:auto; color:var(--muted); font-size:12px; }
+  .wrap { max-width:1200px; margin:0 auto; padding:16px 20px; display:flex; flex-direction:column; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; }
+  .card > h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
+  .body { padding:12px 14px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:600; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; color:#fff; }
+  .badge.healthy { background:var(--green); }
+  .badge.unmatched { background:var(--amber); }
+  .badge.other { background:#9333ea; }
+  .badge.report_failed { background:#eab308; }
+  .badge.disconnected { background:var(--red); }
+  button { border:1px solid var(--border); background:var(--card); padding:5px 11px; border-radius:7px; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--primary); color:var(--primary); }
+  button.danger { color:var(--red); }
+  button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  input { border:1px solid var(--border); border-radius:7px; padding:5px 9px; font-size:13px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .mt { margin-top:10px; }
+  pre { margin:0; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-all; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; max-height:60vh; overflow:auto; }
+  .tabs button { border:none; border-bottom:2px solid transparent; border-radius:0; }
+  .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
+  .muted { color:var(--muted); font-size:12px; }
+  .biz-head { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; }
+  .biz-head .name { font-weight:600; }
+  .del-row { margin-left:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>慢节点检测 · 中心节点</h1>
+  <span class="refresh">每 5s 自动刷新</span>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>添加业务</h2>
+    <div class="body">
+      <div class="row">
+        <input id="bizName" placeholder="业务名称">
+        <input id="bizInterval" type="number" min="60" placeholder="周期(秒)" style="width:110px">
+        <input id="bizDaemons" placeholder="守护进程 ip:port（逗号分隔多个）" style="width:360px">
+        <button class="primary" onclick="addBusiness()">添加</button>
+      </div>
+      <div class="muted mt">守护进程格式：192.168.1.10:8080,192.168.1.11:8080</div>
+    </div>
+  </div>
+
+  <div id="list"></div>
+</div>
+
+<div id="toast" style="position:fixed;bottom:20px;right:20px;background:#111827;color:#fff;padding:10px 16px;border-radius:8px;opacity:0;transition:all .2s;"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let selectedBiz = null;
+
+function toast(msg, ok) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.style.opacity = 1;
+  t.style.background = ok ? '#16a34a' : '#dc2626';
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.style.opacity = 0, 2500);
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+async function post(url, body) {
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+  const txt = await r.text().catch(()=> '');
+  let d = {}; try { d = txt ? JSON.parse(txt) : {}; } catch(e){}
+  if (!r.ok) throw new Error(r.status + (txt ? ' ' + txt : ''));
+  return d;
+}
+async function del(url) {
+  const r = await fetch(url, { method:'DELETE' });
+  if (!r.ok) throw new Error(r.status);
+}
+
+function daemonRow(biz, d) {
+  return `<tr>
+    <td>${d.ip}:${d.port}</td>
+    <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
+    <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
+    <td>
+      <button onclick="matchDaemon('${biz}','${d.ip}',${d.port})">匹配</button>
+      <button onclick="unmatchDaemon('${biz}','${d.ip}',${d.port})">解除匹配</button>
+      <button class="danger" onclick="removeDaemon('${biz}','${d.ip}',${d.port})">删除</button>
+    </td>
+  </tr>`;
+}
+
+function stateLabel(s) {
+  return {healthy:'健康匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
+}
+
+function render(list) {
+  const el = $('list');
+  el.innerHTML = '';
+  for (const b of list.businesses || []) {
+    const allHealthy = b.daemons.length > 0 && b.daemons.every(d => d.state === 'healthy');
+    const summary = `<span class="badge ${allHealthy ? 'healthy' : 'disconnected'}">${allHealthy ? '可触发' : '已冻结'}</span>`;
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="biz-head" onclick="toggleDetail(this)">
+        <span class="name">${b.name}</span>
+        <span class="muted">周期 ${b.interval_sec}s · ${b.daemons.length} 守护进程</span>
+        ${summary}
+        <span class="del-row"><button class="danger" onclick="event.stopPropagation();removeBusiness('${b.name}')">删除业务</button></span>
+      </div>
+      <div class="body" style="display:none">
+        <table>
+          <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th><th>操作</th></tr></thead>
+          <tbody>${b.daemons.map(d => daemonRow(b.name, d)).join('')}</tbody>
+        </table>
+        <div class="row mt">
+          <input id="dip-${b.name}" placeholder="ip">
+          <input id="dport-${b.name}" type="number" placeholder="port" style="width:90px">
+          <button onclick="addDaemon('${b.name}')">添加守护进程</button>
+        </div>
+        <div class="tabs mt" style="border-bottom:1px solid var(--border)">
+          <button class="active" onclick="switchTab('${b.name}','report',this)">检测报告</button>
+          <button onclick="switchTab('${b.name}','result',this)">结果 JSON</button>
+          <button onclick="switchTab('${b.name}','op_metric',this)">op_metric</button>
+        </div>
+        <pre id="detail-${b.name}">选择上方标签查看该业务合并检测结果。</pre>
+      </div>`;
+    el.appendChild(card);
+  }
+}
+
+function toggleDetail(head) {
+  const body = head.nextElementSibling;
+  body.style.display = body.style.display === 'none' ? '' : 'none';
+}
+
+async function switchTab(biz, tab, btn) {
+  btn.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+  btn.classList.add('active');
+  const pre = $('detail-' + biz);
+  try {
+    const r = await fetch('/center/business/' + encodeURIComponent(biz) + '/' + (tab === 'report' ? 'report' : tab === 'result' ? 'result' : 'op_metric'));
+    if (!r.ok) { pre.textContent = '（暂无结果，等待首次触发检测）'; return; }
+    const ct = r.headers.get('Content-Type') || '';
+    pre.textContent = ct.includes('json') ? JSON.stringify(await r.json(), null, 2) : await r.text();
+  } catch(e) { pre.textContent = '加载失败：' + e.message; }
+}
+
+async function addBusiness() {
+  const name = $('bizName').value.trim();
+  const interval = parseInt($('bizInterval').value, 10) || 0;
+  const daemons = ($('bizDaemons').value || '').split(',').map(s => s.trim()).filter(Boolean).map(s => {
+    const [ip, port] = s.split(':');
+    return { ip, port: parseInt(port, 10) };
+  });
+  if (!name) return toast('请填写业务名称', false);
+  try {
+    await post('/center/business', { name, interval_sec: interval, daemons });
+    toast('已添加业务 ' + name, true);
+    $('bizName').value = ''; $('bizDaemons').value = '';
+    refresh();
+  } catch(e) { toast('添加失败：' + e.message, false); }
+}
+
+async function removeBusiness(name) {
+  if (!confirm('删除业务 ' + name + '？将解除其所有守护进程匹配。')) return;
+  try { await del('/center/business/' + encodeURIComponent(name)); toast('已删除', true); refresh(); }
+  catch(e) { toast('删除失败：' + e.message, false); }
+}
+
+async function addDaemon(biz) {
+  const ip = $('dip-' + biz).value.trim();
+  const port = parseInt($('dport-' + biz).value, 10);
+  if (!ip || !port) return toast('请填写 ip 和 port', false);
+  try { await post('/center/business/' + encodeURIComponent(biz) + '/daemon', { ip, port }); toast('已添加守护进程', true); refresh(); }
+  catch(e) { toast('添加失败：' + e.message, false); }
+}
+
+async function removeDaemon(biz, ip, port) {
+  if (!confirm('删除守护进程 ' + ip + ':' + port + '？')) return;
+  try { await del('/center/business/' + encodeURIComponent(biz) + '/daemon?ip=' + ip + '&port=' + port); toast('已删除', true); refresh(); }
+  catch(e) { toast('删除失败：' + e.message, false); }
+}
+
+async function matchDaemon(biz, ip, port) {
+  try { await post('/center/business/' + encodeURIComponent(biz) + '/daemon/match', { ip, port }); toast('已发送匹配', true); refresh(); }
+  catch(e) { toast('匹配失败：' + e.message, false); }
+}
+
+async function unmatchDaemon(biz, ip, port) {
+  try { await post('/center/business/' + encodeURIComponent(biz) + '/daemon/unmatch', { ip, port }); toast('已解除匹配', true); refresh(); }
+  catch(e) { toast('解除失败：' + e.message, false); }
+}
+
+async function refresh() {
+  try {
+    const data = await getJSON('/center/businesses');
+    render(data);
+  } catch(e) { /* center may be restarting */ }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

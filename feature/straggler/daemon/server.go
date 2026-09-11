@@ -35,6 +35,9 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("POST /daemon/stop", d.handleDaemonStop)
 	mux.HandleFunc("POST /daemon/interval", d.handleDaemonInterval)
 	mux.HandleFunc("POST /daemon/trigger", d.handleDaemonTrigger)
+	mux.HandleFunc("POST /daemon/match", d.handleDaemonMatch)
+	mux.HandleFunc("POST /daemon/unmatch", d.handleDaemonUnmatch)
+	mux.HandleFunc("GET /daemon/match_status", d.handleDaemonMatchStatus)
 	return &http.Server{Addr: fmt.Sprintf(":%d", d.cfg.Port), Handler: mux}
 }
 
@@ -44,12 +47,17 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	state := d.state
 	interval := d.interval
 	nextRun := d.nextRun
+	managed := state == "managed"
+	centerAddr := d.centerAddr
 	d.mu.Unlock()
 	total, failed := d.st.counts()
 
 	resp := statusResponse{
 		State:        state,
 		IntervalSec:  int64(interval.Seconds()),
+		CollectWait:  int64(d.cfg.CollectWait.Seconds()),
+		Managed:      managed,
+		CenterAddr:   centerAddr,
 		ProfilerDir:  d.cfg.ProfilerDir,
 		KpiDir:       d.cfg.KpiDir,
 		CyclesTotal:  total,
@@ -182,7 +190,7 @@ func (d *Daemon) handleOpMetricView(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildOpMetricView reads a cycle's archived op_metric/ dir and aggregates the
-// three per-rank file kinds into one rank-keyed structure:
+// per-rank file kinds into one rank-keyed structure:
 //
 //	{
 //	  "cycle": 3, "dir": "daemon_results/<start>",
@@ -190,6 +198,7 @@ func (d *Daemon) handleOpMetricView(w http.ResponseWriter, r *http.Request) {
 //	    "0": {
 //	      "group_info":  {...parallel_group_info...},
 //	      "host_info":   {"rank":"0","hostUid":"..."},
+//	      "npu_info":    {"rank":"0","id":0},
 //	      "global_rank": {"StepIndex":0,"ZP_Kernel":...,"tp_Duration":...}
 //	    }, ...
 //	  }
@@ -212,6 +221,8 @@ func buildOpMetricView(c *CycleResult) (*opMetricViewResponse, error) {
 			rank, kind = trimExt(strings.TrimPrefix(name, "group_info_"), ".json"), "group_info"
 		case strings.HasPrefix(name, "host_info_"):
 			rank, kind = trimExt(strings.TrimPrefix(name, "host_info_"), ".json"), "host_info"
+		case strings.HasPrefix(name, "npu_info_"):
+			rank, kind = trimExt(strings.TrimPrefix(name, "npu_info_"), ".json"), "npu_info"
 		case strings.HasPrefix(name, "global_rank_"):
 			rank, kind = trimExt(strings.TrimPrefix(name, "global_rank_"), ".csv"), "global_rank"
 		default:
@@ -227,6 +238,8 @@ func buildOpMetricView(c *CycleResult) (*opMetricViewResponse, error) {
 			rv.GroupInfo, _ = readJSONFile(full)
 		case "host_info":
 			rv.HostInfo, _ = readJSONFile(full)
+		case "npu_info":
+			rv.NpuInfo, _ = readJSONFile(full)
 		case "global_rank":
 			rv.GlobalRank, _ = readCSVFile(full)
 		}
@@ -319,16 +332,28 @@ func (d *Daemon) handleOpMetricFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDaemonStart(w http.ResponseWriter, r *http.Request) {
+	if d.IsManaged() {
+		http.Error(w, "managed: start is not supported; unmatch first", http.StatusForbidden)
+		return
+	}
 	d.Start()
 	writeJSON(w, map[string]string{"state": "running"})
 }
 
 func (d *Daemon) handleDaemonPause(w http.ResponseWriter, r *http.Request) {
+	if d.IsManaged() {
+		http.Error(w, "managed: pause is not supported; unmatch first", http.StatusForbidden)
+		return
+	}
 	d.Pause()
 	writeJSON(w, map[string]string{"state": "paused"})
 }
 
 func (d *Daemon) handleDaemonInterval(w http.ResponseWriter, r *http.Request) {
+	if d.IsManaged() {
+		http.Error(w, "managed: interval is not supported; unmatch first", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		IntervalSec int64 `json:"interval_sec"`
 	}
@@ -346,6 +371,9 @@ func (d *Daemon) handleDaemonInterval(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
+	if !d.requireManagedKey(w, r) {
+		return
+	}
 	if err := d.Trigger(); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -360,6 +388,66 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDaemonStop(w http.ResponseWriter, r *http.Request) {
 	d.Stop()
 	writeJSON(w, map[string]string{"status": "stopping"})
+}
+
+// handleDaemonMatch establishes a center-node managed relationship. The center
+// generates the per-daemon key and passes it here along with the identity under
+// which this daemon reports op_metric. The response echoes collect_wait so the
+// center can compute the report timeout.
+func (d *Daemon) handleDaemonMatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CenterAddr string `json:"center_addr"`
+		Key        string `json:"key"`
+		Business   string `json:"business"`
+		Daemon     string `json:"daemon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CenterAddr == "" || req.Key == "" {
+		http.Error(w, `invalid body: {"center_addr","key","business","daemon"}`, http.StatusBadRequest)
+		return
+	}
+	if err := d.Match(req.CenterAddr, req.Key, req.Business, req.Daemon); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"status": "matched", "collect_wait": int64(d.cfg.CollectWait.Seconds())})
+}
+
+// handleDaemonUnmatch ends the managed relationship; requires the match key.
+func (d *Daemon) handleDaemonUnmatch(w http.ResponseWriter, r *http.Request) {
+	if !d.requireManagedKey(w, r) {
+		return
+	}
+	d.Unmatch()
+	writeJSON(w, map[string]string{"status": "unmatched"})
+}
+
+// handleDaemonMatchStatus reports the matching state. With the correct key it
+// also confirms the caller is the matched center; a wrong key on a managed
+// daemon signals "matched to another center".
+func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request) {
+	state, center, _ := d.matchState()
+	if state != "managed" {
+		writeJSON(w, map[string]any{"state": state, "matched": false})
+		return
+	}
+	if d.KeyMatches(r.Header.Get("X-Match-Key")) {
+		writeJSON(w, map[string]any{"state": state, "matched": true, "center": center})
+		return
+	}
+	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true})
+}
+
+// requireManagedKey gates a control endpoint: when NOT managed it passes
+// through; when managed it requires the correct X-Match-Key, otherwise 403.
+func (d *Daemon) requireManagedKey(w http.ResponseWriter, r *http.Request) bool {
+	if !d.IsManaged() {
+		return true
+	}
+	if !d.KeyMatches(r.Header.Get("X-Match-Key")) {
+		http.Error(w, "managed: missing or wrong X-Match-Key", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 func toCycleSummary(c *CycleResult) *cycleSummary {
