@@ -34,6 +34,8 @@
   .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
   pre { margin:0; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-all; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; max-height:60vh; overflow:auto; }
   .muted { color:var(--muted); font-size:12px; }
+  .sum { display:inline-block; margin:1px 4px 1px 0; padding:1px 7px; border-radius:4px; background:#eef2ff; color:#3730a3; font-size:11px; }
+  .sum.bad { background:#fee2e2; color:#991b1b; }
 </style>
 </head>
 <body>
@@ -58,7 +60,7 @@
     <h2>检测历史 <span id="histCount" class="muted"></span></h2>
     <div style="overflow:auto; max-height:32vh;">
       <table>
-        <thead><tr><th>#</th><th>检测时间</th></tr></thead>
+        <thead><tr><th>#</th><th>检测时间</th><th>异常摘要</th></tr></thead>
         <tbody id="histBody"></tbody>
       </table>
     </div>
@@ -104,18 +106,34 @@ function renderDaemons(b) {
   }
 }
 
+function renderSummary(summary) {
+  if (!summary || !Object.keys(summary).length) return '正常';
+  const order = ['cal','comm','cpu','npu_bubble'];
+  const parts = [];
+  for (const k of order) {
+    if (summary[k] != null && summary[k] > 0) parts.push(`<span class="sum bad">${k}:${summary[k]}</span>`);
+  }
+  for (const [k,v] of Object.entries(summary)) {
+    if (order.includes(k)) continue;
+    if (v > 0) parts.push(`<span class="sum">${k}:${v}</span>`);
+  }
+  return parts.length ? parts.join('') : '正常';
+}
+
 function renderHistory(cycles) {
   const tb = $('histBody');
   tb.innerHTML = '';
   $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
   $('histEmpty').style.display = cycles.length ? 'none' : 'block';
   $('histEmpty').textContent = cycles.length ? '' : '暂无检测记录';
-  cycles.forEach((ts, i) => {
+  cycles.forEach((c, i) => {
     const tr = document.createElement('tr');
-    tr.onclick = () => select(ts, tr);
+    tr.onclick = () => select(c.ts, tr);
+    if (c.ts === selectedTs) tr.className = 'selected';
     const td1 = document.createElement('td'); td1.textContent = i + 1;
-    const td2 = document.createElement('td'); td2.textContent = fmtTs(ts);
-    tr.appendChild(td1); tr.appendChild(td2);
+    const td2 = document.createElement('td'); td2.textContent = fmtTs(c.ts);
+    const td3 = document.createElement('td'); td3.innerHTML = renderSummary(c.summary);
+    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
     tb.appendChild(tr);
   });
 }

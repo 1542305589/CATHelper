@@ -296,8 +296,15 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric) {
 	}
 	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, degradation)
 
+	summary := map[string]int{
+		"cal":        len(result["cal"]),
+		"comm":       len(result["comm"]),
+		"cpu":        len(result["cpu"]),
+		"npu_bubble": len(result["npu_bubble"]),
+	}
+
 	dir := time.Now().Format("20060102-150405")
-	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op); err != nil {
+	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary); err != nil {
 		c.logf("business %s: store result: %v", b.Name, err)
 	}
 	c.logf("business %s: detection done (%d ranks, %d cal anomalies)", b.Name, len(validRanks), len(result["cal"]))
@@ -388,8 +395,9 @@ func writeGlobalRankCSV(path string, g any) error {
 
 // writeBusinessResult stores a merged detection's output under the business
 // results dir, mirroring a single daemon's per-cycle archive shape: result JSON,
-// text report, and the merged op_metric JSON.
-func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric) error {
+// text report, the merged op_metric JSON, plus a cycle.json summary (ts +
+// per-category anomaly counts) for the per-business history.
+func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int) error {
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(filepath.Join(base, "analysis_result"), 0o755); err != nil {
 		return err
@@ -402,7 +410,11 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		return err
 	}
 	opData, _ := json.MarshalIndent(op, "", "  ")
-	return os.WriteFile(filepath.Join(base, "op_metric.json"), opData, 0o644)
+	if err := os.WriteFile(filepath.Join(base, "op_metric.json"), opData, 0o644); err != nil {
+		return err
+	}
+	meta, _ := json.MarshalIndent(map[string]any{"ts": dirRel, "summary": summary}, "", "  ")
+	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
 }
 
 // ---------------------------------------------------------------------------
