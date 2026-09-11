@@ -323,7 +323,7 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	}
 
 	dir := startedAt.Format("20060102-150405")
-	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, startedAt, durationMs); err != nil {
+	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, startedAt, durationMs, len(op)); err != nil {
 		return fmt.Errorf("store result: %w", err)
 	}
 	c.logf("business %s: detection done (%d ranks, %d cal anomalies)", b.Name, len(validRanks), len(result["cal"]))
@@ -417,7 +417,7 @@ func writeGlobalRankCSV(path string, g any) error {
 // results dir, mirroring a single daemon's per-cycle archive shape: result JSON,
 // text report, the merged op_metric JSON, plus a cycle.json (ts + trigger time +
 // duration + per-category anomaly counts) for the per-business history.
-func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, startedAt time.Time, durationMs int64) error {
+func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, startedAt time.Time, durationMs int64, worldSize int) error {
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(filepath.Join(base, "analysis_result"), 0o755); err != nil {
 		return err
@@ -437,6 +437,7 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		"ts":          dirRel,
 		"started_at":  startedAt.Format(time.RFC3339),
 		"duration_ms": durationMs,
+		"world_size":  worldSize,
 		"summary":     summary,
 	}, "", "  ")
 	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)

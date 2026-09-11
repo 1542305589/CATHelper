@@ -8,11 +8,13 @@ import (
 )
 
 // cycleInfo is one per-cycle detection record surfaced by the per-business
-// history endpoint (ts + trigger time + duration + per-category anomaly counts).
+// history endpoint (ts + trigger time + duration + total rank count +
+// per-category anomaly counts).
 type cycleInfo struct {
 	Ts         string         `json:"ts"`
 	StartedAt  string         `json:"started_at"`
 	DurationMs int64          `json:"duration_ms"`
+	WorldSize  int            `json:"world_size"`
 	Summary    map[string]int `json:"summary"`
 }
 
@@ -56,11 +58,13 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 			var m struct {
 				StartedAt  string         `json:"started_at"`
 				DurationMs int64          `json:"duration_ms"`
+				WorldSize  int            `json:"world_size"`
 				Summary    map[string]int `json:"summary"`
 			}
 			if json.Unmarshal(raw, &m) == nil {
 				ci.StartedAt = m.StartedAt
 				ci.DurationMs = m.DurationMs
+				ci.WorldSize = m.WorldSize
 				if m.Summary != nil {
 					ci.Summary = m.Summary
 				}
