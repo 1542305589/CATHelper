@@ -32,9 +32,6 @@
   input { border:1px solid var(--border); border-radius:7px; padding:5px 9px; font-size:13px; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .mt { margin-top:10px; }
-  pre { margin:0; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-all; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; max-height:60vh; overflow:auto; }
-  .tabs button { border:none; border-bottom:2px solid transparent; border-radius:0; }
-  .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
   .muted { color:var(--muted); font-size:12px; }
   .console-link { color:var(--primary); text-decoration:none; font-size:12px; }
   .console-link:hover { text-decoration:underline; }
@@ -151,12 +148,6 @@ function render(list) {
           <input id="dport-${b.name}" type="number" placeholder="port" style="width:90px">
           <button onclick="addDaemon('${b.name}')">添加守护进程</button>
         </div>
-        <div class="tabs mt" style="border-bottom:1px solid var(--border)">
-          <button class="active" onclick="switchTab('${b.name}','report',this)">检测报告</button>
-          <button onclick="switchTab('${b.name}','result',this)">结果 JSON</button>
-          <button onclick="switchTab('${b.name}','op_metric',this)">op_metric</button>
-        </div>
-        <pre id="detail-${b.name}">选择上方标签查看该业务合并检测结果。</pre>
       </div>`;
     el.appendChild(card);
   }
@@ -170,18 +161,6 @@ function render(list) {
 function toggleDetail(head) {
   const body = head.nextElementSibling;
   body.style.display = body.style.display === 'none' ? '' : 'none';
-}
-
-async function switchTab(biz, tab, btn) {
-  btn.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('active'));
-  btn.classList.add('active');
-  const pre = $('detail-' + biz);
-  try {
-    const r = await fetch('/center/business/' + encodeURIComponent(biz) + '/' + (tab === 'report' ? 'report' : tab === 'result' ? 'result' : 'op_metric'));
-    if (!r.ok) { pre.textContent = '（暂无结果，等待首次触发检测）'; return; }
-    const ct = r.headers.get('Content-Type') || '';
-    pre.textContent = ct.includes('json') ? JSON.stringify(await r.json(), null, 2) : await r.text();
-  } catch(e) { pre.textContent = '加载失败：' + e.message; }
 }
 
 async function addBusiness() {
