@@ -1,6 +1,6 @@
 # CATHelper — 慢节点（Straggler）检测
 
-AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制。
+AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制；还支持**中心节点模式**（`--center`）：一个中心统一管理多个业务的多个守护进程，合并 op_metric 做跨节点检测并下发触发。
 
 ---
 
@@ -10,13 +10,14 @@ AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一
 - [二、数据准备](#二数据准备)
 - [三、一次性检测](#三一次性检测)
 - [四、守护进程模式](#四守护进程模式)
-- [五、HTTP 接口](#五http-接口)
-- [六、输出与解读](#六输出与解读)
-- [七、CLI 参数参考](#七cli-参数参考)
-- [八、检测原理](#八检测原理)
-- [九、边界情况](#九边界情况)
-- [十、目录结构](#十目录结构)
-- [十一、设计文档](#十一设计文档)
+- [五、中心节点模式](#五中心节点模式)
+- [六、HTTP 接口（守护进程）](#六http-接口守护进程)
+- [七、输出与解读](#七输出与解读)
+- [八、CLI 参数参考](#八cli-参数参考)
+- [九、检测原理](#九检测原理)
+- [十、边界情况](#十边界情况)
+- [十一、目录结构](#十一目录结构)
+- [十二、设计文档](#十二设计文档)
 
 ---
 
@@ -182,7 +183,7 @@ cd feature/straggler
 
 **检测顺序**：先跑 KPI（轻量、无侵入）→ 发现异常且有 `path` → 继续跑 Profiler 做交叉验证；KPI 无异常 → 自动 fallback 到 Profiler 精查；仅 KPI 无 `path` → KPI 结果即为最终输出。两道结果合并进 `straggler_output.json`（只跑哪个维度就只有哪个键）。
 
-> 需要排查"某卡为什么没被判异常"时，加 `--debug-output`，结果会包含所有正常卡/正常通信组的诊断分（见[六、输出与解读](#六输出与解读)）。
+> 需要排查"某卡为什么没被判异常"时，加 `--debug-output`，结果会包含所有正常卡/正常通信组的诊断分（见[七、输出与解读](#七输出与解读)）。
 
 ---
 
@@ -260,7 +261,76 @@ daemon_results/<start>/
 
 ---
 
-## 五、HTTP 接口
+## 五、中心节点模式
+
+中心节点（`--center`）管理多个**业务**（business），每个业务对应 1..N 个守护进程（一个训练任务跨节点的**全局唯一 rank**）。中心节点统一按周期触发业务内所有守护进程、接收它们上报的 op_metric，合并后**再检测一次**（多守护进程的数据放一起检查，可触发跨节点的 host 级指标），并落盘结果、提供业务级 Web 控制台。
+
+### 5.1 启动
+
+```bash
+./slowNodeDetection --center \
+    --center-port=8080 \
+    --center-data-dir=center_data \
+    --center-interval=600
+```
+
+参数说明：
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--center-port` | 否 | 8080 | 中心节点 HTTP 端口 |
+| `--center-data-dir` | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
+| `--center-interval` | 否 | 600 | 新业务的默认触发周期（秒） |
+
+### 5.2 核心概念
+
+- **业务（business）**：一个真实训练任务；含名称、触发周期、守护进程列表。
+- **守护进程（daemon）**：业务内的一个 `--daemon`（ip:port），全局唯一 rank。
+- **匹配（match）**：中心为每个守护进程生成**独立密钥**并下发，守护进程进入 `managed` 托管状态。密钥不持久化，中心或守护进程任一重启都需重新匹配。
+
+### 5.3 托管（managed）语义
+
+- 进入 managed 后，守护进程**停止自主调度**：`/daemon/start`、`/daemon/pause`、`/daemon/interval` 被拒绝；`/daemon/trigger` 必须带中心的密钥（`X-Match-Key`）才能触发。
+- 中心按业务周期**并发 trigger** 业务内所有守护进程 → 各守护进程「采集 → 分析 → 本地检测 → 上报 op_metric」→ 中心收齐（或 `max(各守护进程 collect-wait) + 60s` 超时）后合并检测。
+- **双向心跳**：中心每 5s 探守护进程 `/healthz` + `/daemon/match_status`（带密钥）；守护进程反向探中心 `/center/healthz`，中心挂则自动解除匹配回 `running`。
+
+### 5.4 守护进程状态（中心视角）
+
+| 状态 | 判定 | 可触发 | 恢复 |
+|------|------|--------|------|
+| 健康匹配 | healthz 通 + 匹配当前中心 | ✅ | — |
+| 断连 | 连续 3 次 healthz 失败 | ❌（业务冻结） | 自动：持续 healthz，恢复即解冻 |
+| 未匹配 | healthz 通但不在 managed | ❌ | 用户手动「匹配」 |
+| 匹配他人 | managed 但密钥非本中心 | ❌ | 去那个中心解除 |
+| 上报失败 | trigger 后超时未上报 | ❌ | 自动：下次探测恢复 |
+
+业务内**任一**守护进程非「健康匹配」即整体冻结（跳过触发）。
+
+### 5.5 中心节点 HTTP 接口
+
+| 方法 & 路径 | 作用 |
+|-------------|------|
+| `GET /` | 业务管理 Web 控制台（业务列表 + 状态 + 增删/匹配/解除） |
+| `GET /center/healthz` | 中心存活探针（守护进程反向心跳用） |
+| `GET /center/businesses` | 业务列表（含每守护进程状态） |
+| `POST /center/business` | 添加业务 `{"name","interval_sec","daemons":[{"ip","port"}]}` |
+| `DELETE /center/business/{name}` | 删除业务（解除其所有守护进程匹配） |
+| `POST /center/business/{name}/daemon` | 添加守护进程 `{"ip","port"}` |
+| `DELETE /center/business/{name}/daemon?ip=&port=` | 删除守护进程（若已匹配则先解除） |
+| `POST /center/business/{name}/daemon/match` | 手动匹配（重连）`{"ip","port"}` |
+| `POST /center/business/{name}/daemon/unmatch` | 手动解除匹配 `{"ip","port"}` |
+| `POST /center/op_metric/{business}/{daemon}` | 守护进程上报 op_metric（`X-Match-Key` 鉴权） |
+| `GET /center/business/{name}/report` | 该业务最新合并检测报告（text/plain） |
+| `GET /center/business/{name}/result` | 该业务最新合并结果 JSON |
+| `GET /center/business/{name}/op_metric` | 该业务最新合并 op_metric JSON |
+
+### 5.6 Web 控制台
+
+浏览器访问 `http://<host>:<center-port>/`：业务列表（名称/周期/守护进程数/健康汇总）、每业务守护进程状态徽章（健康匹配/断连/未匹配/匹配他人/上报失败）、添加业务与守护进程、匹配/解除/删除操作，以及每业务的检测报告/结果/op_metric 查看。
+
+---
+
+## 六、HTTP 接口（守护进程）
 
 路由无 `/api/v1` 前缀。查询类只读，控制类需 POST。以下假设端口 8080（`--daemon-port` 可改）。
 
@@ -356,7 +426,7 @@ curl -s -X POST localhost:8080/daemon/stop
 
 ---
 
-## 六、输出与解读
+## 七、输出与解读
 
 ### 6.1 合并 JSON：`straggler_output.json`
 
@@ -406,7 +476,7 @@ Bubble (npu_bubble): 无异常
 
 ---
 
-## 七、CLI 参数参考
+## 八、CLI 参数参考
 
 ### 顶层参数（一次性模式）
 
@@ -433,6 +503,15 @@ Bubble (npu_bubble): 无异常
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
 | `--profiler-iterations` | int | 否 | 1 | dyno nputrace 每轮采集迭代数 |
 
+### 中心节点参数（`--center`）
+
+| 参数 | 类型 | 必需 | 默认 | 说明 |
+|------|------|------|------|------|
+| `--center` | bool | 否 | 假 | 进入中心节点模式（管理多个业务/守护进程） |
+| `--center-port` | int | 否 | 8080 | 中心节点 HTTP 端口 |
+| `--center-data-dir` | string | 否 | center_data | 持久化根目录 |
+| `--center-interval` | int | 否 | 600 | 新业务默认触发周期（秒，≥60） |
+
 ### 阈值计算
 
 ```
@@ -455,7 +534,7 @@ Profiler 模式:
 
 ---
 
-## 八、检测原理
+## 九、检测原理
 
 ### 8.1 KPI 检测（resource/）
 
@@ -503,7 +582,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 ---
 
-## 九、边界情况
+## 十、边界情况
 
 | 场景 | 处理 |
 |------|------|
@@ -523,7 +602,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 
 ---
 
-## 十、目录结构
+## 十一、目录结构
 
 ```
 straggler/
@@ -534,6 +613,14 @@ straggler/
 │   ├── store.go            #   会话历史 + 周期计数
 │   ├── server.go           #   HTTP 路由（/status /straggler/* /daemon/*）
 │   └── types.go            #   Config / CycleResult / HTTP 响应类型
+├── center/                 # 中心节点：业务管理 + 匹配/心跳 + 合并检测 + Web 控制台
+│   ├── center.go           #   Center 结构、持久化、Run 循环
+│   ├── manage.go           #   匹配、探测、触发、合并检测、上报接收
+│   ├── server.go           #   HTTP 路由（业务 CRUD / op_metric / results）
+│   ├── result.go           #   每业务检测结果目录定位
+│   ├── types.go            #   Business / Daemon / Config
+│   ├── console.go          #   go:embed 控制台页面
+│   └── console.html        #   业务管理 Web 控制台（自包含）
 ├── README.md               # 本文件
 ├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
 ├── build.sh                # 一键构建：架构/版本检查 + 装 dyno/dynolog + wheel + go build
@@ -571,7 +658,7 @@ straggler/
 
 ---
 
-## 十一、设计文档
+## 十二、设计文档
 
 - [DESIGN_NPU_RESOURCE.md](./DESIGN_NPU_RESOURCE.md) — KPI 资源指标检测设计
 - [DESIGN.md](./DESIGN.md) — Profiling 检测设计
