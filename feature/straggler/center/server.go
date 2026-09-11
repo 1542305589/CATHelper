@@ -24,6 +24,8 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/business/{name}/daemon/match", c.handleMatchDaemon)
 	mux.HandleFunc("POST /center/business/{name}/daemon/unmatch", c.handleUnmatchDaemon)
 	mux.HandleFunc("POST /center/op_metric/{business}/{daemon}", c.handleOpMetric)
+	mux.HandleFunc("GET /center/business/{name}/history", c.handleBusinessHistory)
+	mux.HandleFunc("GET /center/business/{name}/console", c.handleBusinessConsole)
 	mux.HandleFunc("GET /center/business/{name}/report", c.handleBusinessReport)
 	mux.HandleFunc("GET /center/business/{name}/result", c.handleBusinessResult)
 	mux.HandleFunc("GET /center/business/{name}/op_metric", c.handleBusinessOpMetric)
@@ -285,10 +287,16 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "daemon not matched to this center", http.StatusForbidden)
 }
 
-// handleBusinessReport serves the business's latest merged detection report
-// (text/plain).
+// handleBusinessHistory lists the business's per-cycle result timestamps
+// (newest first).
+func (c *Center) handleBusinessHistory(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"cycles": c.resultDirs(r.PathValue("name"))})
+}
+
+// handleBusinessReport serves the business's merged detection report (text/plain)
+// for a given cycle (?ts=), latest when omitted.
 func (c *Center) handleBusinessReport(w http.ResponseWriter, r *http.Request) {
-	dir := c.latestResultDir(r.PathValue("name"))
+	dir := c.resultDir(r.PathValue("name"), r.URL.Query().Get("ts"))
 	if dir == "" {
 		http.Error(w, "no result yet", http.StatusNotFound)
 		return
@@ -303,9 +311,10 @@ func (c *Center) handleBusinessReport(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
-// handleBusinessResult serves the business's latest merged result JSON.
+// handleBusinessResult serves the business's merged result JSON for a given
+// cycle (?ts=), latest when omitted.
 func (c *Center) handleBusinessResult(w http.ResponseWriter, r *http.Request) {
-	dir := c.latestResultDir(r.PathValue("name"))
+	dir := c.resultDir(r.PathValue("name"), r.URL.Query().Get("ts"))
 	if dir == "" {
 		http.Error(w, "no result yet", http.StatusNotFound)
 		return
@@ -313,9 +322,10 @@ func (c *Center) handleBusinessResult(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(dir, "straggler_output.json"))
 }
 
-// handleBusinessOpMetric serves the business's latest merged op_metric JSON.
+// handleBusinessOpMetric serves the business's merged op_metric JSON for a
+// given cycle (?ts=), latest when omitted.
 func (c *Center) handleBusinessOpMetric(w http.ResponseWriter, r *http.Request) {
-	dir := c.latestResultDir(r.PathValue("name"))
+	dir := c.resultDir(r.PathValue("name"), r.URL.Query().Get("ts"))
 	if dir == "" {
 		http.Error(w, "no result yet", http.StatusNotFound)
 		return

@@ -36,6 +36,8 @@
   .tabs button { border:none; border-bottom:2px solid transparent; border-radius:0; }
   .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
   .muted { color:var(--muted); font-size:12px; }
+  .console-link { color:var(--primary); text-decoration:none; font-size:12px; }
+  .console-link:hover { text-decoration:underline; }
   .biz-head { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; }
   .biz-head .name { font-weight:600; }
   .del-row { margin-left:auto; }
@@ -134,6 +136,7 @@ function render(list) {
     card.innerHTML = `
       <div class="biz-head" onclick="toggleDetail(this)">
         <span class="name">${b.name}</span>
+        <a class="console-link" href="/center/business/${encodeURIComponent(b.name)}/console" onclick="event.stopPropagation()">进入控制台</a>
         <span class="muted">周期 ${b.interval_sec}s · ${b.daemons.length} 守护进程</span>
         ${summary}
         <span class="del-row"><button class="danger" onclick="event.stopPropagation();removeBusiness('${b.name}')">删除业务</button></span>
