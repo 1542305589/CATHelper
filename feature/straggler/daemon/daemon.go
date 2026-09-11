@@ -36,7 +36,7 @@ type Daemon struct {
 	cycleID       int           // per-process id, starting from 1
 	cycleInFlight bool
 	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
-	dynolog       *exec.Cmd     // dynolog child to kill on shutdown (nil = reusing existing)
+	dynolog       *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
 	stopOnce      sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
 	stopCh        chan struct{} // closed by POST /daemon/stop to request graceful shutdown
 	removeResults bool          // set by Stop(): delete all daemon_results/ on shutdown
@@ -91,9 +91,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 	d.logf("HTTP server listening on :%d", d.cfg.Port)
 
-	if d.cfg.DynologBin != "" {
-		d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
-	}
+	d.ensureDynolog()
 	if d.cfg.KpiDir == "" {
 		d.logf("KPI detection disabled (no --kpi-dir): cycles run profiler-only")
 	} else {
@@ -400,8 +398,8 @@ func (d *Daemon) finishCycle(cr *CycleResult) {
 	d.logf("cycle %d finished: dbs=%d error=%q", cr.ID, cr.DBs, cr.Error)
 }
 
-// shutdown stops the HTTP server, waits for an in-flight cycle (max 10 min),
-// and kills the dynolog child we spawned.
+// shutdown stops the HTTP server and waits for an in-flight cycle (max 10 min).
+// The dynolog child is left running so collection can continue after exit.
 func (d *Daemon) shutdown(srv *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -422,10 +420,8 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	if d.dynolog != nil {
-		_ = d.dynolog.Process.Kill()
-		_, _ = d.dynolog.Process.Wait()
-	}
+	// The dynolog child is intentionally NOT killed here — it keeps running so
+	// the user can still collect profiler data after the daemon exits.
 	if d.removeResults {
 		if err := os.RemoveAll("daemon_results"); err != nil {
 			d.logf("remove daemon_results: %v", err)
@@ -503,10 +499,10 @@ func (d *Daemon) Trigger() error {
 }
 
 // Stop requests a graceful shutdown of the daemon: Run's select observes the
-// closed stopCh and runs shutdown (HTTP server close, in-flight cycle wait,
-// dynolog child kill). Idempotent — repeated calls are no-ops. All archived
-// result files under daemon_results/ (each cycle's dump_dir) are removed as
-// part of the shutdown.
+// closed stopCh and runs shutdown (HTTP server close, in-flight cycle wait).
+// The dynolog child is left running. Idempotent — repeated calls are no-ops.
+// All archived result files under daemon_results/ (each cycle's dump_dir) are
+// removed as part of the shutdown.
 func (d *Daemon) Stop() {
 	d.stopOnce.Do(func() {
 		d.mu.Lock()
