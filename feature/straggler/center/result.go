@@ -10,10 +10,20 @@ import (
 // "" when none exists. Result dirs are named by timestamp (20060102-150405), so
 // lexicographic order == chronological order.
 func (c *Center) latestResultDir(name string) string {
+	dirs := c.resultDirs(name)
+	if len(dirs) == 0 {
+		return ""
+	}
+	return filepath.Join(c.cfg.DataDir, name, dirs[0])
+}
+
+// resultDirs returns the per-cycle result dir names (timestamps) under a
+// business, newest first.
+func (c *Center) resultDirs(name string) []string {
 	base := filepath.Join(c.cfg.DataDir, name)
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var dirs []string
 	for _, e := range entries {
@@ -21,9 +31,19 @@ func (c *Center) latestResultDir(name string) string {
 			dirs = append(dirs, e.Name())
 		}
 	}
-	if len(dirs) == 0 {
-		return ""
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	return dirs
+}
+
+// resultDir returns the result dir for a specific timestamp, or the latest when
+// ts is empty; "" when absent.
+func (c *Center) resultDir(name, ts string) string {
+	if ts == "" {
+		return c.latestResultDir(name)
 	}
-	sort.Strings(dirs)
-	return filepath.Join(base, dirs[len(dirs)-1])
+	dir := filepath.Join(c.cfg.DataDir, name, ts)
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir
+	}
+	return ""
 }

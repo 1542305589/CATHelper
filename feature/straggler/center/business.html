@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>业务控制台</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --border:#e2e4e8; --text:#1f2328; --muted:#6b7280; --primary:#2563eb;
+    --green:#16a34a; --amber:#d97706; --red:#dc2626; --mono:Consolas,Menlo,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--card); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:16px; margin:0; }
+  header .back { color:var(--primary); text-decoration:none; font-size:14px; }
+  .refresh { margin-left:auto; color:var(--muted); font-size:12px; }
+  .wrap { max-width:1100px; margin:0 auto; padding:16px 20px; display:flex; flex-direction:column; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; }
+  .card > h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
+  .body { padding:12px 14px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:#eef2ff; }
+  tbody tr.selected { background:#dbeafe; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; color:#fff; }
+  .badge.healthy { background:var(--green); }
+  .badge.unmatched { background:var(--amber); }
+  .badge.other { background:#9333ea; }
+  .badge.report_failed { background:#eab308; }
+  .badge.disconnected { background:var(--red); }
+  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--border); }
+  .tabs button { border:none; background:none; padding:9px 14px; border-bottom:2px solid transparent; color:var(--muted); cursor:pointer; font-size:13px; }
+  .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
+  pre { margin:0; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-all; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; max-height:60vh; overflow:auto; }
+  .muted { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="/">← 返回业务列表</a>
+  <h1 id="title">业务控制台</h1>
+  <span class="refresh">每 5s 自动刷新</span>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>守护进程</h2>
+    <div class="body">
+      <table>
+        <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th></tr></thead>
+        <tbody id="daemonBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>检测历史 <span id="histCount" class="muted"></span></h2>
+    <div style="overflow:auto; max-height:32vh;">
+      <table>
+        <thead><tr><th>#</th><th>检测时间</th></tr></thead>
+        <tbody id="histBody"></tbody>
+      </table>
+    </div>
+    <div id="histEmpty" class="muted" style="padding:16px;">加载中…</div>
+  </div>
+
+  <div class="card">
+    <div class="tabs">
+      <button id="tabReport" class="active">检测报告</button>
+      <button id="tabResult">结果 JSON</button>
+      <button id="tabOpMetric">op_metric</button>
+    </div>
+    <div class="body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const parts = location.pathname.split('/');      // /center/business/<name>/console
+const BIZ = decodeURIComponent(parts[3] || '');
+let selectedTs = null;
+
+function stateLabel(s) {
+  return {healthy:'健康匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function renderDaemons(b) {
+  $('title').textContent = '业务控制台 · ' + b.name;
+  const tb = $('daemonBody');
+  tb.innerHTML = '';
+  for (const d of b.daemons || []) {
+    tb.innerHTML += `<tr>
+      <td>${d.ip}:${d.port}</td>
+      <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
+      <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
+    </tr>`;
+  }
+}
+
+function renderHistory(cycles) {
+  const tb = $('histBody');
+  tb.innerHTML = '';
+  $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
+  $('histEmpty').style.display = cycles.length ? 'none' : 'block';
+  $('histEmpty').textContent = cycles.length ? '' : '暂无检测记录';
+  cycles.forEach((ts, i) => {
+    const tr = document.createElement('tr');
+    tr.onclick = () => select(ts, tr);
+    const td1 = document.createElement('td'); td1.textContent = i + 1;
+    const td2 = document.createElement('td'); td2.textContent = fmtTs(ts);
+    tr.appendChild(td1); tr.appendChild(td2);
+    tb.appendChild(tr);
+  });
+}
+
+function fmtTs(ts) {
+  if (!ts) return '—';
+  const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return ts;
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+
+function select(ts, tr) {
+  selectedTs = ts;
+  document.querySelectorAll('#histBody tr').forEach(x => x.classList.remove('selected'));
+  tr.classList.add('selected');
+  loadDetail(ts, activeTab());
+}
+
+function activeTab() {
+  if ($('tabResult').classList.contains('active')) return 'result';
+  if ($('tabOpMetric').classList.contains('active')) return 'op_metric';
+  return 'report';
+}
+
+async function loadDetail(ts, tab) {
+  const base = '/center/business/' + encodeURIComponent(BIZ) + '/' + tab + '?ts=' + encodeURIComponent(ts || '');
+  try {
+    const r = await fetch(base);
+    if (!r.ok) { $('detail').textContent = '（暂无结果）'; return; }
+    const ct = r.headers.get('Content-Type') || '';
+    $('detail').textContent = ct.includes('json') ? JSON.stringify(await r.json(), null, 2) : await r.text();
+  } catch(e) { $('detail').textContent = '加载失败：' + e.message; }
+}
+
+async function refresh() {
+  try {
+    const list = await getJSON('/center/businesses');
+    const b = (list.businesses || []).find(x => x.name === BIZ);
+    if (!b) { $('title').textContent = '业务不存在'; return; }
+    renderDaemons(b);
+  } catch(e) {}
+  try {
+    const h = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/history');
+    renderHistory(h.cycles || []);
+  } catch(e) {}
+}
+
+['tabReport','tabResult','tabOpMetric'].forEach(id => {
+  $(id).onclick = () => {
+    ['tabReport','tabResult','tabOpMetric'].forEach(t => $(t).classList.remove('active'));
+    $(id).classList.add('active');
+    if (selectedTs != null) loadDetail(selectedTs, activeTab());
+  };
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
