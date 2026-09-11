@@ -108,7 +108,7 @@
       <h2>检测历史 <span id="histCount" class="muted"></span></h2>
       <div style="overflow:auto; max-height:36vh;">
         <table>
-          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>异常摘要</th></tr></thead>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>world_size</th><th>异常摘要</th></tr></thead>
           <tbody id="histBody"></tbody>
         </table>
       </div>
@@ -214,10 +214,10 @@ function renderHistory(cycles) {
     const tr = document.createElement('tr');
     tr.onclick = () => select(c.ts, tr);
     if (c.ts === selectedTs) tr.className = 'selected';
-    const cells = [i + 1, timeFmt(c.started_at) || fmtTs(c.ts), msFmt(c.duration_ms), renderSummary(c.summary)];
+    const cells = [i + 1, timeFmt(c.started_at) || fmtTs(c.ts), msFmt(c.duration_ms), c.world_size != null ? c.world_size : '—', renderSummary(c.summary)];
     cells.forEach((h, j) => {
       const td = document.createElement('td');
-      if (j === 3) td.innerHTML = h; else td.textContent = h;
+      if (j === 4) td.innerHTML = h; else td.textContent = h;
       tr.appendChild(td);
     });
     tb.appendChild(tr);
