@@ -114,6 +114,16 @@ function stateLabel(s) {
 }
 
 function render(list) {
+  // 收集展开状态 + 输入框值，刷新时保留（避免 5s 轮询把用户操作冲掉）
+  const expanded = new Set();
+  const inputVals = {};
+  document.querySelectorAll('#list .biz-head').forEach(h => {
+    const name = h.querySelector('.name').textContent;
+    const body = h.nextElementSibling;
+    if (body && body.style.display !== 'none') expanded.add(name);
+  });
+  document.querySelectorAll('#list input').forEach(i => { inputVals[i.id] = i.value; });
+
   const el = $('list');
   el.innerHTML = '';
   for (const b of list.businesses || []) {
@@ -128,7 +138,7 @@ function render(list) {
         ${summary}
         <span class="del-row"><button class="danger" onclick="event.stopPropagation();removeBusiness('${b.name}')">删除业务</button></span>
       </div>
-      <div class="body" style="display:none">
+      <div class="body" style="display:${expanded.has(b.name) ? '' : 'none'}">
         <table>
           <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th><th>操作</th></tr></thead>
           <tbody>${b.daemons.map(d => daemonRow(b.name, d)).join('')}</tbody>
@@ -146,6 +156,11 @@ function render(list) {
         <pre id="detail-${b.name}">选择上方标签查看该业务合并检测结果。</pre>
       </div>`;
     el.appendChild(card);
+  }
+  // 恢复输入框值
+  for (const [id, val] of Object.entries(inputVals)) {
+    const input = document.getElementById(id);
+    if (input) input.value = val;
   }
 }
 

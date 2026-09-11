@@ -37,6 +37,9 @@ func New(cfg Config) *Center {
 		biz:  make(map[string]*Business),
 		logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[CENTER] "+format+"\n", args...) },
 	}
+	// Ensure the data dir exists at startup (created lazily if absent), so a
+	// fresh --center-data-dir is ready before the first CRUD / result write.
+	_ = os.MkdirAll(c.cfg.DataDir, 0o755)
 	c.load()
 	return c
 }
