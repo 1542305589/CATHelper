@@ -29,6 +29,10 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("GET /center/business/{name}/report", c.handleBusinessReport)
 	mux.HandleFunc("GET /center/business/{name}/result", c.handleBusinessResult)
 	mux.HandleFunc("GET /center/business/{name}/op_metric", c.handleBusinessOpMetric)
+	mux.HandleFunc("POST /center/business/{name}/trigger", c.handleBusinessTrigger)
+	mux.HandleFunc("POST /center/business/{name}/pause", c.handleBusinessPause)
+	mux.HandleFunc("POST /center/business/{name}/start", c.handleBusinessStart)
+	mux.HandleFunc("POST /center/business/{name}/interval", c.handleBusinessInterval)
 	return &http.Server{Handler: mux}
 }
 
@@ -54,9 +58,14 @@ type daemonStatus struct {
 
 // businessStatus is the web-visible view of one business.
 type businessStatus struct {
-	Name        string         `json:"name"`
-	IntervalSec int64          `json:"interval_sec"`
-	Daemons     []daemonStatus `json:"daemons"`
+	Name         string         `json:"name"`
+	IntervalSec  int64          `json:"interval_sec"`
+	Paused       bool           `json:"paused"`
+	CyclesTotal  int            `json:"cycles_total"`
+	CyclesFailed int            `json:"cycles_failed"`
+	NextTrigger  string         `json:"next_trigger,omitempty"`
+	CollectWait  int64          `json:"collect_wait"` // max across the business's daemons
+	Daemons      []daemonStatus `json:"daemons"`
 }
 
 func daemonState(d *Daemon) string {
@@ -77,9 +86,22 @@ func daemonState(d *Daemon) string {
 func (c *Center) statusViewLocked() []businessStatus {
 	out := make([]businessStatus, 0, len(c.biz))
 	for _, b := range c.biz {
-		bs := businessStatus{Name: b.Name, IntervalSec: b.IntervalSec, Daemons: make([]daemonStatus, 0, len(b.Daemons))}
+		bs := businessStatus{
+			Name:         b.Name,
+			IntervalSec:  b.IntervalSec,
+			Paused:       b.Paused,
+			CyclesTotal:  b.CyclesTotal,
+			CyclesFailed: b.CyclesFailed,
+			Daemons:      make([]daemonStatus, 0, len(b.Daemons)),
+		}
+		if !b.nextTrigger.IsZero() {
+			bs.NextTrigger = b.nextTrigger.Format(time.RFC3339)
+		}
 		for _, d := range b.Daemons {
 			bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait})
+			if d.collectWait > bs.CollectWait {
+				bs.CollectWait = d.collectWait
+			}
 		}
 		out = append(out, bs)
 	}
@@ -331,6 +353,81 @@ func (c *Center) handleBusinessOpMetric(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	http.ServeFile(w, r, filepath.Join(dir, "op_metric.json"))
+}
+
+// handleBusinessTrigger immediately triggers one business's detection round.
+func (c *Center) handleBusinessTrigger(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		c.mu.Unlock()
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	if b.Paused {
+		c.mu.Unlock()
+		http.Error(w, "business is paused", http.StatusConflict)
+		return
+	}
+	ready := c.businessReadyLocked(b)
+	c.mu.Unlock()
+	if !ready {
+		http.Error(w, "not all daemons healthy", http.StatusConflict)
+		return
+	}
+	go c.triggerBusiness(b)
+	writeJSON(w, map[string]string{"status": "triggered"})
+}
+
+// handleBusinessPause pauses a business's scheduling.
+func (c *Center) handleBusinessPause(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.Paused = true
+	c.save()
+	writeJSON(w, map[string]string{"status": "paused"})
+}
+
+// handleBusinessStart resumes a business's scheduling.
+func (c *Center) handleBusinessStart(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.Paused = false
+	b.nextTrigger = time.Now().Add(time.Duration(b.IntervalSec) * time.Second)
+	c.save()
+	writeJSON(w, map[string]string{"status": "started"})
+}
+
+// handleBusinessInterval updates a business's trigger period.
+func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IntervalSec int64 `json:"interval_sec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.IntervalSec <= 0 {
+		http.Error(w, `invalid body: {"interval_sec": 600}`, http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.IntervalSec = req.IntervalSec
+	b.nextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
+	c.save()
+	writeJSON(w, map[string]any{"interval_sec": req.IntervalSec})
 }
 
 // tryMatch matches a daemon in a goroutine (best-effort on add).

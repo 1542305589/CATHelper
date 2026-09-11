@@ -6,18 +6,30 @@
 <title>业务控制台</title>
 <style>
   :root { --bg:#f4f5f7; --card:#fff; --border:#e2e4e8; --text:#1f2328; --muted:#6b7280; --primary:#2563eb;
-    --green:#16a34a; --amber:#d97706; --red:#dc2626; --mono:Consolas,Menlo,monospace; }
+    --green:#16a34a; --amber:#d97706; --red:#dc2626; --mono:"SFMono-Regular",Consolas,Menlo,monospace; }
   * { box-sizing:border-box; }
   body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
-  header { background:var(--card); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:12px; }
-  header h1 { font-size:16px; margin:0; }
+  header { background:var(--card); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:12px; position:sticky; top:0; z-index:10; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
   header .back { color:var(--primary); text-decoration:none; font-size:14px; }
   .refresh { margin-left:auto; color:var(--muted); font-size:12px; }
-  .wrap { max-width:1100px; margin:0 auto; padding:16px 20px; display:flex; flex-direction:column; gap:16px; }
+  .wrap { display:grid; grid-template-columns:360px 1fr; gap:16px; padding:16px 20px; max-width:1500px; margin:0 auto; }
+  @media (max-width:900px) { .wrap { grid-template-columns:1fr; } }
+  .col { display:flex; flex-direction:column; gap:16px; min-width:0; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:10px; }
-  .card > h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
-  .body { padding:12px 14px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
+  .card h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
+  .card .body { padding:12px 14px; }
+  .kv { display:grid; grid-template-columns:110px 1fr; row-gap:6px; font-size:13px; }
+  .kv dt { color:var(--muted); }
+  .kv dd { margin:0; word-break:break-all; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; }
+  button { border:1px solid var(--border); background:var(--card); color:var(--text); padding:7px 14px; border-radius:8px; font-size:13px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--primary); color:var(--primary); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  input { border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:13px; width:96px; }
+  .interval-form { display:flex; align-items:center; gap:8px; font-size:13px; margin-top:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
   th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
   th { color:var(--muted); font-weight:600; }
   tbody tr { cursor:pointer; }
@@ -29,13 +41,17 @@
   .badge.other { background:#9333ea; }
   .badge.report_failed { background:#eab308; }
   .badge.disconnected { background:var(--red); }
-  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--border); }
-  .tabs button { border:none; background:none; padding:9px 14px; border-bottom:2px solid transparent; color:var(--muted); cursor:pointer; font-size:13px; }
-  .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
-  pre { margin:0; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-all; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; max-height:60vh; overflow:auto; }
-  .muted { color:var(--muted); font-size:12px; }
+  .daemon-link { color:var(--primary); text-decoration:none; }
+  .daemon-link:hover { text-decoration:underline; }
   .sum { display:inline-block; margin:1px 4px 1px 0; padding:1px 7px; border-radius:4px; background:#eef2ff; color:#3730a3; font-size:11px; }
   .sum.bad { background:#fee2e2; color:#991b1b; }
+  .tabs { display:flex; gap:2px; padding:0 14px; border-bottom:1px solid var(--border); }
+  .tabs button { border:none; border-radius:0; background:none; padding:9px 14px; border-bottom:2px solid transparent; font-size:13px; color:var(--muted); }
+  .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
+  .tab-body { padding:14px; }
+  pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:65vh; overflow:auto; background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .empty { color:var(--muted); font-size:13px; padding:20px; text-align:center; }
 </style>
 </head>
 <body>
@@ -46,66 +62,96 @@
 </header>
 
 <div class="wrap">
-  <div class="card">
-    <h2>守护进程</h2>
-    <div class="body">
-      <table>
-        <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th></tr></thead>
-        <tbody id="daemonBody"></tbody>
-      </table>
+  <div class="col">
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="body">
+        <dl class="kv">
+          <dt>检测周期</dt><dd id="vInterval">—</dd>
+          <dt>已运行周期</dt><dd id="vTotal">—</dd>
+          <dt>失败周期</dt><dd id="vFailed">—</dd>
+          <dt>下次运行</dt><dd id="vNext">—</dd>
+          <dt>collect_wait</dt><dd id="vCollectWait">—</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>控制</h2>
+      <div class="body">
+        <div class="controls">
+          <button class="primary" id="btnTrigger">立即触发</button>
+          <button id="btnPause">暂停</button>
+          <button id="btnStart">启动</button>
+        </div>
+        <div class="interval-form">
+          周期(秒):
+          <input id="intervalInput" type="number" min="60">
+          <button id="btnInterval">设置</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>守护进程</h2>
+      <div class="body">
+        <table>
+          <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th></tr></thead>
+          <tbody id="daemonBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>检测历史 <span id="histCount" class="muted"></span></h2>
-    <div style="overflow:auto; max-height:32vh;">
-      <table>
-        <thead><tr><th>#</th><th>检测时间</th><th>异常摘要</th></tr></thead>
-        <tbody id="histBody"></tbody>
-      </table>
+  <div class="col">
+    <div class="card">
+      <h2>检测历史 <span id="histCount" class="muted"></span></h2>
+      <div style="overflow:auto; max-height:36vh;">
+        <table>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>异常摘要</th></tr></thead>
+          <tbody id="histBody"></tbody>
+        </table>
+      </div>
+      <div id="histEmpty" class="empty">加载中…</div>
     </div>
-    <div id="histEmpty" class="muted" style="padding:16px;">加载中…</div>
-  </div>
 
-  <div class="card">
-    <div class="tabs">
-      <button id="tabReport" class="active">检测报告</button>
-      <button id="tabResult">结果 JSON</button>
-      <button id="tabOpMetric">op_metric</button>
+    <div class="card">
+      <div class="tabs">
+        <button id="tabReport" class="active">检测报告</button>
+        <button id="tabResult">结果 JSON</button>
+        <button id="tabOpMetric">op_metric</button>
+      </div>
+      <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
     </div>
-    <div class="body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
   </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
-const parts = location.pathname.split('/');      // /center/business/<name>/console
+const parts = location.pathname.split('/');
 const BIZ = decodeURIComponent(parts[3] || '');
 let selectedTs = null;
 
 function stateLabel(s) {
   return {healthy:'健康匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
 }
-
-async function getJSON(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
+function timeFmt(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d)) return s;
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
-
-function renderDaemons(b) {
-  $('title').textContent = '业务控制台 · ' + b.name;
-  const tb = $('daemonBody');
-  tb.innerHTML = '';
-  for (const d of b.daemons || []) {
-    tb.innerHTML += `<tr>
-      <td>${d.ip}:${d.port}</td>
-      <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
-      <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
-    </tr>`;
-  }
+function msFmt(ms) {
+  if (ms == null || ms <= 0) return '—';
+  return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
 }
-
+function fmtTs(ts) {
+  if (!ts) return '—';
+  const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return ts;
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
 function renderSummary(summary) {
   if (!summary || !Object.keys(summary).length) return '正常';
   const order = ['cal','comm','cpu','npu_bubble'];
@@ -120,6 +166,44 @@ function renderSummary(summary) {
   return parts.length ? parts.join('') : '正常';
 }
 
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+async function post(url, body) {
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+  const txt = await r.text().catch(()=> '');
+  let d = {}; try { d = txt ? JSON.parse(txt) : {}; } catch(e){}
+  if (!r.ok) throw new Error(r.status + (txt ? ' ' + txt : ''));
+  return d;
+}
+
+function renderStatus(b) {
+  $('title').textContent = '业务控制台 · ' + b.name;
+  $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
+  $('vTotal').textContent = b.cycles_total != null ? b.cycles_total : '—';
+  $('vFailed').textContent = b.cycles_failed != null ? b.cycles_failed : '—';
+  $('vNext').textContent = timeFmt(b.next_trigger);
+  $('vCollectWait').textContent = b.collect_wait ? b.collect_wait + ' s' : '—';
+  if (!$('intervalInput').value) $('intervalInput').value = b.interval_sec || 600;
+  $('btnPause').disabled = b.paused;
+  $('btnStart').disabled = !b.paused;
+  $('btnTrigger').disabled = b.paused;
+}
+
+function renderDaemons(b) {
+  const tb = $('daemonBody');
+  tb.innerHTML = '';
+  for (const d of b.daemons || []) {
+    tb.innerHTML += `<tr>
+      <td><a class="daemon-link" href="http://${d.ip}:${d.port}/" target="_blank">${d.ip}:${d.port}</a></td>
+      <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
+      <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
+    </tr>`;
+  }
+}
+
 function renderHistory(cycles) {
   const tb = $('histBody');
   tb.innerHTML = '';
@@ -130,19 +214,14 @@ function renderHistory(cycles) {
     const tr = document.createElement('tr');
     tr.onclick = () => select(c.ts, tr);
     if (c.ts === selectedTs) tr.className = 'selected';
-    const td1 = document.createElement('td'); td1.textContent = i + 1;
-    const td2 = document.createElement('td'); td2.textContent = fmtTs(c.ts);
-    const td3 = document.createElement('td'); td3.innerHTML = renderSummary(c.summary);
-    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+    const cells = [i + 1, timeFmt(c.started_at) || fmtTs(c.ts), msFmt(c.duration_ms), renderSummary(c.summary)];
+    cells.forEach((h, j) => {
+      const td = document.createElement('td');
+      if (j === 3) td.innerHTML = h; else td.textContent = h;
+      tr.appendChild(td);
+    });
     tb.appendChild(tr);
   });
-}
-
-function fmtTs(ts) {
-  if (!ts) return '—';
-  const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
-  if (!m) return ts;
-  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
 }
 
 function select(ts, tr) {
@@ -173,6 +252,7 @@ async function refresh() {
     const list = await getJSON('/center/businesses');
     const b = (list.businesses || []).find(x => x.name === BIZ);
     if (!b) { $('title').textContent = '业务不存在'; return; }
+    renderStatus(b);
     renderDaemons(b);
   } catch(e) {}
   try {
@@ -180,6 +260,23 @@ async function refresh() {
     renderHistory(h.cycles || []);
   } catch(e) {}
 }
+
+async function control(kind) {
+  try {
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/' + kind, kind === 'interval' ? { interval_sec: parseInt($('intervalInput').value, 10) } : undefined);
+    if (kind === 'interval') { /* ok */ }
+    setTimeout(refresh, 400);
+  } catch(e) { alert('操作失败：' + e.message); }
+}
+
+$('btnTrigger').onclick = () => control('trigger');
+$('btnPause').onclick = () => control('pause');
+$('btnStart').onclick = () => control('start');
+$('btnInterval').onclick = () => {
+  const v = parseInt($('intervalInput').value, 10);
+  if (!v || v < 60 || v > 86400) { alert('周期需在 [60, 86400] 秒之间'); return; }
+  control('interval');
+};
 
 ['tabReport','tabResult','tabOpMetric'].forEach(id => {
   $(id).onclick = () => {

@@ -8,10 +8,12 @@ import (
 )
 
 // cycleInfo is one per-cycle detection record surfaced by the per-business
-// history endpoint (ts + per-category anomaly counts).
+// history endpoint (ts + trigger time + duration + per-category anomaly counts).
 type cycleInfo struct {
-	Ts      string         `json:"ts"`
-	Summary map[string]int `json:"summary"`
+	Ts         string         `json:"ts"`
+	StartedAt  string         `json:"started_at"`
+	DurationMs int64          `json:"duration_ms"`
+	Summary    map[string]int `json:"summary"`
 }
 
 // latestResultDir returns the newest per-cycle result dir under a business, or
@@ -43,7 +45,8 @@ func (c *Center) resultDirs(name string) []string {
 	return dirs
 }
 
-// cycleInfos returns each cycle's summary (ts + counts), newest first.
+// cycleInfos returns each cycle's summary (ts + trigger time + duration +
+// counts), newest first.
 func (c *Center) cycleInfos(name string) []cycleInfo {
 	base := filepath.Join(c.cfg.DataDir, name)
 	var out []cycleInfo
@@ -51,10 +54,16 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 		ci := cycleInfo{Ts: ts, Summary: map[string]int{}}
 		if raw, err := os.ReadFile(filepath.Join(base, ts, "cycle.json")); err == nil {
 			var m struct {
-				Summary map[string]int `json:"summary"`
+				StartedAt  string         `json:"started_at"`
+				DurationMs int64          `json:"duration_ms"`
+				Summary    map[string]int `json:"summary"`
 			}
-			if json.Unmarshal(raw, &m) == nil && m.Summary != nil {
-				ci.Summary = m.Summary
+			if json.Unmarshal(raw, &m) == nil {
+				ci.StartedAt = m.StartedAt
+				ci.DurationMs = m.DurationMs
+				if m.Summary != nil {
+					ci.Summary = m.Summary
+				}
 			}
 		}
 		out = append(out, ci)
