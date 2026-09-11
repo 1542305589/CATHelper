@@ -1,10 +1,18 @@
 package center
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 )
+
+// cycleInfo is one per-cycle detection record surfaced by the per-business
+// history endpoint (ts + per-category anomaly counts).
+type cycleInfo struct {
+	Ts      string         `json:"ts"`
+	Summary map[string]int `json:"summary"`
+}
 
 // latestResultDir returns the newest per-cycle result dir under a business, or
 // "" when none exists. Result dirs are named by timestamp (20060102-150405), so
@@ -33,6 +41,25 @@ func (c *Center) resultDirs(name string) []string {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 	return dirs
+}
+
+// cycleInfos returns each cycle's summary (ts + counts), newest first.
+func (c *Center) cycleInfos(name string) []cycleInfo {
+	base := filepath.Join(c.cfg.DataDir, name)
+	var out []cycleInfo
+	for _, ts := range c.resultDirs(name) {
+		ci := cycleInfo{Ts: ts, Summary: map[string]int{}}
+		if raw, err := os.ReadFile(filepath.Join(base, ts, "cycle.json")); err == nil {
+			var m struct {
+				Summary map[string]int `json:"summary"`
+			}
+			if json.Unmarshal(raw, &m) == nil && m.Summary != nil {
+				ci.Summary = m.Summary
+			}
+		}
+		out = append(out, ci)
+	}
+	return out
 }
 
 // resultDir returns the result dir for a specific timestamp, or the latest when

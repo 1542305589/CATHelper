@@ -287,10 +287,10 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "daemon not matched to this center", http.StatusForbidden)
 }
 
-// handleBusinessHistory lists the business's per-cycle result timestamps
-// (newest first).
+// handleBusinessHistory lists the business's per-cycle records (ts + summary),
+// newest first.
 func (c *Center) handleBusinessHistory(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"cycles": c.resultDirs(r.PathValue("name"))})
+	writeJSON(w, map[string]any{"cycles": c.cycleInfos(r.PathValue("name"))})
 }
 
 // handleBusinessReport serves the business's merged detection report (text/plain)
