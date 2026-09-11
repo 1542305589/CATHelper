@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -405,11 +407,29 @@ func (d *Daemon) handleDaemonMatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `invalid body: {"center_addr","key","business","daemon"}`, http.StatusBadRequest)
 		return
 	}
-	if err := d.Match(req.CenterAddr, req.Key, req.Business, req.Daemon); err != nil {
+	// The center may self-report a loopback/unspecified host; override the host
+	// with the request's source IP so the reverse heartbeat reaches it.
+	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	writeJSON(w, map[string]any{"status": "matched", "collect_wait": int64(d.cfg.CollectWait.Seconds())})
+}
+
+// resolveCenterAddr replaces centerAddr's host with the HTTP request's source IP,
+// keeping the port. Falls back to the original when the source addr or URL can't
+// be parsed.
+func resolveCenterAddr(centerAddr string, r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		return centerAddr
+	}
+	u, err := url.Parse(centerAddr)
+	if err != nil || u.Port() == "" {
+		return centerAddr
+	}
+	u.Host = net.JoinHostPort(host, u.Port())
+	return u.String()
 }
 
 // handleDaemonUnmatch ends the managed relationship; requires the match key.
