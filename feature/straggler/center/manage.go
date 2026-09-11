@@ -42,20 +42,26 @@ func (c *Center) heartbeatLoop() {
 	}
 }
 
-// scheduleLoop triggers each business when its interval elapses.
+// scheduleLoop triggers each business when its interval elapses (paused
+// businesses are skipped).
 func (c *Center) scheduleLoop() {
-	last := make(map[string]time.Time)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		c.mu.Lock()
-		for name, b := range c.biz {
+		for _, b := range c.biz {
+			if b.Paused {
+				continue
+			}
 			interval := time.Duration(b.IntervalSec) * time.Second
 			if interval <= 0 {
 				interval = c.cfg.Interval
 			}
-			if now := time.Now(); now.Sub(last[name]) >= interval {
-				last[name] = now
+			if b.nextTrigger.IsZero() {
+				b.nextTrigger = time.Now().Add(interval)
+			}
+			if time.Now().After(b.nextTrigger) {
+				b.nextTrigger = time.Now().Add(interval)
 				if c.businessReadyLocked(b) {
 					go c.triggerBusiness(b)
 				}
@@ -183,7 +189,8 @@ func daemonMatchStatus(d *Daemon, key string) (*matchStatusResp, error) {
 // ---------------------------------------------------------------------------
 
 // triggerBusiness triggers every healthy daemon, waits for their reports (or
-// the max-collect-wait+60s timeout), merges and re-runs detection.
+// the max-collect-wait+60s timeout), merges and re-runs detection. It tracks the
+// business's cycle counters and next trigger, and re-anchors the schedule.
 func (c *Center) triggerBusiness(b *Business) {
 	triggerAt := time.Now()
 	c.mu.Lock()
@@ -226,11 +233,26 @@ func (c *Center) triggerBusiness(b *Business) {
 	c.markMissingReports(b, triggerAt)
 
 	merged := c.mergeOpMetric(b)
+	durationMs := time.Since(triggerAt).Milliseconds()
+
+	var failed bool
 	if len(merged) == 0 {
 		c.logf("business %s: no op_metric reported", b.Name)
-		return
+		failed = true
+	} else if err := c.detectAndStore(b, merged, triggerAt, durationMs); err != nil {
+		c.logf("business %s: detect failed: %v", b.Name, err)
+		failed = true
 	}
-	c.detectAndStore(b, merged)
+
+	c.mu.Lock()
+	if failed {
+		b.CyclesFailed++
+	} else {
+		b.CyclesTotal++
+	}
+	b.nextTrigger = time.Now().Add(time.Duration(b.IntervalSec) * time.Second)
+	c.save()
+	c.mu.Unlock()
 }
 
 // markMissingReports flags daemons that failed to report within the round's
@@ -270,11 +292,10 @@ func (c *Center) mergeOpMetric(b *Business) detector.OpMetric {
 // op_metric is materialized to a temp dir and re-used through the existing
 // file-backed detection path, so host-level (slow-CPU / cross-node) detection
 // and the report's cross-node sections work exactly as in a daemon.
-func (c *Center) detectAndStore(b *Business, op detector.OpMetric) {
+func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt time.Time, durationMs int64) error {
 	tmp, err := restoreOpMetric(op)
 	if err != nil {
-		c.logf("business %s: restore op_metric: %v", b.Name, err)
-		return
+		return fmt.Errorf("restore op_metric: %w", err)
 	}
 	defer os.RemoveAll(tmp)
 
@@ -284,15 +305,13 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric) {
 
 	parallels, validRanks := detector.GetCurDetectionInfo(tmp)
 	if len(validRanks) == 0 {
-		c.logf("business %s: no valid ranks", b.Name)
-		return
+		return fmt.Errorf("no valid ranks")
 	}
 	stepData := detector.GetCurJobLastStepData(validRanks)
 	result := detector.DelimitDetection(stepData, parallels, validRanks)
 	nodeOut, err := utils.BuildNodeResult(result, parallels, nil)
 	if err != nil {
-		c.logf("business %s: build node result: %v", b.Name, err)
-		return
+		return fmt.Errorf("build node result: %w", err)
 	}
 	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, degradation)
 
@@ -303,11 +322,12 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric) {
 		"npu_bubble": len(result["npu_bubble"]),
 	}
 
-	dir := time.Now().Format("20060102-150405")
-	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary); err != nil {
-		c.logf("business %s: store result: %v", b.Name, err)
+	dir := startedAt.Format("20060102-150405")
+	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, startedAt, durationMs); err != nil {
+		return fmt.Errorf("store result: %w", err)
 	}
 	c.logf("business %s: detection done (%d ranks, %d cal anomalies)", b.Name, len(validRanks), len(result["cal"]))
+	return nil
 }
 
 // restoreOpMetric materializes an in-memory op_metric into a temp dir laid out
@@ -395,9 +415,9 @@ func writeGlobalRankCSV(path string, g any) error {
 
 // writeBusinessResult stores a merged detection's output under the business
 // results dir, mirroring a single daemon's per-cycle archive shape: result JSON,
-// text report, the merged op_metric JSON, plus a cycle.json summary (ts +
-// per-category anomaly counts) for the per-business history.
-func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int) error {
+// text report, the merged op_metric JSON, plus a cycle.json (ts + trigger time +
+// duration + per-category anomaly counts) for the per-business history.
+func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, startedAt time.Time, durationMs int64) error {
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(filepath.Join(base, "analysis_result"), 0o755); err != nil {
 		return err
@@ -413,7 +433,12 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 	if err := os.WriteFile(filepath.Join(base, "op_metric.json"), opData, 0o644); err != nil {
 		return err
 	}
-	meta, _ := json.MarshalIndent(map[string]any{"ts": dirRel, "summary": summary}, "", "  ")
+	meta, _ := json.MarshalIndent(map[string]any{
+		"ts":          dirRel,
+		"started_at":  startedAt.Format(time.RFC3339),
+		"duration_ms": durationMs,
+		"summary":     summary,
+	}, "", "  ")
 	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
 }
 

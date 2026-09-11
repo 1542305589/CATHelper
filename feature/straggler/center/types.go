@@ -36,11 +36,17 @@ func (d *Daemon) Addr() string { return fmt.Sprintf("%s:%d", d.IP, d.Port) }
 func (d *Daemon) BaseURL() string { return fmt.Sprintf("http://%s:%d", d.IP, d.Port) }
 
 // Business is one managed training task covering 1..N daemons (globally unique
-// ranks across them).
+// ranks across them). Paused / cycle counters are persisted; nextTrigger is
+// runtime-only.
 type Business struct {
-	Name        string    `json:"name"`
-	IntervalSec int64     `json:"interval_sec"`
-	Daemons     []*Daemon `json:"daemons"`
+	Name         string    `json:"name"`
+	IntervalSec  int64     `json:"interval_sec"`
+	Daemons      []*Daemon `json:"daemons"`
+	Paused       bool      `json:"paused,omitempty"`
+	CyclesTotal  int       `json:"cycles_total"`
+	CyclesFailed int       `json:"cycles_failed"`
+
+	nextTrigger time.Time // next scheduled trigger (in-memory)
 }
 
 // Config holds the center's runtime configuration (--center CLI flags).
