@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,12 +13,23 @@ import (
 	"time"
 )
 
-// startDynolog spawns the dynolog collector subprocess (once, at daemon start).
-// When the IPC port is already taken the process exits quickly — the daemon
-// logs and reuses the existing instance, since dyno talks to it over IPC
-// anyway. Returns the *exec.Cmd to hold for cleanup, or nil when reusing.
+// dynologCmdPattern is the exact command line used to identify a running
+// dynolog collector (grep via `ps -ef`).
+const dynologCmdPattern = "dynolog --enable-ipc-monitor --certs-dir NO_CERTS"
+
+// startDynolog spawns the dynolog collector subprocess (once, at daemon start)
+// on a free port (via -port) so a fresh instance never clashes with a lingering
+// one. The child is deliberately NOT killed on daemon shutdown — it keeps
+// collecting so the user can still gather data after closing the daemon.
+// Returns the *exec.Cmd to hold for reference, or nil when reusing an existing
+// instance.
 func startDynolog(bin string, logf func(format string, args ...any)) *exec.Cmd {
-	cmd := exec.Command(bin, "--enable-ipc-monitor", "--certs-dir", "NO_CERTS")
+	port := findFreePort()
+	args := []string{"--enable-ipc-monitor", "--certs-dir", "NO_CERTS"}
+	if port > 0 {
+		args = append(args, "-port", strconv.Itoa(port))
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -28,8 +41,73 @@ func startDynolog(bin string, logf func(format string, args ...any)) *exec.Cmd {
 			logf("dynolog exited: %v", err)
 		}
 	}()
-	logf("dynolog started (pid %d)", cmd.Process.Pid)
+	logf("dynolog started (pid %d, port %d)", cmd.Process.Pid, port)
 	return cmd
+}
+
+// findFreePort asks the OS for a free TCP port and releases it. There is a tiny
+// races window before dynolog binds it, acceptable here (collision just means
+// the next start retries on a different port).
+func findFreePort() int {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return 0
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// dynologRunning reports whether a dynolog collector (matched by command line)
+// is already running, via `ps -ef`.
+func dynologRunning() bool {
+	out, err := exec.Command("ps", "-ef").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, dynologCmdPattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// killDynolog terminates a running dynolog collector matched by command line.
+func killDynolog() error {
+	return exec.Command("pkill", "-f", dynologCmdPattern).Run()
+}
+
+// askKillDynolog prompts the user (stdin) whether to kill a running dynolog and
+// start a fresh one; defaults to "no".
+func askKillDynolog(logf func(format string, args ...any)) bool {
+	fmt.Fprintf(os.Stderr, "[DAEMON] 检测到正在运行的 dynolog，是否 kill 并重新启动一个？[y/N]: ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	line = strings.ToLower(strings.TrimSpace(line))
+	return line == "y" || line == "yes"
+}
+
+// ensureDynolog starts or reuses the dynolog collector at daemon startup. With
+// a running instance it asks the user whether to kill-and-restart; otherwise it
+// reuses the existing one.
+func (d *Daemon) ensureDynolog() {
+	if d.cfg.DynologBin == "" {
+		return
+	}
+	if dynologRunning() {
+		if askKillDynolog(d.logf) {
+			if err := killDynolog(); err != nil {
+				d.logf("kill existing dynolog: %v", err)
+			} else {
+				d.logf("killed existing dynolog")
+			}
+			d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
+		} else {
+			d.logf("reusing existing dynolog instance")
+		}
+		return
+	}
+	d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
 }
 
 // triggerCollection runs the dyno nputrace command that starts profiler capture

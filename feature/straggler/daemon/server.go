@@ -384,9 +384,9 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDaemonStop requests a graceful daemon shutdown: Run's select sees the
-// closed stopCh and stops the HTTP server, waits for an in-flight cycle, and
-// kills the dynolog child we spawned. The response is flushed before the
-// server shuts down.
+// closed stopCh and stops the HTTP server, waits for an in-flight cycle. The
+// dynolog child is left running. The response is flushed before the server
+// shuts down.
 func (d *Daemon) handleDaemonStop(w http.ResponseWriter, r *http.Request) {
 	d.Stop()
 	writeJSON(w, map[string]string{"status": "stopping"})
