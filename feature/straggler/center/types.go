@@ -12,14 +12,15 @@ import (
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/detector"
 )
 
-// Daemon is one daemon within a business. Key / collectWait / health / reported
-// op_metric are runtime state (in-memory only, rebuilt on re-match) and never
-// persisted.
+// Daemon is one daemon within a business. Key is persisted so a center restart
+// can re-authenticate to an already-matched daemon (whose own key survives in
+// memory); collectWait / health / reported op_metric remain runtime-only and
+// are rebuilt on re-match.
 type Daemon struct {
 	IP   string `json:"ip"`
 	Port int    `json:"port"`
+	Key  string `json:"key,omitempty"` // per-daemon match secret, persisted across center restarts
 
-	key         string // per-daemon match secret, regenerated per match
 	collectWait int64  // daemon's --collect-wait (seconds), from /daemon/match
 	healthy     bool   // last healthz probe result
 	failCount   int    // consecutive healthz failures
@@ -67,7 +68,7 @@ func DefaultConfig() Config {
 	}
 }
 
-// persistedState is what survives a restart (no keys).
+// persistedState is what survives a restart (including match keys).
 type persistedState struct {
 	Businesses []*Business `json:"businesses"`
 }

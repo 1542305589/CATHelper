@@ -106,10 +106,10 @@ func randomKey() string {
 // matchDaemonLocked generates a key and matches a daemon to this center. The
 // daemon replies with its collect-wait (used for the report timeout).
 func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
-	d.key = randomKey()
+	d.Key = randomKey()
 	body := map[string]any{
 		"center_addr": c.selfURL(),
-		"key":         d.key,
+		"key":         d.Key,
 		"business":    b.Name,
 		"daemon":      d.Addr(),
 	}
@@ -127,11 +127,11 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 
 // unmatchDaemonLocked asks a matched daemon to unmatch (best-effort).
 func (c *Center) unmatchDaemonLocked(d *Daemon) {
-	if d.key == "" {
+	if d.Key == "" {
 		return
 	}
-	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/unmatch", nil, d.key)
-	d.key = ""
+	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/unmatch", nil, d.Key)
+	d.Key = ""
 	d.matchState = ""
 	d.healthy = false
 	d.lastOpMetric = nil
@@ -155,7 +155,7 @@ func (c *Center) probeDaemonLocked(d *Daemon) {
 	d.healthy = true
 
 	// healthz OK — distinguish "matched to us" vs "unmatched" vs "other center".
-	st, err := daemonMatchStatus(d, d.key)
+	st, err := daemonMatchStatus(d, d.Key)
 	if err != nil {
 		d.matchState = ""
 		return
@@ -288,7 +288,7 @@ func (c *Center) markMissingReports(b *Business, triggerAt time.Time) {
 }
 
 func (c *Center) triggerDaemon(d *Daemon) {
-	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", nil, d.key)
+	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", nil, d.Key)
 }
 
 func (c *Center) mergeOpMetric(b *Business) detector.OpMetric {

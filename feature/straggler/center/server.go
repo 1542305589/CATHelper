@@ -93,27 +93,33 @@ func daemonState(d *Daemon) string {
 func (c *Center) statusViewLocked() []businessStatus {
 	out := make([]businessStatus, 0, len(c.biz))
 	for _, b := range c.biz {
-		bs := businessStatus{
-			Name:         b.Name,
-			IntervalSec:  b.IntervalSec,
-			Paused:       b.Paused,
-			CyclesTotal:  b.CyclesTotal,
-			CyclesFailed: b.CyclesFailed,
-			VLLMMetrics:  b.VLLMMetrics,
-			Daemons:      make([]daemonStatus, 0, len(b.Daemons)),
-		}
-		if !b.nextTrigger.IsZero() {
-			bs.NextTrigger = b.nextTrigger.Format(time.RFC3339)
-		}
-		for _, d := range b.Daemons {
-			bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait})
-			if d.collectWait > bs.CollectWait {
-				bs.CollectWait = d.collectWait
-			}
-		}
-		out = append(out, bs)
+		out = append(out, businessStatusOfLocked(b))
 	}
 	return out
+}
+
+// businessStatusOfLocked builds the web-safe status view for one business
+// (never exposing the daemons' match keys).
+func businessStatusOfLocked(b *Business) businessStatus {
+	bs := businessStatus{
+		Name:         b.Name,
+		IntervalSec:  b.IntervalSec,
+		Paused:       b.Paused,
+		CyclesTotal:  b.CyclesTotal,
+		CyclesFailed: b.CyclesFailed,
+		VLLMMetrics:  b.VLLMMetrics,
+		Daemons:      make([]daemonStatus, 0, len(b.Daemons)),
+	}
+	if !b.nextTrigger.IsZero() {
+		bs.NextTrigger = b.nextTrigger.Format(time.RFC3339)
+	}
+	for _, d := range b.Daemons {
+		bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait})
+		if d.collectWait > bs.CollectWait {
+			bs.CollectWait = d.collectWait
+		}
+	}
+	return bs
 }
 
 func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +147,7 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	}
 	c.biz[req.Name] = b
 	c.save()
+	view := businessStatusOfLocked(b)
 	c.mu.Unlock()
 
 	// Attempt to match the newly added daemons (async; the probe loop will
@@ -148,7 +155,7 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	for _, d := range b.Daemons {
 		go c.tryMatch(b, d)
 	}
-	writeJSON(w, b)
+	writeJSON(w, view)
 }
 
 func (c *Center) handleRemoveBusiness(w http.ResponseWriter, r *http.Request) {
@@ -195,10 +202,11 @@ func (c *Center) handleAddDaemon(w http.ResponseWriter, r *http.Request) {
 	d := &Daemon{IP: req.IP, Port: req.Port}
 	b.Daemons = append(b.Daemons, d)
 	c.save()
+	view := businessStatusOfLocked(b)
 	c.mu.Unlock()
 
 	go c.tryMatch(b, d)
-	writeJSON(w, b)
+	writeJSON(w, view)
 }
 
 func (c *Center) handleRemoveDaemon(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +311,7 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, d := range b.Daemons {
-		if d.Addr() != daemon || d.key == "" || d.key != key {
+		if d.Addr() != daemon || d.Key == "" || d.Key != key {
 			continue
 		}
 		body, _ := io.ReadAll(r.Body)
