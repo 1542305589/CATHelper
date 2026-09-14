@@ -37,6 +37,7 @@ type Daemon struct {
 	cycleInFlight bool
 	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
 	dynolog       *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
+	dynologPort   int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
 	stopOnce      sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
 	stopCh        chan struct{} // closed by POST /daemon/stop to request graceful shutdown
 	removeResults bool          // set by Stop(): delete all daemon_results/ on shutdown

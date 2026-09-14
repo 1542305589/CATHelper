@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +22,9 @@ const dynologCmdPattern = "dynolog --enable-ipc-monitor --certs-dir NO_CERTS"
 // on a free port (via -port) so a fresh instance never clashes with a lingering
 // one. The child is deliberately NOT killed on daemon shutdown — it keeps
 // collecting so the user can still gather data after closing the daemon.
-// Returns the *exec.Cmd to hold for reference, or nil when reusing an existing
-// instance.
-func startDynolog(bin string, logf func(format string, args ...any)) *exec.Cmd {
+// Returns the *exec.Cmd to hold for reference and the port dynolog was started
+// on (0 on failure).
+func startDynolog(bin string, logf func(format string, args ...any)) (*exec.Cmd, int) {
 	port := findFreePort()
 	args := []string{"--enable-ipc-monitor", "--certs-dir", "NO_CERTS"}
 	if port > 0 {
@@ -38,7 +39,7 @@ func startDynolog(bin string, logf func(format string, args ...any)) *exec.Cmd {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		logf("dynolog start failed (%v) — reusing existing instance", err)
-		return nil
+		return nil, 0
 	}
 	go func() {
 		if err := cmd.Wait(); err != nil {
@@ -46,7 +47,7 @@ func startDynolog(bin string, logf func(format string, args ...any)) *exec.Cmd {
 		}
 	}()
 	logf("dynolog started (pid %d, port %d)", cmd.Process.Pid, port)
-	return cmd
+	return cmd, port
 }
 
 // findFreePort asks the OS for a free TCP port and releases it. There is a tiny
@@ -93,7 +94,7 @@ func askKillDynolog(logf func(format string, args ...any)) bool {
 
 // ensureDynolog starts or reuses the dynolog collector at daemon startup. With
 // a running instance it asks the user whether to kill-and-restart; otherwise it
-// reuses the existing one.
+// reuses the existing one and parses its -port from `ps -ef`.
 func (d *Daemon) ensureDynolog() {
 	if d.cfg.DynologBin == "" {
 		return
@@ -105,20 +106,53 @@ func (d *Daemon) ensureDynolog() {
 			} else {
 				d.logf("killed existing dynolog")
 			}
-			d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
+			d.dynolog, d.dynologPort = startDynolog(d.cfg.DynologBin, d.logf)
 		} else {
 			d.logf("reusing existing dynolog instance")
+			d.dynologPort = parseDynologPort()
+			d.logf("dynolog port: %d", d.dynologPort)
 		}
 		return
 	}
-	d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
+	d.dynolog, d.dynologPort = startDynolog(d.cfg.DynologBin, d.logf)
+}
+
+// parseDynologPort extracts the `-port N` from a running dynolog's command line
+// via `ps -ef`; 0 when no port is matched (dyno then runs without --port).
+func parseDynologPort() int {
+	out, err := exec.Command("ps", "-ef").Output()
+	if err != nil {
+		return 0
+	}
+	re := regexp.MustCompile(`-port[= ](\d+)`)
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, dynologCmdPattern) {
+			continue
+		}
+		if m := re.FindStringSubmatch(line); len(m) == 2 {
+			if p, err := strconv.Atoi(m[1]); err == nil {
+				return p
+			}
+		}
+	}
+	return 0
 }
 
 // triggerCollection runs the dyno nputrace command that starts profiler capture
 // on the matched vllm processes, and verifies it took effect via commandStatus.
 func (d *Daemon) triggerCollection() error {
+	d.mu.Lock()
+	port := d.dynologPort
+	d.mu.Unlock()
+
 	args := []string{
 		"--certs-dir", "NO_CERTS",
+	}
+	// dyno must talk to the SAME dynolog instance, so pass its -port when known.
+	if port > 0 {
+		args = append(args, "--port", strconv.Itoa(port))
+	}
+	args = append(args,
 		"nputrace",
 		"--start-step", "-1",
 		"--iterations", strconv.Itoa(d.cfg.Iterations),
@@ -127,7 +161,7 @@ func (d *Daemon) triggerCollection() error {
 		"--msprof-tx",
 		"--export-type", "Db",
 		"--log-file", d.cfg.ProfilerDir,
-	}
+	)
 	out, err := exec.Command(d.cfg.DynoBin, args...).CombinedOutput()
 	// The collection verdict comes only from commandStatus in the response:
 	// dyno's process exit code says nothing about whether data was captured, so
