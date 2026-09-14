@@ -632,6 +632,7 @@ func (d *Daemon) reportOpMetric(cr *CycleResult) {
 		return
 	}
 	url := strings.TrimRight(center, "/") + "/center/op_metric/" + url.PathEscape(business) + "/" + url.PathEscape(daemonID)
+	d.logf("cycle %d report op_metric: ranks=%d bytes=%d url=%s", cr.ID, len(view.Ranks), len(payload), url)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		d.logf("cycle %d build report request: %v", cr.ID, err)
@@ -647,7 +648,8 @@ func (d *Daemon) reportOpMetric(cr *CycleResult) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		d.logf("cycle %d report op_metric: center returned %d", cr.ID, resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		d.logf("cycle %d report op_metric: center returned %d: %s", cr.ID, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 }
 

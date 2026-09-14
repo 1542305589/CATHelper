@@ -2,6 +2,7 @@ package center
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -284,6 +285,7 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 	business := r.PathValue("business")
 	daemon := r.PathValue("daemon")
 	key := r.Header.Get("X-Match-Key")
+	c.logf("op_metric: business=%q daemon=%q keyLen=%d", business, daemon, len(key))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -296,16 +298,26 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 		if d.Addr() != daemon || d.key == "" || d.key != key {
 			continue
 		}
+		body, _ := io.ReadAll(r.Body)
 		var op detector.OpMetric
-		if err := json.NewDecoder(r.Body).Decode(&op); err != nil {
-			http.Error(w, "invalid op_metric JSON", http.StatusBadRequest)
-			return
+		if err := json.Unmarshal(body, &op); err != nil {
+			// Backward-compatible: accept the {cycle,dir,ranks} envelope too.
+			var env struct {
+				Ranks detector.OpMetric `json:"ranks"`
+			}
+			if err2 := json.Unmarshal(body, &env); err2 != nil || env.Ranks == nil {
+				c.logf("op_metric decode error: %v (fallback: %v)", err, err2)
+				http.Error(w, "invalid op_metric JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			op = env.Ranks
 		}
 		d.lastOpMetric = op
 		d.lastReportAt = time.Now()
 		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
+	c.logf("op_metric not matched: daemon %q (biz daemons=%d)", daemon, len(b.Daemons))
 	http.Error(w, "daemon not matched to this center", http.StatusForbidden)
 }
 
