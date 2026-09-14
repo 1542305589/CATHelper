@@ -265,7 +265,9 @@ func (c *Center) triggerBusiness(b *Business) {
 	} else {
 		b.CyclesTotal++
 	}
-	b.nextTrigger = time.Now().Add(c.businessInterval(b))
+	// Anchor the next trigger to THIS round's start (not its end), so the cadence
+	// stays a fixed interval and does not drift by the detection duration.
+	b.nextTrigger = triggerAt.Add(c.businessInterval(b))
 	b.triggering = false
 	c.save()
 	c.mu.Unlock()
