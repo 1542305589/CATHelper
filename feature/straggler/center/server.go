@@ -28,6 +28,7 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/op_metric/{business}/{daemon}", c.handleOpMetric)
 	mux.HandleFunc("GET /center/business/{name}/history", c.handleBusinessHistory)
 	mux.HandleFunc("GET /center/business/{name}/console", c.handleBusinessConsole)
+	mux.HandleFunc("GET /center/chart.umd.min.js", c.handleChartJS)
 	mux.HandleFunc("GET /center/business/{name}/report", c.handleBusinessReport)
 	mux.HandleFunc("GET /center/business/{name}/result", c.handleBusinessResult)
 	mux.HandleFunc("GET /center/business/{name}/op_metric", c.handleBusinessOpMetric)

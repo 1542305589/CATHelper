@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>业务控制台</title>
+<script src="/center/chart.umd.min.js"></script>
 <style>
   :root { --bg:#f4f5f7; --card:#fff; --border:#e2e4e8; --text:#1f2328; --muted:#6b7280; --primary:#2563eb;
     --green:#16a34a; --amber:#d97706; --red:#dc2626; --mono:"SFMono-Regular",Consolas,Menlo,monospace; }
@@ -58,7 +59,8 @@
   .toast.fail { background:var(--red); }
   .charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   .chart-title { font-size:12px; color:var(--muted); margin-bottom:4px; }
-  .charts canvas { width:100%; height:180px; display:block; }
+  .chart-box { position:relative; height:200px; }
+  .chart-box canvas { width:100% !important; height:100% !important; }
   .legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--muted); }
   .legend .item { display:inline-flex; align-items:center; gap:5px; }
   .legend .swatch { width:10px; height:10px; border-radius:2px; }
@@ -78,11 +80,11 @@
       <div class="charts">
         <div>
           <div class="chart-title">TPOT（每输出 token 平均延迟）</div>
-          <canvas id="tpotChart"></canvas>
+          <div class="chart-box"><canvas id="tpotChart"></canvas></div>
         </div>
         <div>
           <div class="chart-title">TTFT（首 token 平均延迟）</div>
-          <canvas id="ttftChart"></canvas>
+          <div class="chart-box"><canvas id="ttftChart"></canvas></div>
         </div>
       </div>
       <div id="metricsLegend" class="legend"></div>
@@ -316,104 +318,76 @@ function renderMetrics(m) {
     info.textContent = ' · 未配置 vllm metrics 接口';
   }
   const engines = m.engines || {};
-  drawChart($('tpotChart'), engines, 'tpot', 'TPOT');
-  drawChart($('ttftChart'), engines, 'ttft', 'TTFT');
+  renderMetricChart('tpot', engines, 'tpot');
+  renderMetricChart('ttft', engines, 'ttft');
   const names = Object.keys(engines);
   $('metricsLegend').innerHTML = names.map((n, i) =>
     `<span class="item"><span class="swatch" style="background:${METRIC_COLORS[i % METRIC_COLORS.length]}"></span>engine ${n}</span>`).join('');
 }
 
-function drawChart(canvas, engines, key, label) {
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
-  const cssH = canvas.clientHeight || 180;
-  canvas.width = Math.round(cssW * dpr);
-  canvas.height = Math.round(cssH * dpr);
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssW, cssH);
+const metricCharts = {};
 
-  const padL = 48, padR = 10, padT = 8, padB = 20;
-  const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+function renderMetricChart(key, engines, field) {
+  const names = Object.keys(engines);
+  const datasets = names.map((name, i) => {
+    const color = METRIC_COLORS[i % METRIC_COLORS.length];
+    return {
+      label: 'engine ' + name,
+      data: engines[name].map(p => ({ x: p.ts, y: p[field] * 1000 })),
+      borderColor: color,
+      backgroundColor: color,
+      borderWidth: 1.5,
+      pointRadius: 0,
+      pointHitRadius: 4,
+      tension: 0.15,
+      spanGaps: true,
+    };
+  });
 
-  let tMin = Infinity, tMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-  for (const name of Object.keys(engines)) {
-    for (const p of engines[name]) {
-      if (p.ts < tMin) tMin = p.ts;
-      if (p.ts > tMax) tMax = p.ts;
-      const v = p[key];
-      if (v != null && v < vMin) vMin = v;
-      if (v != null && v > vMax) vMax = v;
-    }
-  }
-  if (tMin === Infinity) {
-    ctx.fillStyle = '#9ca3af';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('暂无数据', cssW / 2, cssH / 2);
+  const existing = metricCharts[key];
+  if (existing) {
+    existing.data.datasets = datasets;
+    existing.update('none');
     return;
   }
-  if (tMax === tMin) tMax = tMin + 1;
-  if (vMin === Infinity) { vMin = 0; vMax = 1; }
-  if (vMin === vMax) { vMax = vMin + 1; vMin = Math.max(0, vMin - 1); }
-  // 秒 → 毫秒，且下界从 0 起更直观
-  vMin = 0; vMax = vMax * 1000;
-  const span = vMax - vMin;
-  vMax = vMax + span * 0.08;
-
-  const x = t => padL + (t - tMin) / (tMax - tMin) * plotW;
-  const y = v => padT + plotH - (v - vMin) / (vMax - vMin) * plotH;
-
-  // 网格与 Y 轴
-  ctx.font = '10px sans-serif';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  ctx.strokeStyle = '#e5e7eb';
-  ctx.fillStyle = '#6b7280';
-  const ticks = 4;
-  for (let i = 0; i <= ticks; i++) {
-    const val = vMin + (vMax - vMin) / ticks * i;
-    const yy = y(val);
-    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(cssW - padR, yy); ctx.stroke();
-    ctx.fillText(fmtMs(val), padL - 6, yy);
-  }
-  // X 轴时间刻度（首末 + 中间 2 个）
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  for (let i = 0; i <= 3; i++) {
-    const t = tMin + (tMax - tMin) / 3 * i;
-    ctx.fillText(fmtClock(t), x(t), cssH - padB + 4);
-  }
-
-  // 曲线
-  const names = Object.keys(engines);
-  names.forEach((name, idx) => {
-    const pts = engines[name];
-    const color = METRIC_COLORS[idx % METRIC_COLORS.length];
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    pts.forEach((p, i) => {
-      const xx = x(p.ts), yy = y((p[key] == null ? 0 : p[key]) * 1000);
-      if (i === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
-    });
-    ctx.stroke();
-    // 空闲窗口（无新请求）用小圆点标出
-    ctx.fillStyle = '#9ca3af';
-    pts.forEach(p => {
-      if (p.reqs === 0) {
-        ctx.beginPath();
-        ctx.arc(x(p.ts), y((p[key] == null ? 0 : p[key]) * 1000), 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    });
+  metricCharts[key] = new Chart($(key + 'Chart'), {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      normalized: true,
+      interaction: { mode: 'nearest', intersect: false },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: { callback: v => fmtClock(v), maxTicksLimit: 8 },
+          grid: { display: false },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { callback: v => fmtMs(v), maxTicksLimit: 6 },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? fmtClock(items[0].parsed.x) : '',
+            label: ctx => ctx.dataset.label + ': ' + fmtMs(ctx.parsed.y),
+          },
+        },
+      },
+    },
   });
 }
 
 function fmtMs(ms) {
   if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
-  return Math.round(ms) + 'ms';
+  if (ms >= 1) return (ms >= 100 ? ms.toFixed(0) : ms.toFixed(1)) + 'ms';
+  return (ms * 1000).toFixed(0) + 'µs';
 }
 function fmtClock(ts) {
   const d = new Date(ts * 1000);
