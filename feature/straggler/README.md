@@ -1,22 +1,20 @@
 # CATHelper — 慢节点（Straggler）检测
 
-AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制。
+AI 智算集群中识别性能劣化 NPU 卡的两道独立检测。**Profiling 深查**（优先执行）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查；**KPI 资源检测**（轻量）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）。两道检查互不阻塞，结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制。
 
 ---
 
 ## 目录
 
 - [一、安装与构建](#一安装与构建)
-- [二、数据准备](#二数据准备)
-- [三、一次性检测](#三一次性检测)
-- [四、守护进程模式](#四守护进程模式)
-- [五、HTTP 接口](#五http-接口)
-- [六、输出与解读](#六输出与解读)
-- [七、CLI 参数参考](#七cli-参数参考)
-- [八、检测原理](#八检测原理)
-- [九、边界情况](#九边界情况)
-- [十、目录结构](#十目录结构)
-- [十一、设计文档](#十一设计文档)
+- [二、基于 Profiling 算子数据的慢卡检测](#二基于-profiling-算子数据的慢卡检测)
+- [三、基于资源 KPI 指标数据的慢卡检测](#三基于资源-kpi-指标数据的慢卡检测)
+- [四、HTTP 接口](#四http-接口)
+- [五、输出与解读](#五输出与解读)
+- [六、CLI 参数参考](#六cli-参数参考)
+- [七、边界情况](#七边界情况)
+- [八、目录结构](#八目录结构)
+- [九、设计文档](#九设计文档)
 
 ---
 
@@ -55,16 +53,7 @@ bash build.sh
 
 产物 `./slowNodeDetection`。dyno/dynolog 装到系统，可从 PATH 直接调用；下载的中间文件在临时目录，退出即清理。
 
-### 1.3 验证
-
-```bash
-./slowNodeDetection path=/nonexistent    # 应报"Invalid directory"而非"dyno not found"
-dyno --help >/dev/null && echo "dyno OK"
-dynolog --help >/dev/null && echo "dynolog OK"
-python3 -c "import msmonitor; print('mindstudio_monitor OK')"
-```
-
-### 1.4 只手动编译（不改采集依赖）
+### 1.3 只手动编译（不改采集依赖，1.2 的替代方案）
 
 若只想出包、不装 dyno/dynolog 和 mindstudio_monitor，可跳过 `build.sh` 直接编译（Go 编译不依赖这些）：
 
@@ -78,13 +67,140 @@ CGO_ENABLED=0 go build -o slowNodeDetection .
 - 跨平台（仅一次性模式，无守护进程采集）：`GOOS=linux GOARCH=amd64` / `GOOS=windows GOARCH=amd64` 同理。
 - 产物全静态、无 CGo（Profiler 用纯 Go SQLite 驱动）。
 
+### 1.4 验证
+
+```bash
+./slowNodeDetection path=/nonexistent    # 应报"Invalid directory"而非"dyno not found"
+dyno --help >/dev/null && echo "dyno OK"
+dynolog --help >/dev/null && echo "dynolog OK"
+python3 -c "import msmonitor; print('mindstudio_monitor OK')"
+```
+
 ---
 
-## 二、数据准备
+## 二、基于 Profiling 算子数据的慢卡检测
 
-检测有两种输入：**KPI 数据**（资源指标，轻量第一道）和 **Profiler 数据**（`.db`，深查第二道）。至少提供其一。
+基于 Ascend PyTorch Profiler 算子数据识别慢卡，覆盖慢计算/慢通信/慢CPU/Bubble 四个维度，深查定位。跑完即退出（一次性检测），产物是运行目录下的 `straggler_output.json`（只跑本维度时仅含 `profiler` 键）。
 
-### 2.1 KPI 数据（二选一）
+### 2.1 在容器/hostOS 内拉起慢节点的守护进程
+
+在训练容器内或 hostOS 上常驻拉起守护进程，周期性自动完成 Profiler 采集→检测（配 `--kpi-dir` 时同时做 KPI 检测），结果经 HTTP 查询（见[四、HTTP 接口](#四http-接口)）。前置：已跑 `bash build.sh`（见 1.2）；训练进程以 `MSMONITOR_USE_DAEMON=1` 启动（见 2.2）；准备 `--profiler-dir`（采集落盘根，可空目录）：
+
+```bash
+cd feature/straggler
+./slowNodeDetection --daemon \
+    --profiler-dir=/data/profiler \
+    --kpi-dir=/data/kpi \
+    --interval=600 \
+    --collect-wait=60 \
+    --profiler-iterations=1 \
+    --daemon-port=8080 \
+    --degradation=0.3
+```
+
+启动参数说明：
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--profiler-dir` | 是 | — | dyno 采集落盘根目录（传给 dyno 的 `--log-file`） |
+| `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler |
+| `--interval` | 否 | 600 | 检测周期（秒，≥60） |
+| `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
+| `--profiler-iterations` | 否 | 1 | dyno nputrace 每轮采集迭代数 |
+| `--daemon-port` | 否 | 8080 | HTTP 端口 |
+| `--degradation` | 否 | 0.3 | 灵敏度（与一次性模式同义） |
+
+> 命令为**可直接复制执行**写法：续行 `\` 后不留注释/空格，否则 shell 会把反斜杠当成普通字符导致参数被拆散。
+
+**启动后行为**：
+- 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
+- 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。
+- `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
+
+**HTTP 查询与控制**（完整接口见[四、HTTP 接口](#四http-接口)）：
+
+| 方法 & 路径 | 作用 |
+|-------------|------|
+| `GET /status` | 状态总览（state / 周期 / cycles_total / last_cycle 等） |
+| `GET /straggler/results/latest` | 最近一轮合并结果 JSON |
+| `GET /straggler/results/history?limit=N` | 本次会话周期摘要（倒序） |
+| `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告 |
+| `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） |
+| `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） |
+| `POST /daemon/stop` | 优雅关闭守护进程（删除全部落盘结果） |
+
+```bash
+curl -s localhost:8080/status | jq
+curl -s localhost:8080/straggler/results/latest | jq
+curl -s -X POST localhost:8080/daemon/trigger
+```
+
+### 2.2 拉起训练/推理业务
+
+训练或推理进程在启动时，需要在 CLI 启动命令前加上 `MSMONITOR_USE_DAEMON=1`，dyno 才能命中进程并触发采集。例如：
+
+```bash
+MSMONITOR_USE_DAEMON=1 vllm serve /path/to/model ...
+```
+
+### 2.3 Profiler 数据准备与检测
+
+守护进程模式下，通过 curl 触发常驻进程开启一轮数据采集（`POST /daemon/trigger`；也可等待 `--interval` 周期自动触发）：
+
+```bash
+curl -s -X POST localhost:8080/daemon/trigger
+```
+
+触发后整条链路**自动完成，无需人工干预**：
+
+```
+dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm) → 等待 collect-wait →
+python analyse 转 .db（覆盖根下所有 rank）→ dataparse 解析 →
+Profiler 检测(整个根目录) → KPI 检测(读 --kpi-dir) → 合并 JSON + meta 落盘 daemon_results/<start>/ →
+周期结束删除整个 profiler-dir
+```
+
+- **采集转换**：每个 NPU 卡获得一个 Ascend PyTorch Profiler Level0 SQLite 文件，位于 `--profiler-dir` 下；
+- **检测**：守护进程内部自动执行，即一次性检测管线（等价于 `./slowNodeDetection path=/data/profiler_output degradation=0.3`），无需手动运行；
+- **归档与查询**：结果落盘 `daemon_results/<start>/` 并经 HTTP 查询（见[四、HTTP 接口](#四http-接口)）；周期结束时 daemon 自动清理 `--profiler-dir`，`.db` 文件无需手动处理。
+
+> **不依赖守护进程的一次性检测**：把自行准备好的 `.db` 目录（每卡一个 Level0 SQLite 文件）直接喂给检测器，跑完即退出：
+>
+> ```
+> /data/profiler_output/
+> ├── ascend_pytorch_profiler_0.db
+> ├── ascend_pytorch_profiler_1.db
+> └── ...
+> ```
+>
+> ```bash
+> ./slowNodeDetection path=/data/profiler_output degradation=0.3
+> ```
+
+### 2.4 检测原理
+
+```
+SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点聚合 → 合并 JSON
+```
+
+| 类别 | 数据 | 阈值/方向 | 说明 |
+|------|------|-----------|------|
+| 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向自适应 |
+| 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小卡为代表，按 PP stage 分桶后 kmeans |
+| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取去 min/max 均值消除节点内差异 |
+| Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
+
+> cal / comm / cpu 统一走共享 `clustering` 包（kmeans 比例检测，与 3.3 的 KPI 空间 cluster 同一算法）；Bubble 走固定阈值。
+
+**中间产物（`op_metric/`）**：解析阶段在每个数据目录下生成每 rank 三件套——`group_info_{N}.json`（并行拓扑）、`host_info_{N}.json`（rank→hostUid）、`global_rank_{N}.csv`（各域通信耗时/计数 + ZP_* 指标）。守护进程会把每轮 `op_metric/` 归档到 `daemon_results/<start>/op_metric/` 供复查。
+
+---
+
+## 三、基于资源 KPI 指标数据的慢卡检测
+
+基于 NPU 资源指标的空间 peer 对比（最后一个聚合点）识别慢卡，轻量、无侵入。跑完即退出（一次性检测），产物是运行目录下的 `straggler_output.json`（只跑本维度时仅含 `kpi` 键）。
+
+### 3.1 KPI 数据准备（二选一）
 
 #### 选项 A：CATMonitor JSONL 目录（`--kpi-jsonl-dir`，推荐）
 
@@ -140,26 +256,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,...
 { "node1.csv": { "node": "node-1", "cards": [0, 1] }, "node2.csv": { "node": "node-2", "cards": [0, 1] } }
 ```
 
-### 2.2 Profiler 数据
-
-一个目录，内含每卡一个 Ascend PyTorch Profiler Level0 SQLite 文件：
-
-```
-/data/profiler_output/
-├── ascend_pytorch_profiler_0.db
-├── ascend_pytorch_profiler_1.db
-└── ...
-```
-
-守护进程模式下这些 `.db` 由 dyno 采集 + `python analyse` 自动生成，见[第四章](#四守护进程模式常驻巡检)。
-
----
-
-## 三、一次性检测
-
-把准备好的数据目录直接喂给检测器，跑完即退出，适合按需排查或联调。产物是运行目录下的 `straggler_output.json`。
-
-### 模式 1：仅 KPI
+### 3.2 一次性检测
 
 ```bash
 cd feature/straggler
@@ -168,99 +265,42 @@ cd feature/straggler
 ./slowNodeDetection --kpi-path=/data/kpi_csv_dir
 ```
 
-### 模式 2：仅 Profiler
+> **联合 Profiler 检测**：同时提供 `path`（Profiler `.db` 目录）时自动先跑 Profiler 深查、再跑 KPI（两道检查相互独立、互不阻塞，见 2.3）：
+>
+> ```bash
+> ./slowNodeDetection path=/data/profiler_output --kpi-jsonl-dir=/var/lib/catmonitor/straggler degradation=0.3
+> ```
 
-```bash
-./slowNodeDetection path=/data/profiler_output degradation=0.3
+### 3.3 检测原理
+
+```
+CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
+按指标分组异常卡(含空间劣化程度) → 合并 JSON
 ```
 
-### 模式 3：KPI + Profiler 联合
+**指标注册表**（cluster 方向自适应，双方向标记数少者为异常）：
 
-```bash
-./slowNodeDetection path=/data/profiler_output --kpi-jsonl-dir=/var/lib/catmonitor/straggler degradation=0.3
-```
+| 指标 | 分类 | 空间方法 | 说明 |
+|------|------|---------|------|
+| `temp` | 计算 | cluster | 温度 (°C) |
+| `power` | 计算 | cluster | 功耗 (W) |
+| `aicore_freq` | 计算 | cluster | AI Core 频率 (MHz)，离散档位 |
+| `aicore_util` | 计算 | cluster | AI Core 利用率 (%) |
+| `hbm_bandwidth_util` | 计算 | cluster | HBM 带宽使用率 (%) |
+| `hbm_util` | 计算 | cluster | HBM 内存使用率 (%) |
+| `tx_bandwidth` | 通信 | cluster | TX 带宽 |
+| `rx_pfc_pkt` | 通信 | absolute | PFC 暂停帧（计数） |
+| `roce_tx_err_pkt` | 通信 | absolute | RoCE 发送错误包（计数） |
+| `roce_out_of_order` | 通信 | absolute | RoCE 乱序包（计数） |
+| `roce_new_pkt_rty` | 通信 | absolute | RoCE 重传包（计数） |
 
-**检测顺序**：先跑 KPI（轻量、无侵入）→ 发现异常且有 `path` → 继续跑 Profiler 做交叉验证；KPI 无异常 → 自动 fallback 到 Profiler 精查；仅 KPI 无 `path` → KPI 结果即为最终输出。两道结果合并进 `straggler_output.json`（只跑哪个维度就只有哪个键）。
-
-> 需要排查"某卡为什么没被判异常"时，加 `--debug-output`，结果会包含所有正常卡/正常通信组的诊断分（见[六、输出与解读](#六输出与解读)）。
+**空间维度（peer 对比）**：只取全部数据的最后一个聚合点（时间维度/基线/检测窗口已移除）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
+- **cluster（kmeans 比例）**：≤0 读数钳制到极小值 `zeroFloor=1e-3` 参与聚类 → z-score 标准化（std≈0 强制 1）→ 肘部法选 k → kmeans++ + Lloyd 迭代（固定种子，结果确定）→ 双方向各检一次（max：基线=最小均值簇；min：基线=最大均值簇）→ 标记数少的方向为异常、相等不上报 → 对选中方向异常簇递归精化。score = **簇均值 / 基线均值**（统一 min/max 两侧：max 侧 `> 阈值` 判异常，min 侧 `< 1/阈值` 判异常）；判定用递归 `Detect` 的标记，不随比值变化。
+- **absolute**：错误计数类指标，值 `> 0` 即异常。
 
 ---
 
-## 四、守护进程模式
-
-周期自动采集并检测，HTTP 查询与控制。适合接入手管/调度系统持续巡检。
-
-### 4.1 前置条件
-
-| 条件 | 说明 |
-|------|------|
-| 采集链路 | 训练（vLLM）进程需以 `MSMONITOR_USE_DAEMON=1` 启动，dyno 才能命中并触发采集 |
-| 构建 | 已跑过 `bash build.sh`（装好 dyno/dynolog/mindstudio_monitor/go） |
-| 目录 | 准备 `--profiler-dir`（采集落盘根，可空目录）、可选 `--kpi-dir` |
-
-### 4.2 启动
-
-```bash
-cd feature/straggler
-./slowNodeDetection --daemon \
-    --profiler-dir=/data/profiler \
-    --kpi-dir=/data/kpi \
-    --interval=600 \
-    --collect-wait=60 \
-    --profiler-iterations=1 \
-    --daemon-port=8080 \
-    --degradation=0.3
-```
-
-启动参数说明：
-
-| 参数 | 必需 | 默认 | 说明 |
-|------|------|------|------|
-| `--profiler-dir` | 是 | — | dyno 采集落盘根目录（传给 dyno 的 `--log-file`） |
-| `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler |
-| `--interval` | 否 | 600 | 检测周期（秒，≥60） |
-| `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | 否 | 1 | dyno nputrace 每轮采集迭代数 |
-| `--daemon-port` | 否 | 8080 | HTTP 端口 |
-| `--degradation` | 否 | 0.3 | 灵敏度（与一次性模式同义） |
-
-> 命令为**可直接复制执行**写法：续行 `\` 后不留注释/空格，否则 shell 会把反斜杠当成普通字符导致参数被拆散。
-
-**启动后行为**：
-- 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
-- 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。
-- `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
-
-### 4.3 单周期流程
-
-```
-dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm) → 等待 collect-wait →
-python analyse 转 .db（覆盖根下所有 rank）→ dataparse 解析 →
-KPI 检测(读 --kpi-dir) + Profiler 检测(整个根目录) → 合并 JSON + meta 落盘 daemon_results/<start>/ →
-周期结束删除整个 profiler-dir
-```
-
-### 4.4 数据落盘
-
-结果放**运行目录**下 `daemon_results/<start>/`（`--profiler-dir` 之外，不受周期清理影响）：
-
-```
-daemon_results/<start>/
-├── straggler_output.json          # 本轮合并结果（HTTP 读取的数据源）
-├── daemon_meta.json               # 周期元数据（归档记录）
-├── op_metric/                     # 检测输入快照（group_info_*.json / host_info_*.json / global_rank_*.csv）
-└── analysis_result/
-    └── detection_report.log       # 本轮 Profiler 文本报告
-```
-
-运行目录另有一份最新的 `straggler_output.json`（覆盖写，与一次性模式同形状）。
-
-- 查询接口读**进程内 store**（本次会话），daemon 重启后清空，不读磁盘历史；历史无条数上限，可用 `?limit=N` 截断。
-- `POST /daemon/stop` 会在优雅关闭后**删除整个 `daemon_results/`**（所有落盘结果一并清掉）。
-
----
-
-## 五、HTTP 接口
+## 四、HTTP 接口
 
 路由无 `/api/v1` 前缀。查询类只读，控制类需 POST。以下假设端口 8080（`--daemon-port` 可改）。
 
@@ -349,40 +389,56 @@ curl -s -X POST localhost:8080/daemon/stop
 | 周期失败，`error` 含 `python analyse` | `torch_npu`/`mindstudio_monitor` 未装或版本不符 → 重跑 `bash build.sh` |
 | `dynolog exited` 日志但能检测 | IPC 端口已被占用，daemon 复用现有实例，属正常 |
 | `trigger` 返回 409 | 已有周期在跑（single-flight），稍后再试 |
-| 传 `--daemon-port` 却不生效 | 多半是启动命令续行 `\` 后带了注释/空格把参数拆散（见 4.2 注意） |
+| 传 `--daemon-port` 却不生效 | 多半是启动命令续行 `\` 后带了注释/空格把参数拆散（见 2.1 注意） |
 
 ---
 
-## 六、输出与解读
+## 五、输出与解读
 
-### 6.1 合并 JSON：`straggler_output.json`
+### 5.1 合并 JSON：`straggler_output.json`
 
 一次性模式写在**运行目录**；守护进程模式额外归档到 `daemon_results/<start>/straggler_output.json`：
 
 ```json
 {
-  "kpi": {
-    "summary": { "total_cards": 8, "total_nodes": 2, "anomalies": 1, "normal": 7, "source": "...", "data_points": 129600, "space_ratio_threshold": 2.0 },
-    "anomaly_metrics": [ { "metric": "aicore_freq", "method": "cluster", "cards": [ { "node": "node-1", "card_id": 0, "score": 0.44 } ] } ]
-  },
   "profiler": {
     "node_result": [
       { "hostname": "<hostName>", "npu": [ { "id": 0, "cal": { "score": 1.5 }, "npu_bubble": { "score": 3200.0 } } ], "cpu": { "score": 1.4 } }
     ],
     "comm_domain_result": { "tp": { "0,1,2,3": 3.2 } }
+  },
+  "kpi": {
+    "summary": { "total_cards": 8, "total_nodes": 2, "anomalies": 1, "normal": 7, "source": "...", "data_points": 129600, "space_ratio_threshold": 2.0 },
+    "anomaly_metrics": [ { "metric": "aicore_freq", "method": "cluster", "cards": [ { "node": "node-1", "card_id": 0, "score": 0.44 } ] } ]
   }
 }
 ```
 
-- **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键。
-- `kpi` 段 = summary + `anomaly_metrics`（指标优先：每个异常指标下列异常卡及其空间 score）。
+- **只跑 Profiler** → 只有 `"profiler"` 键；**只跑 KPI** → 只有 `"kpi"` 键。
 - `profiler` 段 = `node_result[]` 按物理节点分组（hostname，缺失回退 hostUid），`npu[]` 只含异常 NPU（cal / npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
+- `kpi` 段 = summary + `anomaly_metrics`（指标优先：每个异常指标下列异常卡及其空间 score）。
 
-**`--debug-output` 调试输出**（不额外生成文件，直接在现有结果里展示全量）：
+**守护进程模式的数据落盘**（`--profiler-dir` 之外，不受周期清理影响）：
+
+```
+daemon_results/<start>/
+├── straggler_output.json          # 本轮合并结果（HTTP 读取的数据源）
+├── daemon_meta.json               # 周期元数据（归档记录）
+├── op_metric/                     # 检测输入快照（group_info_*.json / host_info_*.json / global_rank_*.csv）
+└── analysis_result/
+    └── detection_report.log       # 本轮 Profiler 文本报告
+```
+
+运行目录另有一份最新的 `straggler_output.json`（覆盖写，与一次性模式同形状）。
+
+- 查询接口读**进程内 store**（本次会话），daemon 重启后清空，不读磁盘历史；历史无条数上限，可用 `?limit=N` 截断。
+- `POST /daemon/stop` 会在优雅关闭后**删除整个 `daemon_results/`**（所有落盘结果一并清掉）。
+
+**`--debug-output` 调试输出**（排查"某卡为什么没被判异常"时使用；不额外生成文件，直接在现有结果里展示全量）：
 - KPI：`anomaly_metrics` 对全部 11 个指标列出其 `cards`（含正常的，`abnormal` 区分），正常卡 `score` 约 1.0。
 - Profiler：`node_result[]` 含所有节点、`comm_domain_result` 含所有通信组，正常卡/组 `score` 约 1.0，对照阈值可看出"为什么没被标"。
 
-### 6.2 文本报告
+### 5.2 文本报告
 
 | 报告 | 路径 | 内容 |
 |------|------|------|
@@ -390,7 +446,7 @@ curl -s -X POST localhost:8080/daemon/stop
 
 守护进程会把该报告归档到 `daemon_results/<start>/analysis_result/` 并经 `/straggler/report/{id}` 提供。KPI 无文本报告文件，文本仅打印到 stdout。
 
-### 6.3 stdout 摘要
+### 5.3 stdout 摘要
 
 一次性模式与守护进程日志均打到 stderr；KPI 文本报告仅 stdout。Profiler 逐类摘要示例：
 
@@ -403,7 +459,7 @@ Bubble (npu_bubble): 无异常
 
 ---
 
-## 七、CLI 参数参考
+## 六、CLI 参数参考
 
 ### 顶层参数（一次性模式）
 
@@ -414,7 +470,7 @@ Bubble (npu_bubble): 无异常
 | `--kpi-path` | string | 否* | — | KPI 模式：每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_*.jsonl` 目录（优先于 `--kpi-path`） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮） |
-| `--debug-output` | bool | 否 | 假 | 结果含全部正常/异常数据便于排查（见 6.1） |
+| `--debug-output` | bool | 否 | 假 | 结果含全部正常/异常数据便于排查（见 5.1） |
 
 \* `path` 与 KPI 输入至少提供一个；都没有则打印用法并退出。
 
@@ -452,55 +508,7 @@ Profiler 模式:
 
 ---
 
-## 八、检测原理
-
-### 8.1 KPI 检测（resource/）
-
-```
-CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
-按指标分组异常卡(含空间劣化程度) → 合并 JSON
-```
-
-**指标注册表**（cluster 方向自适应，双方向标记数少者为异常）：
-
-| 指标 | 分类 | 空间方法 | 说明 |
-|------|------|---------|------|
-| `temp` | 计算 | cluster | 温度 (°C) |
-| `power` | 计算 | cluster | 功耗 (W) |
-| `aicore_freq` | 计算 | cluster | AI Core 频率 (MHz)，离散档位 |
-| `aicore_util` | 计算 | cluster | AI Core 利用率 (%) |
-| `hbm_bandwidth_util` | 计算 | cluster | HBM 带宽使用率 (%) |
-| `hbm_util` | 计算 | cluster | HBM 内存使用率 (%) |
-| `tx_bandwidth` | 通信 | cluster | TX 带宽 |
-| `rx_pfc_pkt` | 通信 | absolute | PFC 暂停帧（计数） |
-| `roce_tx_err_pkt` | 通信 | absolute | RoCE 发送错误包（计数） |
-| `roce_out_of_order` | 通信 | absolute | RoCE 乱序包（计数） |
-| `roce_new_pkt_rty` | 通信 | absolute | RoCE 重传包（计数） |
-
-**空间维度（peer 对比）**：只取全部数据的最后一个聚合点（时间维度/基线/检测窗口已移除）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
-- **cluster（kmeans 比例）**：≤0 读数钳制到极小值 `zeroFloor=1e-3` 参与聚类 → z-score 标准化（std≈0 强制 1）→ 肘部法选 k → kmeans++ + Lloyd 迭代（固定种子，结果确定）→ 双方向各检一次（max：基线=最小均值簇；min：基线=最大均值簇）→ 标记数少的方向为异常、相等不上报 → 对选中方向异常簇递归精化。score = **簇均值 / 基线均值**（统一 min/max 两侧：max 侧 `> 阈值` 判异常，min 侧 `< 1/阈值` 判异常）；判定用递归 `Detect` 的标记，不随比值变化。
-- **absolute**：错误计数类指标，值 `> 0` 即异常。
-
-### 8.2 Profiler 检测（profiling/）
-
-```
-SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点聚合 → 合并 JSON
-```
-
-| 类别 | 数据 | 阈值/方向 | 说明 |
-|------|------|-----------|------|
-| 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向自适应 |
-| 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小卡为代表，按 PP stage 分桶后 kmeans |
-| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取去 min/max 均值消除节点内差异 |
-| Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
-
-> cal / comm / cpu 统一走共享 `clustering` 包（kmeans 比例检测，与 KPI 空间 cluster 同一算法）；Bubble 走固定阈值。
-
-**中间产物（`op_metric/`）**：解析阶段在每个数据目录下生成每 rank 三件套——`group_info_{N}.json`（并行拓扑）、`host_info_{N}.json`（rank→hostUid）、`global_rank_{N}.csv`（各域通信耗时/计数 + ZP_* 指标）。守护进程会把每轮 `op_metric/` 归档到 `daemon_results/<start>/op_metric/` 供复查。
-
----
-
-## 九、边界情况
+## 七、边界情况
 
 | 场景 | 处理 |
 |------|------|
@@ -513,14 +521,15 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | JSONL 某天文件不存在 | 天然跳过（只读存在的文件） |
 | CSV 列不完整 | 缺失列告警但不阻断，对应 metric dict 为空 |
 | 仅 KPI 无 `path` | 只输出 KPI 结果（JSON 只有 `kpi` 键） |
-| KPI 检测失败（有 `path`） | 告警后继续执行 Profiler |
+| KPI 检测失败 | 只记录告警，不影响 Profiler 检查（互不阻塞） |
+| Profiler 检测失败 | 只记录错误，KPI 检查照常执行（互不阻塞） |
 | Profiler 单节点 | 慢CPU 无法检测，stdout 不显示该行 |
 | Profiler 无并行拓扑 | 降级为仅慢计算（cal-only）检测 |
 | `aicore_freq` 轻度降频 | 簇比例未超阈值 → 空间不标记（时间维度已移除，无其他兜底） |
 
 ---
 
-## 十、目录结构
+## 八、目录结构
 
 ```
 straggler/
@@ -537,14 +546,14 @@ straggler/
 ├── 3rdparty/msmonitor/     # msmonitor 子模块（build.sh 优先从中构建 dynolog/wheel）
 ├── clustering/             # 共享 kmeans 比例检测算法
 │   └── kmeans.go
-├── resource/               # 第一道防线：KPI 资源指标检测
+├── resource/               # KPI 资源指标检测
 │   ├── types.go            #   数据结构 & 指标注册表 & 配置
 │   ├── parser.go           #   CSV / KPI 目录解析（node 感知全局卡号）
 │   ├── json_reader.go      #   CATMonitor straggler_kpi JSONL 读取
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
 │   └── report.go           #   管线编排 + 文本报告（stdout）
-├── profiling/              # 第二道防线：Profiling 检测
+├── profiling/              # Profiling 检测
 │   ├── dataparse/          #   数据清洗（SQLite → CSV/JSON 中间件）
 │   │   ├── data_process.go
 │   │   ├── scenario_segregate.go
@@ -568,7 +577,7 @@ straggler/
 
 ---
 
-## 十一、设计文档
+## 九、设计文档
 
 - [DESIGN_NPU_RESOURCE.md](./DESIGN_NPU_RESOURCE.md) — KPI 资源指标检测设计
 - [DESIGN.md](./DESIGN.md) — Profiling 检测设计
