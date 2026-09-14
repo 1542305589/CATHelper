@@ -107,6 +107,9 @@ func randomKey() string {
 // daemon replies with its collect-wait (used for the report timeout).
 func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 	d.Key = randomKey()
+	// Persist the key immediately so a center restart re-authenticates with the
+	// SAME key (not an empty or freshly-random one). Callers hold c.mu.
+	c.save()
 	body := map[string]any{
 		"center_addr": c.selfURL(),
 		"key":         d.Key,
@@ -115,6 +118,8 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 	}
 	resp, err := doJSON(http.MethodPost, d.BaseURL()+"/daemon/match", body, "")
 	if err != nil {
+		d.Key = ""
+		c.save()
 		return err
 	}
 	cw, _ := resp["collect_wait"].(float64)
