@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -95,6 +96,9 @@ func (c *Center) statusViewLocked() []businessStatus {
 	for _, b := range c.biz {
 		out = append(out, businessStatusOfLocked(b))
 	}
+	// Stable ordering: c.biz is a map whose iteration order is random, so sort
+	// by name to keep the console from reshuffling businesses on every poll.
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
