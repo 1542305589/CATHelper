@@ -58,8 +58,9 @@ func (c *Center) scheduleLoop() {
 				b.nextTrigger = time.Now().Add(interval)
 			}
 			if time.Now().After(b.nextTrigger) {
+				// Re-anchor regardless; skip when a round is already in flight.
 				b.nextTrigger = time.Now().Add(interval)
-				if c.businessReadyLocked(b) {
+				if !b.triggering && c.businessReadyLocked(b) {
 					go c.triggerBusiness(b)
 				}
 			}

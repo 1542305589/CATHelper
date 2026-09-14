@@ -381,6 +381,11 @@ func (c *Center) handleBusinessTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "business is paused", http.StatusConflict)
 		return
 	}
+	if b.triggering {
+		c.mu.Unlock()
+		http.Error(w, "业务正在等待守护进程回传 op_metric，请稍后再触发", http.StatusConflict)
+		return
+	}
 	ready := c.businessReadyLocked(b)
 	c.mu.Unlock()
 	if !ready {
