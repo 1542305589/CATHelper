@@ -149,6 +149,9 @@ function render(list) {
           <input id="dip-${b.name}" placeholder="ip">
           <input id="dport-${b.name}" type="number" placeholder="port" style="width:90px">
           <button onclick="addDaemon('${b.name}')">添加守护进程</button>
+          <input id="vllm-${b.name}" placeholder="vllm /metrics URL" style="width:280px" value="${b.vllm_metrics || ''}">
+          <button onclick="setVllm('${b.name}')">设置 vllm 接口</button>
+          ${b.vllm_metrics ? `<button class="danger" onclick="unsetVllm('${b.name}')">清除</button>` : ''}
         </div>
       </div>`;
     el.appendChild(card);
@@ -209,6 +212,19 @@ async function matchDaemon(biz, ip, port) {
 async function unmatchDaemon(biz, ip, port) {
   try { await post('/center/business/' + encodeURIComponent(biz) + '/daemon/unmatch', { ip, port }); toast('已解除匹配', true); refresh(); }
   catch(e) { toast('解除失败：' + e.message, false); }
+}
+
+async function setVllm(biz) {
+  const url = $('vllm-' + biz).value.trim();
+  if (!url) return toast('请填写 vllm /metrics URL', false);
+  try { await post('/center/business/' + encodeURIComponent(biz) + '/vllm', { url }); toast('已设置 vllm 接口', true); refresh(); }
+  catch(e) { toast('设置失败：' + e.message, false); }
+}
+
+async function unsetVllm(biz) {
+  $('vllm-' + biz).value = '';
+  try { await del('/center/business/' + encodeURIComponent(biz) + '/vllm'); toast('已清除 vllm 接口', true); refresh(); }
+  catch(e) { toast('清除失败：' + e.message, false); }
 }
 
 async function refresh() {

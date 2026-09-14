@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/detector"
@@ -34,6 +35,9 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/business/{name}/pause", c.handleBusinessPause)
 	mux.HandleFunc("POST /center/business/{name}/start", c.handleBusinessStart)
 	mux.HandleFunc("POST /center/business/{name}/interval", c.handleBusinessInterval)
+	mux.HandleFunc("POST /center/business/{name}/vllm", c.handleSetVLLMMetrics)
+	mux.HandleFunc("DELETE /center/business/{name}/vllm", c.handleUnsetVLLMMetrics)
+	mux.HandleFunc("GET /center/business/{name}/metrics", c.handleBusinessMetrics)
 	return &http.Server{Handler: mux}
 }
 
@@ -65,7 +69,8 @@ type businessStatus struct {
 	CyclesTotal  int            `json:"cycles_total"`
 	CyclesFailed int            `json:"cycles_failed"`
 	NextTrigger  string         `json:"next_trigger,omitempty"`
-	CollectWait  int64          `json:"collect_wait"` // max across the business's daemons
+	CollectWait  int64          `json:"collect_wait"`           // max across the business's daemons
+	VLLMMetrics  string         `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL
 	Daemons      []daemonStatus `json:"daemons"`
 }
 
@@ -93,6 +98,7 @@ func (c *Center) statusViewLocked() []businessStatus {
 			Paused:       b.Paused,
 			CyclesTotal:  b.CyclesTotal,
 			CyclesFailed: b.CyclesFailed,
+			VLLMMetrics:  b.VLLMMetrics,
 			Daemons:      make([]daemonStatus, 0, len(b.Daemons)),
 		}
 		if !b.nextTrigger.IsZero() {
@@ -158,6 +164,7 @@ func (c *Center) handleRemoveBusiness(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(c.biz, name)
 	c.save()
+	c.metrics.clear(name)
 	c.mu.Unlock()
 	writeJSON(w, map[string]string{"status": "removed"})
 }
@@ -445,6 +452,68 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 	b.nextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
 	c.save()
 	writeJSON(w, map[string]any{"interval_sec": req.IntervalSec})
+}
+
+// handleSetVLLMMetrics attaches a vllm /metrics endpoint URL to a business.
+// Replaces any existing URL and resets the collected series.
+func (c *Center) handleSetVLLMMetrics(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `invalid body: {"url"}`, http.StatusBadRequest)
+		return
+	}
+	req.URL = strings.TrimSpace(req.URL)
+	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
+		http.Error(w, `url 需以 http:// 或 https:// 开头`, http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.VLLMMetrics = req.URL
+	c.save()
+	c.metrics.clear(b.Name)
+	// Scrape immediately so the chart starts populating without waiting for the
+	// next 20s tick (this first scrape only seeds the cumulative baseline).
+	go func() {
+		c.metrics.scrape(&http.Client{Timeout: metricsTimeout}, b.Name, req.URL)
+	}()
+	writeJSON(w, map[string]string{"vllm_metrics": req.URL})
+}
+
+// handleUnsetVLLMMetrics removes a business's vllm /metrics endpoint.
+func (c *Center) handleUnsetVLLMMetrics(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.VLLMMetrics = ""
+	c.save()
+	c.metrics.clear(b.Name)
+	writeJSON(w, map[string]string{"status": "removed"})
+}
+
+// handleBusinessMetrics returns the collected TTFT/TPOT time series (per
+// engine) for the business's vllm endpoint.
+func (c *Center) handleBusinessMetrics(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	c.mu.Lock()
+	_, ok := c.biz[name]
+	c.mu.Unlock()
+	if !ok {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, c.metrics.snapshot(name))
 }
 
 // tryMatch matches a daemon in a goroutine (best-effort on add).

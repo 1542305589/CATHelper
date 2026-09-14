@@ -15,10 +15,11 @@ import (
 // Center is the center-node service: business CRUD + persistence, plus (in
 // later stages) daemon matching, health probing, and merged detection.
 type Center struct {
-	cfg  Config
-	mu   sync.Mutex
-	biz  map[string]*Business // name → business (persisted)
-	logf func(format string, args ...any)
+	cfg     Config
+	mu      sync.Mutex
+	biz     map[string]*Business // name → business (persisted)
+	metrics *metricsStore        // vllm TTFT/TPOT time series (in-memory)
+	logf    func(format string, args ...any)
 }
 
 // New creates a Center, loading persisted state from cfg.DataDir.
@@ -33,9 +34,10 @@ func New(cfg Config) *Center {
 		cfg.Interval = 10 * time.Minute
 	}
 	c := &Center{
-		cfg:  cfg,
-		biz:  make(map[string]*Business),
-		logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[CENTER] "+format+"\n", args...) },
+		cfg:     cfg,
+		biz:     make(map[string]*Business),
+		metrics: newMetricsStore(),
+		logf:    func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[CENTER] "+format+"\n", args...) },
 	}
 	// Ensure the data dir exists at startup (created lazily if absent), so a
 	// fresh --center-data-dir is ready before the first CRUD / result write.
@@ -61,6 +63,7 @@ func (c *Center) Run(ctx context.Context) error {
 
 	go c.heartbeatLoop()
 	go c.scheduleLoop()
+	go c.metricsLoop()
 
 	select {
 	case <-ctx.Done():

@@ -56,6 +56,12 @@
   .toast.show { opacity:1; transform:none; }
   .toast.ok { background:var(--green); }
   .toast.fail { background:var(--red); }
+  .charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .chart-title { font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .charts canvas { width:100%; height:180px; display:block; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--muted); }
+  .legend .item { display:inline-flex; align-items:center; gap:5px; }
+  .legend .swatch { width:10px; height:10px; border-radius:2px; }
 </style>
 </head>
 <body>
@@ -66,6 +72,23 @@
 </header>
 
 <div class="wrap">
+  <div class="card" style="grid-column:1/-1">
+    <h2>延迟指标 <span id="metricsInfo" class="muted"></span></h2>
+    <div class="body">
+      <div class="charts">
+        <div>
+          <div class="chart-title">TPOT（每输出 token 平均延迟）</div>
+          <canvas id="tpotChart"></canvas>
+        </div>
+        <div>
+          <div class="chart-title">TTFT（首 token 平均延迟）</div>
+          <canvas id="ttftChart"></canvas>
+        </div>
+      </div>
+      <div id="metricsLegend" class="legend"></div>
+    </div>
+  </div>
+
   <div class="col">
     <div class="card">
       <h2>运行状态</h2>
@@ -273,6 +296,129 @@ async function refresh() {
     const h = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/history');
     renderHistory(h.cycles || []);
   } catch(e) {}
+  loadMetrics();
+}
+
+const METRIC_COLORS = ['#2563eb','#dc2626','#16a34a','#d97706','#9333ea','#0891b2','#db2777','#65a30d'];
+
+async function loadMetrics() {
+  try {
+    const m = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/metrics');
+    renderMetrics(m);
+  } catch(e) {}
+}
+
+function renderMetrics(m) {
+  const info = $('metricsInfo');
+  if (m.url) {
+    info.textContent = ' · ' + m.url + (m.last_error ? ' · 抓取失败：' + m.last_error : '');
+  } else {
+    info.textContent = ' · 未配置 vllm metrics 接口';
+  }
+  const engines = m.engines || {};
+  drawChart($('tpotChart'), engines, 'tpot', 'TPOT');
+  drawChart($('ttftChart'), engines, 'ttft', 'TTFT');
+  const names = Object.keys(engines);
+  $('metricsLegend').innerHTML = names.map((n, i) =>
+    `<span class="item"><span class="swatch" style="background:${METRIC_COLORS[i % METRIC_COLORS.length]}"></span>engine ${n}</span>`).join('');
+}
+
+function drawChart(canvas, engines, key, label) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const cssH = canvas.clientHeight || 180;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padL = 48, padR = 10, padT = 8, padB = 20;
+  const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+
+  let tMin = Infinity, tMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+  for (const name of Object.keys(engines)) {
+    for (const p of engines[name]) {
+      if (p.ts < tMin) tMin = p.ts;
+      if (p.ts > tMax) tMax = p.ts;
+      const v = p[key];
+      if (v != null && v < vMin) vMin = v;
+      if (v != null && v > vMax) vMax = v;
+    }
+  }
+  if (tMin === Infinity) {
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('暂无数据', cssW / 2, cssH / 2);
+    return;
+  }
+  if (tMax === tMin) tMax = tMin + 1;
+  if (vMin === Infinity) { vMin = 0; vMax = 1; }
+  if (vMin === vMax) { vMax = vMin + 1; vMin = Math.max(0, vMin - 1); }
+  // 秒 → 毫秒，且下界从 0 起更直观
+  vMin = 0; vMax = vMax * 1000;
+  const span = vMax - vMin;
+  vMax = vMax + span * 0.08;
+
+  const x = t => padL + (t - tMin) / (tMax - tMin) * plotW;
+  const y = v => padT + plotH - (v - vMin) / (vMax - vMin) * plotH;
+
+  // 网格与 Y 轴
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.fillStyle = '#6b7280';
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const val = vMin + (vMax - vMin) / ticks * i;
+    const yy = y(val);
+    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(cssW - padR, yy); ctx.stroke();
+    ctx.fillText(fmtMs(val), padL - 6, yy);
+  }
+  // X 轴时间刻度（首末 + 中间 2 个）
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i <= 3; i++) {
+    const t = tMin + (tMax - tMin) / 3 * i;
+    ctx.fillText(fmtClock(t), x(t), cssH - padB + 4);
+  }
+
+  // 曲线
+  const names = Object.keys(engines);
+  names.forEach((name, idx) => {
+    const pts = engines[name];
+    const color = METRIC_COLORS[idx % METRIC_COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const xx = x(p.ts), yy = y((p[key] == null ? 0 : p[key]) * 1000);
+      if (i === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+    });
+    ctx.stroke();
+    // 空闲窗口（无新请求）用小圆点标出
+    ctx.fillStyle = '#9ca3af';
+    pts.forEach(p => {
+      if (p.reqs === 0) {
+        ctx.beginPath();
+        ctx.arc(x(p.ts), y((p[key] == null ? 0 : p[key]) * 1000), 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+  });
+}
+
+function fmtMs(ms) {
+  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+  return Math.round(ms) + 'ms';
+}
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
 const controlMsg = { trigger:'已触发检测', pause:'已暂停', start:'已启动', interval:'周期已更新' };
