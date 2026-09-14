@@ -174,8 +174,8 @@ func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
 7. 簇均值比 > threshold → 异常簇
    "max": 簇均值 / 基线均值 > threshold
    "min": 基线均值 / 簇均值 > threshold
-8. 剔除异常簇，对剩余数据重新聚类：基线随异常剔除而收紧，逐步检出更多边缘异常，循环直到无新增异常
-9. 所有异常卡的 degradation = 卡值 / 最终基线均值（剔除全部异常后剩余数据的基线，统一基准）
+8. 递归进入每个异常簇（深度 ≤ 10）减少误检：更深层异常替换父簇，更深层静默则保留父簇成员
+9. 所有异常卡的 degradation = 卡值 / 第一次 kmeans（全部数据）的基线簇均值，统一基准
 ```
 
 固定种子（kmeansSeed=42）：kmeans++ 采样确定性，同一数据多次运行结果一致。

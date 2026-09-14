@@ -76,24 +76,25 @@ func TestDetectMinDirection(t *testing.T) {
 	assertFlagged(t, res, map[int]float64{6: 0.25, 7: 0.25})
 }
 
-// Iterative removal keeps the mild edge cards: {40,40,60} are ALL flagged (the
-// 40s are no longer dropped in favour of the 60) — removing anomalies tightens
-// the baseline each round so no already-slow card is lost. Ratio is per-card
-// value / final baseline (the leftover {10}* → mean 10), common to all.
-func TestDetectIterativeKeepsEdge(t *testing.T) {
+// Recursive replacement: the top-level anomaly cluster {40,40,60} recurses and
+// isolates the 60 as the deepest anomaly, replacing the parent and dropping the
+// 40s. Ratio = value / FIRST baseline (10), so the 60 reports 6.0. With a
+// threshold ≥ 1.5 the deeper split is silent (60/40 = 1.5 is not strictly
+// greater), so the parent survives instead.
+func TestDetectRecursiveReplacement(t *testing.T) {
 	vals := []float64{10, 10, 10, 10, 40, 40, 60}
 	res := Detect(vals, 1.3, true)
-	assertFlagged(t, res, map[int]float64{4: 4.0, 5: 4.0, 6: 6.0})
+	assertFlagged(t, res, map[int]float64{6: 6.0})
 
-	// Same flagged set at a higher threshold; the ratio is unchanged because
-	// both share the same final baseline (10).
-	resHi := Detect(vals, 1.5, true)
-	assertFlagged(t, resHi, map[int]float64{4: 4.0, 5: 4.0, 6: 6.0})
+	// Deeper silence keeps the parent: all three high cards flagged at their
+	// own value / first baseline (10).
+	resParent := Detect(vals, 1.5, true)
+	assertFlagged(t, resParent, map[int]float64{4: 4.0, 5: 4.0, 6: 6.0})
 }
 
-// A single clean anomaly cluster reports every member at its own value/final
-// baseline ratio (20/10 = 2.0).
-func TestDetectIterativeSingleCluster(t *testing.T) {
+// Recursive silence keeps the parent: an anomaly cluster with no internal
+// structure reports all its members at their value / first baseline ratio.
+func TestDetectRecursiveKeepsParent(t *testing.T) {
 	vals := []float64{10, 10, 10, 10, 20, 20, 20}
 	res := Detect(vals, 1.5, true)
 	assertFlagged(t, res, map[int]float64{4: 2.0, 5: 2.0, 6: 2.0})
