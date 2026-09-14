@@ -71,6 +71,9 @@
 const $ = id => document.getElementById(id);
 let selectedBiz = null;
 
+function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function escJS(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '\\r').replace(/\n/g, '\\n'); }
+
 function toast(msg, ok) {
   const t = $('toast');
   t.textContent = msg;
@@ -124,6 +127,11 @@ function render(list) {
     if (body && body.style.display !== 'none') expanded.add(name);
   });
   document.querySelectorAll('#list input').forEach(i => { inputVals[i.id] = i.value; });
+  // 记录当前焦点与光标位置，重建 DOM 后恢复，避免输入途中 5s 刷新打断输入
+  const active = document.activeElement;
+  const focusId = active && active.id ? active.id : null;
+  const selStart = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
+  const selEnd = active && typeof active.selectionEnd === 'number' ? active.selectionEnd : null;
 
   const el = $('list');
   el.innerHTML = '';
@@ -134,11 +142,11 @@ function render(list) {
     card.className = 'card';
     card.innerHTML = `
       <div class="biz-head" onclick="toggleDetail(this)">
-        <span class="name">${b.name}</span>
+        <span class="name">${escAttr(b.name)}</span>
         <a class="console-link" href="/center/business/${encodeURIComponent(b.name)}/console" onclick="event.stopPropagation()">进入控制台</a>
         <span class="muted">周期 ${b.interval_sec}s · ${b.daemons.length} 守护进程</span>
         ${summary}
-        <span class="del-row"><button class="danger" onclick="event.stopPropagation();removeBusiness('${b.name}')">删除业务</button></span>
+        <span class="del-row"><button class="danger" onclick="event.stopPropagation();removeBusiness('${escJS(b.name)}')">删除业务</button></span>
       </div>
       <div class="body" style="display:${expanded.has(b.name) ? '' : 'none'}">
         <table>
@@ -146,20 +154,24 @@ function render(list) {
           <tbody>${b.daemons.map(d => daemonRow(b.name, d)).join('')}</tbody>
         </table>
         <div class="row mt">
-          <input id="dip-${b.name}" placeholder="ip">
-          <input id="dport-${b.name}" type="number" placeholder="port" style="width:90px">
-          <button onclick="addDaemon('${b.name}')">添加守护进程</button>
-          <input id="vllm-${b.name}" placeholder="vllm /metrics URL" style="width:280px" value="${b.vllm_metrics || ''}">
-          <button onclick="setVllm('${b.name}')">设置 vllm 接口</button>
-          ${b.vllm_metrics ? `<button class="danger" onclick="unsetVllm('${b.name}')">清除</button>` : ''}
+          <input id="dip-${escAttr(b.name)}" placeholder="ip" value="${escAttr(inputVals['dip-' + b.name] ?? '')}">
+          <input id="dport-${escAttr(b.name)}" type="number" placeholder="port" style="width:90px" value="${escAttr(inputVals['dport-' + b.name] ?? '')}">
+          <button onclick="addDaemon('${escJS(b.name)}')">添加守护进程</button>
+          <input id="vllm-${escAttr(b.name)}" placeholder="vllm /metrics URL" style="width:280px" value="${escAttr(inputVals['vllm-' + b.name] ?? (b.vllm_metrics || ''))}">
+          <button onclick="setVllm('${escJS(b.name)}')">设置 vllm 接口</button>
+          ${b.vllm_metrics ? `<button class="danger" onclick="unsetVllm('${escJS(b.name)}')">清除</button>` : ''}
         </div>
       </div>`;
     el.appendChild(card);
   }
-  // 恢复输入框值
-  for (const [id, val] of Object.entries(inputVals)) {
-    const input = document.getElementById(id);
-    if (input) input.value = val;
+  if (focusId) {
+    const input = document.getElementById(focusId);
+    if (input) {
+      input.focus();
+      if (selStart != null) {
+        try { input.setSelectionRange(selStart, selEnd); } catch (e) {}
+      }
+    }
   }
 }
 
