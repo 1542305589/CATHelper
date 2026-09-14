@@ -53,10 +53,7 @@ func (c *Center) scheduleLoop() {
 			if b.Paused {
 				continue
 			}
-			interval := time.Duration(b.IntervalSec) * time.Second
-			if interval <= 0 {
-				interval = c.cfg.Interval
-			}
+			interval := c.businessInterval(b)
 			if b.nextTrigger.IsZero() {
 				b.nextTrigger = time.Now().Add(interval)
 			}
@@ -83,6 +80,16 @@ func (c *Center) businessReadyLocked(b *Business) bool {
 		}
 	}
 	return true
+}
+
+// businessInterval returns a business's trigger period, falling back to the
+// center default when unset/non-positive. Both scheduleLoop and triggerBusiness
+// must use this so nextTrigger is never anchored in the past.
+func (c *Center) businessInterval(b *Business) time.Duration {
+	if b.IntervalSec > 0 {
+		return time.Duration(b.IntervalSec) * time.Second
+	}
+	return c.cfg.Interval
 }
 
 // ---------------------------------------------------------------------------
@@ -191,9 +198,17 @@ func daemonMatchStatus(d *Daemon, key string) (*matchStatusResp, error) {
 // triggerBusiness triggers every healthy daemon, waits for their reports (or
 // the max-collect-wait+60s timeout), merges and re-runs detection. It tracks the
 // business's cycle counters and next trigger, and re-anchors the schedule.
+// Single-flight: a concurrent trigger for the same business is a no-op.
 func (c *Center) triggerBusiness(b *Business) {
 	triggerAt := time.Now()
+
 	c.mu.Lock()
+	if b.triggering {
+		c.mu.Unlock()
+		return
+	}
+	b.triggering = true
+
 	var timeout time.Duration
 	for _, d := range b.Daemons {
 		if d.matchState != "healthy" {
@@ -250,7 +265,8 @@ func (c *Center) triggerBusiness(b *Business) {
 	} else {
 		b.CyclesTotal++
 	}
-	b.nextTrigger = time.Now().Add(time.Duration(b.IntervalSec) * time.Second)
+	b.nextTrigger = time.Now().Add(c.businessInterval(b))
+	b.triggering = false
 	c.save()
 	c.mu.Unlock()
 }

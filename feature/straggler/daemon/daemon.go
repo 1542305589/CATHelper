@@ -624,7 +624,9 @@ func (d *Daemon) reportOpMetric(cr *CycleResult) {
 		d.logf("cycle %d op_metric view: %v", cr.ID, err)
 		return
 	}
-	payload, err := json.Marshal(view)
+	// Report only the rank→artifacts map (the center parses it as detector.OpMetric),
+	// not the {cycle,dir,ranks} envelope.
+	payload, err := json.Marshal(view.Ranks)
 	if err != nil {
 		d.logf("cycle %d marshal op_metric: %v", cr.ID, err)
 		return

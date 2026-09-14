@@ -47,6 +47,7 @@ type Business struct {
 	CyclesFailed int       `json:"cycles_failed"`
 
 	nextTrigger time.Time // next scheduled trigger (in-memory)
+	triggering  bool      // a trigger round is currently in flight (in-memory, single-flight)
 }
 
 // Config holds the center's runtime configuration (--center CLI flags).

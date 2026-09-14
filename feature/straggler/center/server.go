@@ -403,7 +403,7 @@ func (c *Center) handleBusinessStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.Paused = false
-	b.nextTrigger = time.Now().Add(time.Duration(b.IntervalSec) * time.Second)
+	b.nextTrigger = time.Now().Add(c.businessInterval(b))
 	c.save()
 	writeJSON(w, map[string]string{"status": "started"})
 }
