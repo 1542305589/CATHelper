@@ -222,9 +222,12 @@ func parseVLLMMetrics(text string) map[string]metricCum {
 			c.ttftSum = value
 		case "vllm:time_to_first_token_seconds_count":
 			c.ttftCount = value
-		case "vllm:time_per_output_token_seconds_sum":
+		// TPOT (inter-token latency): newer vllm renamed the metric from
+		// vllm:time_per_output_token_seconds to vllm:inter_token_latency_seconds;
+		// accept both so old and new servers chart identically.
+		case "vllm:inter_token_latency_seconds_sum", "vllm:time_per_output_token_seconds_sum":
 			c.tpotSum = value
-		case "vllm:time_per_output_token_seconds_count":
+		case "vllm:inter_token_latency_seconds_count", "vllm:time_per_output_token_seconds_count":
 			c.tpotCount = value
 		default:
 			continue
