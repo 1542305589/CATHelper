@@ -30,6 +30,10 @@ func startDynolog(bin string, logf func(format string, args ...any)) *exec.Cmd {
 		args = append(args, "-port", strconv.Itoa(port))
 	}
 	cmd := exec.Command(bin, args...)
+	// Put dynolog in its own session so a Ctrl-C / terminal SIGINT aimed at the
+	// daemon's process group does NOT also kill it — it must keep running after
+	// the daemon exits so collection can continue.
+	detachProcess(cmd)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
