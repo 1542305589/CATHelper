@@ -451,7 +451,12 @@ func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if d.KeyMatches(r.Header.Get("X-Match-Key")) {
-		writeJSON(w, map[string]any{"state": state, "matched": true, "center": center})
+		writeJSON(w, map[string]any{
+			"state":        state,
+			"matched":      true,
+			"center":       center,
+			"collect_wait": int64(d.cfg.CollectWait.Seconds()),
+		})
 		return
 	}
 	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true})

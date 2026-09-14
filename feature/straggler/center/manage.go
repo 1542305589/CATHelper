@@ -168,6 +168,11 @@ func (c *Center) probeDaemonLocked(d *Daemon) {
 	switch {
 	case st.Matched:
 		d.matchState = "healthy"
+		// collect_wait is runtime-only; recover it on every probe so a center
+		// restart (which drops it) re-learns it without a full re-match.
+		if st.CollectWait > 0 {
+			d.collectWait = st.CollectWait
+		}
 	case st.Other:
 		d.matchState = "other"
 	default:
@@ -186,9 +191,10 @@ func daemonHealth(d *Daemon) bool {
 }
 
 type matchStatusResp struct {
-	State   string `json:"state"`
-	Matched bool   `json:"matched"`
-	Other   bool   `json:"other"`
+	State       string `json:"state"`
+	Matched     bool   `json:"matched"`
+	Other       bool   `json:"other"`
+	CollectWait int64  `json:"collect_wait"`
 }
 
 func daemonMatchStatus(d *Daemon, key string) (*matchStatusResp, error) {
