@@ -62,7 +62,9 @@
   .chart-box { position:relative; height:200px; }
   .chart-box canvas { width:100% !important; height:100% !important; }
   .legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--muted); }
-  .legend .item { display:inline-flex; align-items:center; gap:5px; }
+  .legend .item { display:inline-flex; align-items:center; gap:5px; cursor:pointer; user-select:none; padding:2px 6px; border-radius:6px; }
+  .legend .item:hover { background:#eef2ff; }
+  .legend .item.off { opacity:.45; }
   .legend .swatch { width:10px; height:10px; border-radius:2px; }
 </style>
 </head>
@@ -309,7 +311,11 @@ async function loadMetrics() {
   } catch(e) {}
 }
 
+let latestMetrics = null;
+const hiddenEngines = new Set();
+
 function renderMetrics(m) {
+  latestMetrics = m;
   const info = $('metricsInfo');
   if (m.url) {
     info.textContent = ' · ' + m.url + (m.last_error ? ' · 抓取失败：' + m.last_error : '');
@@ -319,9 +325,27 @@ function renderMetrics(m) {
   const engines = m.engines || {};
   renderMetricChart('tpot', engines, 'tpot');
   renderMetricChart('ttft', engines, 'ttft');
-  const names = Object.keys(engines);
-  $('metricsLegend').innerHTML = names.map((n, i) =>
-    `<span class="item"><span class="swatch" style="background:${METRIC_COLORS[i % METRIC_COLORS.length]}"></span>engine ${n}</span>`).join('');
+  renderLegend(Object.keys(engines));
+}
+
+function renderLegend(names) {
+  const el = $('metricsLegend');
+  el.innerHTML = '';
+  names.forEach((name, i) => {
+    const hidden = hiddenEngines.has(name);
+    const item = document.createElement('span');
+    item.className = 'item' + (hidden ? ' off' : '');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = hidden ? '#d1d5db' : METRIC_COLORS[i % METRIC_COLORS.length];
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode('engine ' + name));
+    item.onclick = () => {
+      if (hiddenEngines.has(name)) hiddenEngines.delete(name); else hiddenEngines.add(name);
+      if (latestMetrics) renderMetrics(latestMetrics);
+    };
+    el.appendChild(item);
+  });
 }
 
 const metricCharts = {};
@@ -340,6 +364,7 @@ function renderMetricChart(key, engines, field) {
       pointHitRadius: 4,
       tension: 0.15,
       spanGaps: true,
+      hidden: hiddenEngines.has(name),
     };
   });
 
