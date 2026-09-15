@@ -28,13 +28,15 @@ type progressLog struct {
 
 func newProgressLog() *progressLog { return &progressLog{} }
 
-// begin resets the log for a newly started round.
-func (p *progressLog) begin(cycle int) {
+// begin resets the log for a newly started round. started must be the round's
+// trigger time so the in-flight history entry's ts matches the eventual result
+// dir name.
+func (p *progressLog) begin(cycle int, started time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cycle = cycle
 	p.inFlight = true
-	p.started = time.Now()
+	p.started = started
 	p.lines = nil
 }
 
@@ -63,6 +65,7 @@ type progressSnapshot struct {
 	Cycle    int            `json:"cycle"`
 	InFlight bool           `json:"in_flight"`
 	Started  string         `json:"started,omitempty"`
+	StartTs  string         `json:"start_ts,omitempty"` // dir-form ts of the round start
 	Lines    []progressLine `json:"lines"`
 }
 
@@ -74,6 +77,7 @@ func (p *progressLog) snapshot() progressSnapshot {
 	out := progressSnapshot{Cycle: p.cycle, InFlight: p.inFlight, Lines: lines}
 	if !p.started.IsZero() {
 		out.Started = p.started.Format(time.RFC3339)
+		out.StartTs = p.started.Format("20060102-150405")
 	}
 	return out
 }

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // httpServer builds the net/http mux (standard library only). Paths carry no
@@ -108,7 +109,13 @@ func (d *Daemon) handleResultsHistory(w http.ResponseWriter, r *http.Request) {
 	if limit > 0 && len(cycles) > limit {
 		cycles = cycles[:limit]
 	}
-	resp := historyResponse{Cycles: make([]*cycleSummary, 0, len(cycles))}
+	resp := historyResponse{Cycles: make([]*cycleSummary, 0, len(cycles)+1)}
+	// Prepend the in-flight cycle so it appears in history (and its progress is
+	// reachable) the moment it starts.
+	if snap := d.progress.snapshot(); snap.InFlight {
+		started, _ := time.Parse(time.RFC3339, snap.Started)
+		resp.Cycles = append(resp.Cycles, &cycleSummary{ID: snap.Cycle, StartedAt: started, Running: true})
+	}
 	for _, c := range cycles {
 		resp.Cycles = append(resp.Cycles, toCycleSummary(c))
 	}

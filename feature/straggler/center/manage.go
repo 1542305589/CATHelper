@@ -242,7 +242,7 @@ func (c *Center) triggerBusiness(b *Business) {
 	c.mu.Unlock()
 	timeout += reportBufferSec * time.Second
 
-	prog.begin(round)
+	prog.begin(round, triggerAt)
 	prog.step("业务 %s 第 %d 轮开始（%d 个已匹配守护进程）", b.Name, round, healthy)
 	prog.step("触发守护进程: %s", strings.Join(addrs, ", "))
 

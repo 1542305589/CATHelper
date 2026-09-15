@@ -5,12 +5,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestBusinessProgressEndpoint(t *testing.T) {
 	c := New(Config{DataDir: t.TempDir(), Port: 1})
 	b := &Business{Name: "biz", Degradation: 0.3, progress: newProgressLog()}
-	b.progress.begin(1)
+	b.progress.begin(1, time.Now())
 	b.progress.step("hello %d", 42)
 	c.mu.Lock()
 	c.biz["biz"] = b

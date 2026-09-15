@@ -16,6 +16,7 @@ type cycleInfo struct {
 	DurationMs int64          `json:"duration_ms"`
 	WorldSize  int            `json:"world_size"`
 	Summary    map[string]int `json:"summary"`
+	Running    bool           `json:"running,omitempty"` // in-flight round, prepended to history
 }
 
 // latestResultDir returns the newest per-cycle result dir under a business, or
@@ -71,6 +72,25 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 			}
 		}
 		out = append(out, ci)
+	}
+
+	// Prepend the in-flight round so the console shows it the moment it starts
+	// (otherwise the progress is unreachable until the round completes).
+	c.mu.Lock()
+	var snap progressSnapshot
+	haveProgress := false
+	if b := c.biz[name]; b != nil && b.progress != nil {
+		snap = b.progress.snapshot()
+		haveProgress = true
+	}
+	c.mu.Unlock()
+	if haveProgress && snap.InFlight {
+		out = append([]cycleInfo{{
+			Ts:        snap.StartTs,
+			StartedAt: snap.Started,
+			Running:   true,
+			Summary:   map[string]int{},
+		}}, out...)
 	}
 	return out
 }

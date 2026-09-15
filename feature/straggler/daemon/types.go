@@ -116,6 +116,7 @@ type cycleSummary struct {
 	Summary    map[string]int `json:"summary"`
 	KPIStatus  string         `json:"kpi_status,omitempty"`
 	Error      string         `json:"error,omitempty"`
+	Running    bool           `json:"running,omitempty"` // in-flight cycle, prepended to history
 }
 
 // historyResponse is the GET /straggler/results/history payload.
