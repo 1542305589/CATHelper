@@ -273,6 +273,10 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 		minOverall = 1
 	}
 
+	// Sort by cost descending (same as the compute ranking) so the slowest group
+	// is on top, rather than leaving the lexicographic group order.
+	sort.Slice(stats, func(i, j int) bool { return stats[i].min > stats[j].min })
+
 	sb.WriteString("  " + padL("Group", 20) + "  " + padR("耗时", 12) + "  " + padR("劣化指数", 10) + "  " + "柱状图" + "\n")
 	sb.WriteString("  " + padL(strings.Repeat("-", 20), 20) + "  " + padR(strings.Repeat("-", 12), 12) + "  " + padR(strings.Repeat("-", 10), 10) + "  " + strings.Repeat("-", barMaxWidth) + "\n")
 
