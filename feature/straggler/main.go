@@ -218,6 +218,7 @@ func main() {
 		cfg.Port = centerPort
 		cfg.DataDir = centerDataDir
 		cfg.Interval = time.Duration(centerIntervalSec) * time.Second
+		cfg.Degradation = degradation
 
 		c := center.New(cfg)
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] === Center Mode (port=%d data=%s) ===\n", centerPort, centerDataDir)

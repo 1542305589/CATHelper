@@ -54,17 +54,19 @@ type Business struct {
 
 // Config holds the center's runtime configuration (--center CLI flags).
 type Config struct {
-	Port     int           // HTTP listen port
-	DataDir  string        // persistence root (businesses.json + per-business results)
-	Interval time.Duration // default trigger period for new businesses
+	Port        int           // HTTP listen port
+	DataDir     string        // persistence root (businesses.json + per-business results)
+	Interval    time.Duration // default trigger period for new businesses
+	Degradation float64       // merged-detection sensitivity (CalThreshold = 1 + degradation)
 }
 
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Port:     8080,
-		DataDir:  "center_data",
-		Interval: 10 * time.Minute,
+		Port:        8080,
+		DataDir:     "center_data",
+		Interval:    10 * time.Minute,
+		Degradation: 0.3,
 	}
 }
 

@@ -24,7 +24,6 @@ const (
 	probeInterval    = 5 * time.Second
 	probeFailLimit   = 3               // consecutive healthz failures → 断连
 	reportBufferSec  = 60              // fixed buffer added to max collect-wait
-	degradation      = 0.3             // center-side detection sensitivity
 )
 
 // heartbeatLoop probes every daemon (healthz + match_status) forever.
@@ -330,8 +329,8 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	defer os.RemoveAll(tmp)
 
 	config.FilePath = tmp
-	config.CalThreshold = 1 + degradation
-	config.CommThreshold = 1 + degradation*5
+	config.CalThreshold = 1 + c.cfg.Degradation
+	config.CommThreshold = 1 + c.cfg.Degradation*5
 
 	parallels, validRanks := detector.GetCurDetectionInfo(tmp)
 	if len(validRanks) == 0 {
@@ -343,7 +342,7 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	if err != nil {
 		return fmt.Errorf("build node result: %w", err)
 	}
-	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, degradation)
+	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, c.cfg.Degradation)
 
 	summary := map[string]int{
 		"cal":        len(result["cal"]),

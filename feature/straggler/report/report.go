@@ -97,7 +97,7 @@ func GenerateReport(
 	// ZP_Kernel section.
 	if kernelData, ok := stepData["ZP_Kernel"]; ok {
 		abnormal := abnormalSingleRanks(detectionResult["cal"])
-		sb.WriteString(metricSection("ZP_Kernel 耗时排序", kernelData, abnormal))
+		sb.WriteString(metricSection("计算类算子耗时排序", kernelData, abnormal))
 		sb.WriteString("\n")
 	}
 
@@ -230,11 +230,10 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 		return len(sortedGroups[i]) < len(sortedGroups[j])
 	})
 
-	var maxMean float64
+	var maxMin float64
 	type groupStat struct {
 		group    []int
-		min, max float64
-		mean     float64
+		min      float64
 		abnormal bool
 	}
 	var stats []groupStat
@@ -251,25 +250,23 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 		}
 		sort.Float64s(vals)
 		mn := vals[0]
-		mx := vals[len(vals)-1]
-		av := mean(vals)
 
 		// Check if abnormal.
 		key := joinInts(g, ",")
 		ab := abnormalGroups[key]
 
-		stats = append(stats, groupStat{group: g, min: mn, max: mx, mean: av, abnormal: ab})
-		if av > maxMean {
-			maxMean = av
+		stats = append(stats, groupStat{group: g, min: mn, abnormal: ab})
+		if mn > maxMin {
+			maxMin = mn
 		}
 	}
 
-	if maxMean == 0 {
-		maxMean = 1
+	if maxMin == 0 {
+		maxMin = 1
 	}
 
-	sb.WriteString(fmt.Sprintf("  %-20s  %8s  %8s  %8s  %s\n", "Group", "Min", "Mean", "Max", "柱状图"))
-	sb.WriteString(fmt.Sprintf("  %-20s  %8s  %8s  %8s  %s\n", strings.Repeat("-", 20), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", barMaxWidth)))
+	sb.WriteString(fmt.Sprintf("  %-20s  %10s  %s\n", "Group", "耗时", "柱状图"))
+	sb.WriteString(fmt.Sprintf("  %-20s  %10s  %s\n", strings.Repeat("-", 20), strings.Repeat("-", 10), strings.Repeat("-", barMaxWidth)))
 
 	for _, st := range stats {
 		marker := ""
@@ -277,8 +274,8 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 			marker = " ***"
 		}
 		groupLabel := "[" + joinInts(st.group, ", ") + "]"
-		sb.WriteString(fmt.Sprintf("  %-20s  %8s  %8s  %8s  %s%s\n",
-			groupLabel, fmtNs(st.min), fmtNs(st.mean), fmtNs(st.max), bar(st.mean, maxMean), marker))
+		sb.WriteString(fmt.Sprintf("  %-20s  %10s  %s%s\n",
+			groupLabel, fmtNs(st.min), bar(st.min, maxMin), marker))
 	}
 
 	return sb.String()
@@ -359,7 +356,7 @@ func detectionSummary(
 ) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("  劣化阈值: Cal=%.2f, Comm=%.2f\n\n", 1+degradation, 1+degradation*5))
+	sb.WriteString(fmt.Sprintf("  计算类阈值: %.2f, 通信类阈值: %.2f\n\n", 1+degradation, 1+degradation*5))
 
 	sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8s  %s\n", "检测类型", "状态", "异常数", "异常详情"))
 	sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8s  %s\n", strings.Repeat("-", 22), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 30)))
