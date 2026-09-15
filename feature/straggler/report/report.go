@@ -179,8 +179,8 @@ func metricSection(metricName string, data map[int]float64, abnormalRanks map[in
 		fmtNs(maxVal), fmtNs(sorted[len(sorted)-1].value),
 		fmtNs(mean(values)), fmtNs(med)))
 
-	sb.WriteString(fmt.Sprintf("  %-4s  %-6s  %12s  %8s  %s\n", "#", "Rank", "耗时", "劣化指数", "柱状图"))
-	sb.WriteString(fmt.Sprintf("  %-4s  %-6s  %12s  %8s  %s\n", "---", "------", "----------", "--------", strings.Repeat("-", barMaxWidth)))
+	sb.WriteString("  " + padEnd("#", 4) + "  " + padEnd("Rank", 6) + "  " + padStart("耗时", 12) + "  " + padStart("劣化指数", 10) + "  柱状图\n")
+	sb.WriteString("  " + strings.Repeat("-", 4) + "  " + strings.Repeat("-", 6) + "  " + strings.Repeat("-", 12) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", barMaxWidth) + "\n")
 
 	printRank := func(idx int, kv kv) {
 		deg := kv.value / valid[minValue(valid)]
@@ -191,8 +191,7 @@ func metricSection(metricName string, data map[int]float64, abnormalRanks map[in
 		if abnormalRanks[kv.rank] {
 			marker = " ***"
 		}
-		sb.WriteString(fmt.Sprintf("  %-4d  %-6d  %12s  %7.2fx  %s%s\n",
-			idx+1, kv.rank, fmtNs(kv.value), deg, bar(kv.value, maxVal), marker))
+		sb.WriteString("  " + padEnd(strconv.Itoa(idx+1), 4) + "  " + padEnd(strconv.Itoa(kv.rank), 6) + "  " + padStart(fmtNs(kv.value), 12) + "  " + padStart(fmt.Sprintf("%.2fx", deg), 10) + "  " + bar(kv.value, maxVal) + marker + "\n")
 	}
 
 	for i, kv := range top {
@@ -277,8 +276,8 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 	// is on top, rather than leaving the lexicographic group order.
 	sort.Slice(stats, func(i, j int) bool { return stats[i].min > stats[j].min })
 
-	sb.WriteString(fmt.Sprintf("  %-20s  %12s  %10s  %s\n", "Group", "耗时", "劣化指数", "柱状图"))
-	sb.WriteString(fmt.Sprintf("  %-20s  %12s  %10s  %s\n", strings.Repeat("-", 20), strings.Repeat("-", 12), strings.Repeat("-", 10), strings.Repeat("-", barMaxWidth)))
+	sb.WriteString("  " + padEnd("Group", 20) + "  " + padStart("耗时", 12) + "  " + padStart("劣化指数", 10) + "  柱状图\n")
+	sb.WriteString("  " + strings.Repeat("-", 20) + "  " + strings.Repeat("-", 12) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", barMaxWidth) + "\n")
 
 	for _, st := range stats {
 		marker := ""
@@ -290,7 +289,7 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 			deg = 1
 		}
 		groupLabel := "[" + joinInts(st.group, ", ") + "]"
-		sb.WriteString(fmt.Sprintf("  %-20s  %12s  %10s  %s%s\n", groupLabel, fmtNs(st.min), fmt.Sprintf("%.2fx", deg), bar(st.min, maxMin), marker))
+		sb.WriteString("  " + padEnd(groupLabel, 20) + "  " + padStart(fmtNs(st.min), 12) + "  " + padStart(fmt.Sprintf("%.2fx", deg), 10) + "  " + bar(st.min, maxMin) + marker + "\n")
 	}
 
 	return sb.String()
@@ -353,12 +352,10 @@ func hostSection(data map[int]float64, ranks []int) string {
 
 	var sb strings.Builder
 	sb.WriteString(sepLine("ZP_Host 节点对比 (跨节点)", 80))
-	sb.WriteString(fmt.Sprintf("  %-24s  %8s  %8s  %8s  %s\n", "Node", "Min", "Mean", "Max", "柱状图"))
-	sb.WriteString(fmt.Sprintf("  %-24s  %8s  %8s  %8s  %s\n",
-		strings.Repeat("-", 24), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", barMaxWidth)))
+	sb.WriteString("  " + padEnd("Node", 24) + "  " + padStart("Min", 10) + "  " + padStart("Mean", 10) + "  " + padStart("Max", 10) + "  柱状图\n")
+	sb.WriteString("  " + strings.Repeat("-", 24) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", barMaxWidth) + "\n")
 	for _, st := range stats {
-		sb.WriteString(fmt.Sprintf("  %-24s  %8s  %8s  %8s  %s\n",
-			st.name, fmtNs(st.min), fmtNs(st.mean), fmtNs(st.max), bar(st.mean, maxMean)))
+		sb.WriteString("  " + padEnd(st.name, 24) + "  " + padStart(fmtNs(st.min), 10) + "  " + padStart(fmtNs(st.mean), 10) + "  " + padStart(fmtNs(st.max), 10) + "  " + bar(st.mean, maxMean) + "\n")
 	}
 	return sb.String()
 }
@@ -373,8 +370,8 @@ func detectionSummary(
 
 	sb.WriteString(fmt.Sprintf("  计算类阈值: %.2f, 通信类阈值: %.2f\n\n", 1+degradation, 1+degradation*5))
 
-	sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8s  %s\n", "检测类型", "状态", "异常数", "异常详情"))
-	sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8s  %s\n", strings.Repeat("-", 22), strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 30)))
+	sb.WriteString("  " + padEnd("检测类型", 22) + "  " + padEnd("状态", 10) + "  " + padEnd("异常数", 10) + "  异常详情\n")
+	sb.WriteString("  " + strings.Repeat("-", 22) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 30) + "\n")
 
 	// Ordered categories. In degraded mode (no parallel topology) only cal has
 	// input data; the other categories are omitted instead of being reported
@@ -417,7 +414,7 @@ func detectionSummary(
 			}
 		}
 
-		sb.WriteString(fmt.Sprintf("  %-22s  %-8s  %-8d  %s\n", cat.label, status, count, detailStr))
+		sb.WriteString("  " + padEnd(cat.label, 22) + "  " + padEnd(status, 10) + "  " + padEnd(strconv.Itoa(count), 10) + "  " + detailStr + "\n")
 	}
 
 	if calOnly {
@@ -467,6 +464,44 @@ func bar(value, maxValue float64) string {
 		width = 1
 	}
 	return strings.Repeat(barChar, width)
+}
+
+// dw returns s's terminal display width (CJK / fullwidth runes count as 2
+// columns, others as 1). Table columns must be padded by this, not by fmt's
+// %Ns (which counts runes), or headers mixing CJK and ASCII drift out of line.
+func dw(s string) int {
+	w := 0
+	for _, r := range s {
+		switch {
+		case (r >= 0x1100 && r <= 0x115F) || // Hangul Jamo
+			(r >= 0x2E80 && r <= 0xA4CF) || // CJK Radicals .. Yi
+			(r >= 0xAC00 && r <= 0xD7A3) || // Hangul Syllables
+			(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility
+			(r >= 0xFE30 && r <= 0xFE4F) || // CJK Compatibility Forms
+			(r >= 0xFF00 && r <= 0xFF60) || // Fullwidth Forms
+			(r >= 0xFFE0 && r <= 0xFFE6): // Fullwidth signs
+			w += 2
+		default:
+			w++
+		}
+	}
+	return w
+}
+
+// padEnd left-aligns s to width terminal columns.
+func padEnd(s string, width int) string {
+	if p := width - dw(s); p > 0 {
+		return s + strings.Repeat(" ", p)
+	}
+	return s
+}
+
+// padStart right-aligns s to width terminal columns.
+func padStart(s string, width int) string {
+	if p := width - dw(s); p > 0 {
+		return strings.Repeat(" ", p) + s
+	}
+	return s
 }
 
 func sepLine(title string, width int) string {
