@@ -149,7 +149,7 @@
       <h2>检测历史 <span id="histCount" class="muted"></span></h2>
       <div style="overflow:auto; max-height:36vh;">
         <table>
-          <thead><tr><th>开始时间</th><th>耗时</th><th>world_size</th><th>异常摘要</th></tr></thead>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>world_size</th><th>异常摘要</th></tr></thead>
           <tbody id="histBody"></tbody>
         </table>
       </div>
@@ -266,11 +266,12 @@ function renderHistory(cycles) {
   $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
   $('histEmpty').style.display = cycles.length ? 'none' : 'block';
   $('histEmpty').textContent = cycles.length ? '' : '暂无检测记录';
-  cycles.forEach((c) => {
+  cycles.forEach((c, i) => {
     const tr = document.createElement('tr');
     tr.onclick = () => select(c.ts, tr, c.running);
     if (c.ts === selectedTs) tr.className = 'selected';
     const cells = [
+      i + 1,
       timeFmt(c.started_at) || fmtTs(c.ts),
       c.running ? '进行中…' : msFmt(c.duration_ms),
       c.world_size != null ? c.world_size : '—',
@@ -278,7 +279,7 @@ function renderHistory(cycles) {
     ];
     cells.forEach((h, j) => {
       const td = document.createElement('td');
-      if (j === 3) td.innerHTML = h; else td.textContent = h;
+      if (j === 4) td.innerHTML = h; else td.textContent = h;
       tr.appendChild(td);
     });
     tb.appendChild(tr);
@@ -323,9 +324,7 @@ function renderProgress(p) {
   const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
   const lines = p.lines || [];
   if (!lines.length) { pre.textContent = '暂无进度记录'; return; }
-  const head = p.cycle
-    ? `<span class="phead">周期 #${p.cycle}${p.in_flight ? ' · 进行中' : ''}</span>\n`
-    : '';
+  const head = p.in_flight ? '<span class="phead">进行中</span>\n' : '';
   pre.innerHTML = head + lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n');
   if (stick) pre.scrollTop = pre.scrollHeight;
 }

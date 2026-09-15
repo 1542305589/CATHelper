@@ -280,9 +280,7 @@ function renderProgress(p) {
   const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
   const lines = p.lines || [];
   if (!lines.length) { pre.textContent = '暂无进度记录'; return; }
-  const head = p.cycle
-    ? `<span class="phead">周期 #${p.cycle}${p.in_flight ? ' · 进行中' : ''}</span>\n`
-    : '';
+  const head = p.in_flight ? '<span class="phead">进行中</span>\n' : '';
   pre.innerHTML = head + lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n');
   if (stick) pre.scrollTop = pre.scrollHeight;
 }

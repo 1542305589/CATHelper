@@ -176,7 +176,7 @@ func (d *Daemon) startCycle() {
 func (d *Daemon) runCycle(id int) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now()}
 	d.progress.begin(id)
-	d.progress.step("周期 #%d 触发采集 (dyno)", id)
+	d.progress.step("触发采集 (dyno)")
 	// This cycle's analysed results (combined JSON, meta, report) are written
 	// to ./daemon_results/<start>/ — OUTSIDE the --profiler-dir root — and
 	// that archive dir is the cycle's dump_dir. The --profiler-dir root is only
@@ -194,9 +194,9 @@ func (d *Daemon) runCycle(id int) {
 		// whole --profiler-dir is removed at the end of every cycle, success or
 		// failure. dyno re-creates the root on the next trigger.
 		if cr.Error != "" {
-			d.progress.step("周期 #%d 失败: %s", cr.ID, cr.Error)
+			d.progress.step("失败: %s", cr.Error)
 		} else {
-			d.progress.step("周期 #%d 完成 (耗时 %dms, %d 个 .db)", cr.ID, cr.DurationMs, cr.DBs)
+			d.progress.step("完成 (耗时 %dms, %d 个 .db)", cr.DurationMs, cr.DBs)
 		}
 		d.progress.finish()
 		_ = d.progress.save(filepath.Join(archive, "progress.json"))
