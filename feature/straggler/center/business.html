@@ -124,10 +124,10 @@
     </div>
 
     <div class="card">
-      <h2>守护进程</h2>
+      <h2>节点列表</h2>
       <div class="body">
         <table>
-          <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th></tr></thead>
+          <thead><tr><th>节点</th><th>状态</th><th>collect_wait</th></tr></thead>
           <tbody id="daemonBody"></tbody>
         </table>
       </div>
@@ -166,7 +166,7 @@ const BIZ = decodeURIComponent(parts[3] || '');
 let selectedTs = null;
 
 function stateLabel(s) {
-  return {healthy:'健康匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
+  return {healthy:'已匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
 }
 function timeFmt(s) {
   if (!s) return '—';
