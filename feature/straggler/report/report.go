@@ -231,6 +231,7 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 	})
 
 	var maxMin float64
+	var minOverall float64
 	type groupStat struct {
 		group    []int
 		min      float64
@@ -259,23 +260,32 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 		if mn > maxMin {
 			maxMin = mn
 		}
+		if minOverall == 0 || mn < minOverall {
+			minOverall = mn
+		}
 	}
 
 	if maxMin == 0 {
 		maxMin = 1
 	}
+	if minOverall == 0 {
+		minOverall = 1
+	}
 
-	sb.WriteString(fmt.Sprintf("  %-20s  %10s  %s\n", "Group", "耗时", "柱状图"))
-	sb.WriteString(fmt.Sprintf("  %-20s  %10s  %s\n", strings.Repeat("-", 20), strings.Repeat("-", 10), strings.Repeat("-", barMaxWidth)))
+	sb.WriteString("  " + padL("Group", 20) + "  " + padR("耗时", 12) + "  " + padR("劣化指数", 10) + "  " + "柱状图" + "\n")
+	sb.WriteString("  " + padL(strings.Repeat("-", 20), 20) + "  " + padR(strings.Repeat("-", 12), 12) + "  " + padR(strings.Repeat("-", 10), 10) + "  " + strings.Repeat("-", barMaxWidth) + "\n")
 
 	for _, st := range stats {
 		marker := ""
 		if st.abnormal {
 			marker = " ***"
 		}
+		deg := st.min / minOverall
+		if deg == 0 {
+			deg = 1
+		}
 		groupLabel := "[" + joinInts(st.group, ", ") + "]"
-		sb.WriteString(fmt.Sprintf("  %-20s  %10s  %s%s\n",
-			groupLabel, fmtNs(st.min), bar(st.min, maxMin), marker))
+		sb.WriteString("  " + padL(groupLabel, 20) + "  " + padR(fmtNs(st.min), 12) + "  " + padR(fmt.Sprintf("%.2fx", deg), 10) + "  " + bar(st.min, maxMin) + marker + "\n")
 	}
 
 	return sb.String()
@@ -452,6 +462,43 @@ func bar(value, maxValue float64) string {
 		width = 1
 	}
 	return strings.Repeat(barChar, width)
+}
+
+// displayWidth returns the terminal display width of s (CJK/wide runes are 2
+// columns). Used to keep table columns aligned when headers contain CJK text —
+// fmt's %Ns width counts runes, not terminal columns.
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if (r >= 0x1100 && r <= 0x115F) || // Hangul Jamo
+			(r >= 0x2E80 && r <= 0xA4CF) || // CJK Radicals .. Yi
+			(r >= 0xAC00 && r <= 0xD7A3) || // Hangul Syllables
+			(r >= 0xF900 && r <= 0xFAFF) || // CJK Compatibility
+			(r >= 0xFE30 && r <= 0xFE4F) || // CJK Compatibility Forms
+			(r >= 0xFF00 && r <= 0xFF60) || // Fullwidth Forms
+			(r >= 0xFFE0 && r <= 0xFFE6) {
+			w += 2
+		} else {
+			w++
+		}
+	}
+	return w
+}
+
+// padR right-aligns s to the given terminal display width.
+func padR(s string, width int) string {
+	if p := width - displayWidth(s); p > 0 {
+		return strings.Repeat(" ", p) + s
+	}
+	return s
+}
+
+// padL left-aligns s to the given terminal display width.
+func padL(s string, width int) string {
+	if p := width - displayWidth(s); p > 0 {
+		return s + strings.Repeat(" ", p)
+	}
+	return s
 }
 
 func sepLine(title string, width int) string {
