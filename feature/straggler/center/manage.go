@@ -343,7 +343,14 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	if err != nil {
 		return fmt.Errorf("build node result: %w", err)
 	}
-	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, b.Degradation)
+	c.mu.Lock()
+	addrs := make([]string, 0, len(b.Daemons))
+	for _, d := range b.Daemons {
+		addrs = append(addrs, d.Addr())
+	}
+	c.mu.Unlock()
+	source := strings.Join(addrs, ",")
+	reportText := report.GenerateReport(stepData, parallels, validRanks, result, source, b.Degradation)
 
 	summary := map[string]int{
 		"cal":        len(result["cal"]),

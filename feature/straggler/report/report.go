@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/detector"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
 )
@@ -74,7 +75,7 @@ func GenerateReport(
 
 	// Header.
 	sb.WriteString(sepLine("慢节点检测报告", reportSep))
-	sb.WriteString(fmt.Sprintf("\n  数据目录: %s\n", inputPath))
+	sb.WriteString(fmt.Sprintf("\n  数据来源: %s\n", inputPath))
 	sb.WriteString(fmt.Sprintf("  生成时间: %s\n", time.Now().Format("2006-01-02 15:04:05")))
 	sb.WriteString(fmt.Sprintf("  有效 Rank 数: %d\n\n", len(validRanks)))
 
@@ -108,7 +109,7 @@ func GenerateReport(
 	// uses — otherwise cross-node comparison is impossible.
 	if !calOnly && utils.PhysicalNodeCount() >= 2 {
 		if hostData, ok := stepData["ZP_Host"]; ok {
-			sb.WriteString(hostSection(hostData, validRanks, inputPath))
+			sb.WriteString(hostSection(hostData, validRanks))
 			sb.WriteString("\n")
 		}
 	}
@@ -296,8 +297,8 @@ func commSection(domainName string, domainGroups [][]int, commData map[int]float
 // ranks. Each row is one physical node (hostUid from host_info_{N}.json),
 // showing min/mean/max of its ranks' ZP_Host. Returns "" when fewer than two
 // nodes have data (nothing to compare).
-func hostSection(data map[int]float64, ranks []int, inputPath string) string {
-	hostOf := detector.GetHostUidMapping(inputPath, ranks)
+func hostSection(data map[int]float64, ranks []int) string {
+	hostOf := detector.GetHostUidMapping(config.FilePath, ranks)
 
 	nodeVals := make(map[string][]float64)
 	for _, r := range ranks {
