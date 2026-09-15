@@ -1,7 +1,10 @@
 package center
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -45,7 +48,7 @@ func (p *progressLog) step(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.lines = append(p.lines, progressLine{
-		Ts:   time.Now().Format("15:04:05"),
+		Ts:   time.Now().Format("2006-01-02 15:04:05"),
 		Text: fmt.Sprintf(format, args...),
 	})
 	if len(p.lines) > progressMaxLines {
@@ -80,4 +83,17 @@ func (p *progressLog) snapshot() progressSnapshot {
 		out.StartTs = p.started.Format("20060102-150405")
 	}
 	return out
+}
+
+// save persists the current snapshot as JSON so a completed round's progress
+// stays viewable from history across center restarts.
+func (p *progressLog) save(path string) error {
+	data, err := json.MarshalIndent(p.snapshot(), "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }

@@ -43,14 +43,39 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("POST /daemon/match", d.handleDaemonMatch)
 	mux.HandleFunc("POST /daemon/unmatch", d.handleDaemonUnmatch)
 	mux.HandleFunc("GET /daemon/match_status", d.handleDaemonMatchStatus)
-	mux.HandleFunc("GET /daemon/progress", d.handleDaemonProgress)
+	mux.HandleFunc("GET /straggler/progress/{id}", d.handleProgressByID)
 	return &http.Server{Addr: fmt.Sprintf(":%d", d.cfg.Port), Handler: mux}
 }
 
-// handleDaemonProgress returns the current cycle's live stage log (terminal-style
-// in the console).
-func (d *Daemon) handleDaemonProgress(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, d.progress.snapshot())
+// handleProgressByID returns one cycle's stage log: the in-memory live log for
+// the current/last cycle, or the persisted progress.json from that cycle's
+// archive dir (so history stays viewable after a restart). id "latest" =
+// current/last.
+func (d *Daemon) handleProgressByID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "latest" {
+		writeJSON(w, d.progress.snapshot())
+		return
+	}
+	n, err := strconv.Atoi(id)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if snap := d.progress.snapshot(); snap.Cycle == n {
+		writeJSON(w, snap)
+		return
+	}
+	if c := d.st.get(n); c != nil && c.DumpDir != "" {
+		if raw, rerr := os.ReadFile(filepath.Join(c.DumpDir, "progress.json")); rerr == nil {
+			var snap progressSnapshot
+			if json.Unmarshal(raw, &snap) == nil {
+				writeJSON(w, snap)
+				return
+			}
+		}
+	}
+	writeJSON(w, progressSnapshot{})
 }
 
 // handleStatus reports the daemon state, the two data dirs, and session stats.

@@ -199,6 +199,7 @@ func (d *Daemon) runCycle(id int) {
 			d.progress.step("周期 #%d 完成 (耗时 %dms, %d 个 .db)", cr.ID, cr.DurationMs, cr.DBs)
 		}
 		d.progress.finish()
+		_ = d.progress.save(filepath.Join(archive, "progress.json"))
 		d.cleanupDump(cr)
 		d.finishCycle(cr)
 	}()

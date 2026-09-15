@@ -231,7 +231,7 @@ function renderHistory(cycles) {
   $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
   for (const c of cycles) {
     const tr = document.createElement('tr');
-    tr.onclick = () => select(c.id, c.running);
+    tr.onclick = () => select(c.id, c.running, tr);
     if (c.id === selectedId) tr.className = 'selected';
     const cells = [
       c.id,
@@ -257,12 +257,13 @@ function renderDetail() {
   $('tabOpMetric').classList.remove('active');
 }
 
-async function select(id, running) {
+async function select(id, running, tr) {
   selectedId = id;
-  document.querySelectorAll('#histBody tr').forEach(tr => tr.classList.remove('selected'));
-  // find and mark
+  document.querySelectorAll('#histBody tr').forEach(x => x.classList.remove('selected'));
+  if (tr) tr.classList.add('selected');
+  refreshProgress();
   if (running) {
-    $('detail').textContent = '本轮进行中 —— 见左侧「本次采集进度」。';
+    $('detail').textContent = '（本轮进行中，暂无检测报告 / 结果 JSON / op_metric）';
     return;
   }
   await loadDetail(id, activeTab());
@@ -353,7 +354,8 @@ $('btnDegradation').onclick = async () => {
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 async function refreshProgress() {
-  try { renderProgress(await getJSON('/daemon/progress')); } catch (e) {}
+  const id = selectedId != null ? selectedId : 'latest';
+  try { renderProgress(await getJSON('/straggler/progress/' + id)); } catch (e) {}
 }
 
 function renderProgress(p) {
@@ -362,9 +364,9 @@ function renderProgress(p) {
   const lines = p.lines || [];
   pre.innerHTML = lines.length
     ? lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n')
-    : '等待周期开始…';
+    : '暂无进度记录';
   if (p.in_flight) { badge.textContent = '进行中 · 周期 #' + p.cycle; badge.className = 'ptag on'; }
-  else if (p.cycle) { badge.textContent = '空闲 · 上轮 #' + p.cycle; badge.className = 'ptag'; }
+  else if (p.cycle) { badge.textContent = '周期 #' + p.cycle; badge.className = 'ptag'; }
   else { badge.textContent = '空闲'; badge.className = 'ptag'; }
   if (stick) pre.scrollTop = pre.scrollHeight;
 }

@@ -319,6 +319,9 @@ func (c *Center) triggerBusiness(b *Business) {
 		prog.step("本轮结束（耗时 %dms）", durationMs)
 	}
 	prog.finish()
+	// Persist this round's stage log under its result dir so history can show it
+	// (the in-memory log only covers the current/last round).
+	_ = prog.save(filepath.Join(c.cfg.DataDir, b.Name, triggerAt.Format("20060102-150405"), "progress.json"))
 }
 
 // markMissingReports flags daemons that failed to report within the round's

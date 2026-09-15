@@ -355,10 +355,12 @@ func (c *Center) handleBusinessHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"cycles": c.cycleInfos(r.PathValue("name"))})
 }
 
-// handleBusinessProgress returns the current round's live stage log (terminal-
-// style in the business console).
+// handleBusinessProgress returns a round's stage log: ?ts= selects a specific
+// round (from its persisted progress.json, or the live in-memory log when it is
+// the current one); omitted = the current/last round.
 func (c *Center) handleBusinessProgress(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	ts := r.URL.Query().Get("ts")
 	c.mu.Lock()
 	b := c.biz[name]
 	var p *progressLog
@@ -370,11 +372,30 @@ func (c *Center) handleBusinessProgress(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "business not found", http.StatusNotFound)
 		return
 	}
-	if p == nil {
+
+	if ts == "" {
+		if p != nil {
+			writeJSON(w, p.snapshot())
+			return
+		}
 		writeJSON(w, progressSnapshot{})
 		return
 	}
-	writeJSON(w, p.snapshot())
+
+	if p != nil {
+		if snap := p.snapshot(); snap.InFlight && snap.StartTs == ts {
+			writeJSON(w, snap)
+			return
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(c.cfg.DataDir, name, ts, "progress.json")); err == nil {
+		var snap progressSnapshot
+		if json.Unmarshal(raw, &snap) == nil {
+			writeJSON(w, snap)
+			return
+		}
+	}
+	writeJSON(w, progressSnapshot{})
 }
 
 // handleBusinessReport serves the business's merged detection report (text/plain)

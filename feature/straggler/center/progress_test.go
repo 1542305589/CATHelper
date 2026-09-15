@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -44,5 +45,39 @@ func TestBusinessProgressEndpoint(t *testing.T) {
 	defer bad.Body.Close()
 	if bad.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown business status = %d, want 404", bad.StatusCode)
+	}
+}
+
+// A finished round's progress is persisted and readable by ?ts= (exactly what
+// the console does when a history row is clicked).
+func TestBusinessProgressByTs(t *testing.T) {
+	dir := t.TempDir()
+	c := New(Config{DataDir: dir, Port: 1})
+	b := &Business{Name: "biz", Degradation: 0.3, progress: newProgressLog()}
+	started := time.Now()
+	b.progress.begin(7, started)
+	b.progress.step("第 7 轮")
+	b.progress.finish()
+	ts := started.Format("20060102-150405")
+	if err := b.progress.save(filepath.Join(dir, "biz", ts, "progress.json")); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.biz["biz"] = b
+	c.mu.Unlock()
+
+	srv := httptest.NewServer(c.httpServer().Handler)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/center/business/biz/progress?ts=" + ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var snap progressSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Cycle != 7 || snap.InFlight || len(snap.Lines) != 1 || snap.Lines[0].Text != "第 7 轮" {
+		t.Fatalf("unexpected snapshot: %+v", snap)
 	}
 }
