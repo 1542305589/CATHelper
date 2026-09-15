@@ -360,9 +360,10 @@ func main() {
 func detectFromParsedData(inputPath string, degradation float64, debugOutput bool) (*daemon.DetectResult, error) {
 	config.FilePath = inputPath
 	config.CalThreshold = 1 + degradation
+	config.CPUThreshold = 1 + degradation*5
 	config.CommThreshold = 1 + degradation*5
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] CalThreshold: %.2f, CommThreshold: %.2f\n",
-		config.CalThreshold, config.CommThreshold)
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] CalThreshold: %.2f, CPUThreshold: %.2f, CommThreshold: %.2f\n",
+		config.CalThreshold, config.CPUThreshold, config.CommThreshold)
 
 	// 4. Get parallel topology from group_info JSON files.
 	parallels, validRanks := detector.GetCurDetectionInfo(inputPath)

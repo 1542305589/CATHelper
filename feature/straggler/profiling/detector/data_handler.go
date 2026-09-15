@@ -258,7 +258,7 @@ func getSlowHostRanksByHomogenize(npus []int, detectionData map[int]float64, loc
 	// Preprocess: group by hostUid, trimmed mean per host.
 	smoothByHostUid(ranksData, haveDataRanks, rankToHostUid)
 
-	abnormalRanks, degradations := HomogenizationComparisonFunc(haveDataRanks, ranksData, config.CalThreshold, "max")
+	abnormalRanks, degradations := HomogenizationComparisonFunc(haveDataRanks, ranksData, config.CPUThreshold, "max")
 	for i, rank := range abnormalRanks {
 		localResult.AddSingle("cpu", rank, degradations[i])
 	}

@@ -36,7 +36,7 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
 		}
 	}
 	if host, ok := stepData[zpHostDataColumn]; ok {
-		for r, ratio := range rankRatios(host, config.CalThreshold, true) {
+		for r, ratio := range rankRatios(host, config.CPUThreshold, true) {
 			set(r, "cpu", ratio)
 		}
 	}

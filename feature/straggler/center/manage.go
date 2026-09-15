@@ -330,6 +330,7 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 
 	config.FilePath = tmp
 	config.CalThreshold = 1 + b.Degradation
+	config.CPUThreshold = 1 + b.Degradation*5
 	config.CommThreshold = 1 + b.Degradation*5
 
 	parallels, validRanks := detector.GetCurDetectionInfo(tmp)
