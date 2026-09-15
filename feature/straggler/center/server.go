@@ -28,6 +28,7 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/business/{name}/daemon/unmatch", c.handleUnmatchDaemon)
 	mux.HandleFunc("POST /center/op_metric/{business}/{daemon}", c.handleOpMetric)
 	mux.HandleFunc("GET /center/business/{name}/history", c.handleBusinessHistory)
+	mux.HandleFunc("GET /center/business/{name}/progress", c.handleBusinessProgress)
 	mux.HandleFunc("GET /center/business/{name}/console", c.handleBusinessConsole)
 	mux.HandleFunc("GET /center/chart.umd.min.js", c.handleChartJS)
 	mux.HandleFunc("GET /center/business/{name}/report", c.handleBusinessReport)
@@ -155,6 +156,7 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	if b.Degradation <= 0 {
 		b.Degradation = c.cfg.Degradation
 	}
+	b.progress = newProgressLog()
 	c.biz[req.Name] = b
 	c.save()
 	view := businessStatusOfLocked(b)
@@ -351,6 +353,28 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 // newest first.
 func (c *Center) handleBusinessHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"cycles": c.cycleInfos(r.PathValue("name"))})
+}
+
+// handleBusinessProgress returns the current round's live stage log (terminal-
+// style in the business console).
+func (c *Center) handleBusinessProgress(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	c.mu.Lock()
+	b := c.biz[name]
+	var p *progressLog
+	if b != nil {
+		p = b.progress
+	}
+	c.mu.Unlock()
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	if p == nil {
+		writeJSON(w, progressSnapshot{})
+		return
+	}
+	writeJSON(w, p.snapshot())
 }
 
 // handleBusinessReport serves the business's merged detection report (text/plain)

@@ -42,7 +42,14 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("POST /daemon/match", d.handleDaemonMatch)
 	mux.HandleFunc("POST /daemon/unmatch", d.handleDaemonUnmatch)
 	mux.HandleFunc("GET /daemon/match_status", d.handleDaemonMatchStatus)
+	mux.HandleFunc("GET /daemon/progress", d.handleDaemonProgress)
 	return &http.Server{Addr: fmt.Sprintf(":%d", d.cfg.Port), Handler: mux}
+}
+
+// handleDaemonProgress returns the current cycle's live stage log (terminal-style
+// in the console).
+func (d *Daemon) handleDaemonProgress(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, d.progress.snapshot())
 }
 
 // handleStatus reports the daemon state, the two data dirs, and session stats.

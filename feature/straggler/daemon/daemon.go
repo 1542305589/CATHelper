@@ -43,6 +43,8 @@ type Daemon struct {
 	stopCh        chan struct{} // closed by POST /daemon/stop to request graceful shutdown
 	removeResults bool          // set by Stop(): delete all daemon_results/ on shutdown
 
+	progress *progressLog // live per-cycle stage log shown terminal-style in the console
+
 	// managed (center-node) matching state — in-memory only, never persisted.
 	// A daemon matches at most one center; the center re-generates the key per
 	// match, so either side restarting forces a re-match.
@@ -73,6 +75,7 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		interval:    cfg.Interval,
 		degradation: cfg.Degradation,
 		stopCh:      make(chan struct{}),
+		progress:    newProgressLog(),
 	}
 }
 
@@ -172,6 +175,8 @@ func (d *Daemon) startCycle() {
 // CycleResult (success or error) into the store.
 func (d *Daemon) runCycle(id int) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now()}
+	d.progress.begin(id)
+	d.progress.step("周期 #%d 触发采集 (dyno)", id)
 	// This cycle's analysed results (combined JSON, meta, report) are written
 	// to ./daemon_results/<start>/ — OUTSIDE the --profiler-dir root — and
 	// that archive dir is the cycle's dump_dir. The --profiler-dir root is only
@@ -188,6 +193,12 @@ func (d *Daemon) runCycle(id int) {
 		// Results are stored in daemon_results/<start>/ during the cycle; the
 		// whole --profiler-dir is removed at the end of every cycle, success or
 		// failure. dyno re-creates the root on the next trigger.
+		if cr.Error != "" {
+			d.progress.step("周期 #%d 失败: %s", cr.ID, cr.Error)
+		} else {
+			d.progress.step("周期 #%d 完成 (耗时 %dms, %d 个 .db)", cr.ID, cr.DurationMs, cr.DBs)
+		}
+		d.progress.finish()
 		d.cleanupDump(cr)
 		d.finishCycle(cr)
 	}()
@@ -197,10 +208,13 @@ func (d *Daemon) runCycle(id int) {
 		cr.Error = err.Error()
 		return
 	}
+	d.progress.step("采集已触发，等待 %s ...", d.cfg.CollectWait)
 	time.Sleep(d.cfg.CollectWait)
 	root := d.cfg.ProfilerDir
+	d.progress.step("采集完成")
 
 	// 2. Convert the raw dump to .db (torch_npu analyse) over the whole root.
+	d.progress.step("转换 .db (torch_npu analyse)")
 	if err := runAnalyse(root, d.logf); err != nil {
 		cr.Error = err.Error()
 		return
@@ -213,6 +227,7 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 	cr.DBs = len(dbFiles)
+	d.progress.step("发现 %d 个 .db 文件", len(dbFiles))
 
 	// 4. Parse (StartProcess — not DataParsing, which os.Exit's on zero files).
 	// Reset the per-path sync.Once dedup table: it is a package-level global
@@ -221,15 +236,19 @@ func (d *Daemon) runCycle(id int) {
 	// group_info_/host_info_ JSON writes no-ops → topology lost → slow
 	// comm/CPU/bubble detection silently drops. One-shot mode is unaffected.
 	dataparse.ResetFileWriteOnce()
+	d.progress.step("解析 profiler 数据")
 	if err := dataparse.StartProcess(dbFiles, root); err != nil {
 		cr.Error = fmt.Sprintf("StartProcess: %v", err)
 		return
 	}
+	d.progress.step("解析完成")
 
 	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so
 	//    whether KPI ran (and its outcome) is visible in history: "ok" means
 	//    detection executed; disabled/skipped/failed carry the reason.
+	d.progress.step("KPI 检测")
 	cr.KPI, cr.KPIStatus = d.detectKPI()
+	d.progress.step("KPI 检测完成 (%s)", cr.KPIStatus)
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
 	// degradation is runtime-adjustable via POST /daemon/degradation; snapshot it
@@ -237,6 +256,7 @@ func (d *Daemon) runCycle(id int) {
 	d.mu.Lock()
 	deg := d.degradation
 	d.mu.Unlock()
+	d.progress.step("Profiler 检测 (阈值基数 %.2f)", deg)
 	res, derr := d.detect(root, deg, d.cfg.DebugOutput)
 	if derr != nil {
 		cr.Error = fmt.Sprintf("profiler detection: %v", derr)
@@ -244,6 +264,8 @@ func (d *Daemon) runCycle(id int) {
 	}
 	cr.Result = res.NodeOutput
 	cr.Summary = res.Summary
+	d.progress.step("Profiler 检测完成: cal=%d comm=%d cpu=%d bubble=%d",
+		res.Summary["cal"], res.Summary["comm"], res.Summary["cpu"], res.Summary["npu_bubble"])
 	// Merge the KPI anomaly counts (per metric) into the cycle summary so
 	// history shows both dimensions; the kpi segment is absent when KPI
 	// detection produced no result. Summary is a flat map: the profiler
@@ -259,6 +281,7 @@ func (d *Daemon) runCycle(id int) {
 	//    root. Keeping results out of --profiler-dir is what lets the cycle's
 	//    end delete the heavy profiler folder without touching the query data
 	//    source.
+	d.progress.step("写入结果到 %s", archive)
 	if err := os.MkdirAll(archive, 0o755); err != nil {
 		cr.Error = fmt.Sprintf("mkdir archive: %v", err)
 		return
@@ -303,6 +326,7 @@ func (d *Daemon) runCycle(id int) {
 	// 10. When managed, report the aggregated op_metric JSON to the center so it
 	//     can run detection across the whole business. Best effort.
 	if d.IsManaged() {
+		d.progress.step("上报 op_metric 到中心")
 		d.reportOpMetric(cr)
 	}
 }

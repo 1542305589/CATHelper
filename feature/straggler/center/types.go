@@ -49,8 +49,9 @@ type Business struct {
 	VLLMMetrics  string    `json:"vllm_metrics,omitempty"`  // vllm /metrics endpoint URL (one per business)
 	Degradation  float64   `json:"degradation,omitempty"`   // merged-detection sensitivity (0 = inherit center default)
 
-	nextTrigger time.Time // next scheduled trigger (in-memory)
-	triggering  bool      // a trigger round is currently in flight (in-memory, single-flight)
+	nextTrigger time.Time    // next scheduled trigger (in-memory)
+	triggering  bool         // a trigger round is currently in flight (in-memory, single-flight)
+	progress    *progressLog // live per-round stage log for the console (in-memory)
 }
 
 // Config holds the center's runtime configuration (--center CLI flags).

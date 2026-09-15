@@ -219,12 +219,21 @@ func (c *Center) triggerBusiness(b *Business) {
 		return
 	}
 	b.triggering = true
+	if b.progress == nil {
+		b.progress = newProgressLog()
+	}
+	prog := b.progress
+	round := b.CyclesTotal + b.CyclesFailed + 1
 
 	var timeout time.Duration
+	healthy := 0
+	var addrs []string
 	for _, d := range b.Daemons {
 		if d.matchState != "healthy" {
 			continue
 		}
+		healthy++
+		addrs = append(addrs, d.Addr())
 		if cw := d.collectWait; cw > 0 && time.Duration(cw)*time.Second > timeout {
 			timeout = time.Duration(cw) * time.Second
 		}
@@ -233,23 +242,38 @@ func (c *Center) triggerBusiness(b *Business) {
 	c.mu.Unlock()
 	timeout += reportBufferSec * time.Second
 
+	prog.begin(round)
+	prog.step("业务 %s 第 %d 轮开始（%d 个已匹配守护进程）", b.Name, round, healthy)
+	prog.step("触发守护进程: %s", strings.Join(addrs, ", "))
+
 	for _, d := range b.Daemons {
 		if d.matchState == "healthy" {
 			go c.triggerDaemon(d)
 		}
 	}
 
+	prog.step("等待 op_metric 回传（超时 %s）", timeout)
 	deadline := time.Now().Add(timeout)
+	reported := -1
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
 		done := true
+		n := 0
 		for _, d := range b.Daemons {
-			if d.matchState == "healthy" && d.lastReportAt.Before(triggerAt) {
+			if d.matchState != "healthy" {
+				continue
+			}
+			if d.lastReportAt.Before(triggerAt) {
 				done = false
-				break
+			} else {
+				n++
 			}
 		}
 		c.mu.Unlock()
+		if n != reported {
+			reported = n
+			prog.step("已回传 op_metric: %d/%d", n, healthy)
+		}
 		if done {
 			break
 		}
@@ -260,14 +284,20 @@ func (c *Center) triggerBusiness(b *Business) {
 
 	merged := c.mergeOpMetric(b)
 	durationMs := time.Since(triggerAt).Milliseconds()
+	prog.step("合并 op_metric: %d 个 rank", len(merged))
 
 	var failed bool
 	if len(merged) == 0 {
 		c.logf("business %s: no op_metric reported", b.Name)
+		prog.step("本轮无 op_metric 上报，跳过检测")
 		failed = true
-	} else if err := c.detectAndStore(b, merged, triggerAt, durationMs); err != nil {
-		c.logf("business %s: detect failed: %v", b.Name, err)
-		failed = true
+	} else {
+		prog.step("跨节点合并检测中 ...")
+		if err := c.detectAndStore(b, merged, triggerAt, durationMs); err != nil {
+			c.logf("business %s: detect failed: %v", b.Name, err)
+			prog.step("检测失败: %v", err)
+			failed = true
+		}
 	}
 
 	c.mu.Lock()
@@ -282,6 +312,13 @@ func (c *Center) triggerBusiness(b *Business) {
 	b.triggering = false
 	c.save()
 	c.mu.Unlock()
+
+	if failed {
+		prog.step("本轮结束（失败，耗时 %dms）", durationMs)
+	} else {
+		prog.step("本轮结束（耗时 %dms）", durationMs)
+	}
+	prog.finish()
 }
 
 // markMissingReports flags daemons that failed to report within the round's
@@ -357,6 +394,10 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 		"comm":       len(result["comm"]),
 		"cpu":        len(result["cpu"]),
 		"npu_bubble": len(result["npu_bubble"]),
+	}
+	if b.progress != nil {
+		b.progress.step("检测完成: 慢计算 %d / 慢通信 %d / 慢CPU %d / Bubble %d",
+			summary["cal"], summary["comm"], summary["cpu"], summary["npu_bubble"])
 	}
 
 	dir := startedAt.Format("20060102-150405")

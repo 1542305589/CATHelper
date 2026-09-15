@@ -53,6 +53,10 @@
   pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:65vh; overflow:auto; background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:20px; text-align:center; }
+  pre.term { height:220px; max-height:220px; background:#0b1220; }
+  pre.term .ts { color:#64748b; }
+  .ptag { margin-left:8px; font-size:11px; font-weight:400; color:var(--muted); }
+  .ptag.on { color:var(--green); }
   .toast { position:fixed; bottom:20px; right:20px; background:#111827; color:#fff; padding:10px 16px; border-radius:8px; font-size:13px; opacity:0; transform:translateY(8px); transition:all .2s; z-index:100; }
   .toast.show { opacity:1; transform:none; }
   .toast.ok { background:var(--green); }
@@ -150,6 +154,11 @@
         </table>
       </div>
       <div id="histEmpty" class="empty">加载中…</div>
+    </div>
+
+    <div class="card">
+      <h2>本次采集进度 <span id="progressBadge" class="ptag">空闲</span></h2>
+      <pre id="progress" class="term">等待检测开始…</pre>
     </div>
 
     <div class="card">
@@ -463,10 +472,31 @@ $('btnDegradation').onclick = async () => {
   };
 });
 
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function refreshProgress() {
+  try { renderProgress(await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/progress')); } catch (e) {}
+}
+
+function renderProgress(p) {
+  const pre = $('progress'), badge = $('progressBadge');
+  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  const lines = p.lines || [];
+  pre.innerHTML = lines.length
+    ? lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n')
+    : '等待检测开始…';
+  if (p.in_flight) { badge.textContent = '进行中 · 第 ' + p.cycle + ' 轮'; badge.className = 'ptag on'; }
+  else if (p.cycle) { badge.textContent = '空闲 · 上轮第 ' + p.cycle + ' 轮'; badge.className = 'ptag'; }
+  else { badge.textContent = '空闲'; badge.className = 'ptag'; }
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+
 refresh();
 setInterval(refresh, 5000);
 loadMetrics();
 setInterval(loadMetrics, 20000);
+refreshProgress();
+setInterval(refreshProgress, 1000);
 </script>
 </body>
 </html>

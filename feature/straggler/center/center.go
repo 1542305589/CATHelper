@@ -96,6 +96,7 @@ func (c *Center) load() {
 			if b.Degradation <= 0 {
 				b.Degradation = c.cfg.Degradation
 			}
+			b.progress = newProgressLog()
 			c.biz[b.Name] = b
 		}
 	}
