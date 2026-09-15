@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,16 +30,28 @@ type Daemon struct {
 	logf   func(format string, args ...any)
 
 	mu            sync.Mutex
-	state         string        // "running" | "paused"
+	state         string        // "running" | "paused" | "managed"
 	interval      time.Duration // current cycle period (POST /daemon/interval updates it)
+	degradation   float64       // current sensitivity (CLI initial, POST /daemon/degradation updates it)
 	nextRun       time.Time     // when the next cycle starts (zero when paused)
 	cycleID       int           // per-process id, starting from 1
 	cycleInFlight bool
 	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
-	dynolog       *exec.Cmd     // dynolog child to kill on shutdown (nil = reusing existing)
+	dynolog       *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
+	dynologPort   int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
 	stopOnce      sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
 	stopCh        chan struct{} // closed by POST /daemon/stop to request graceful shutdown
 	removeResults bool          // set by Stop(): delete all daemon_results/ on shutdown
+
+	progress *progressLog // live per-cycle stage log shown terminal-style in the console
+
+	// managed (center-node) matching state — in-memory only, never persisted.
+	// A daemon matches at most one center; the center re-generates the key per
+	// match, so either side restarting forces a re-match.
+	centerAddr string // matched center's base URL, e.g. "http://ip:port"
+	matchKey   string // per-daemon secret, required on every controlled call
+	business   string // business name this daemon reports under
+	daemonID   string // daemon identifier within the business
 }
 
 // New creates a Daemon. detect is the shared profiler pipeline
@@ -56,9 +71,11 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		detect:   detect,
 		st:       newStore(),
 		logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
-		state:    "running",
-		interval: cfg.Interval,
-		stopCh:   make(chan struct{}),
+		state:       "running",
+		interval:    cfg.Interval,
+		degradation: cfg.Degradation,
+		stopCh:      make(chan struct{}),
+		progress:    newProgressLog(),
 	}
 }
 
@@ -80,9 +97,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 	d.logf("HTTP server listening on :%d", d.cfg.Port)
 
-	if d.cfg.DynologBin != "" {
-		d.dynolog = startDynolog(d.cfg.DynologBin, d.logf)
-	}
+	d.ensureDynolog()
 	if d.cfg.KpiDir == "" {
 		d.logf("KPI detection disabled (no --kpi-dir): cycles run profiler-only")
 	} else {
@@ -160,6 +175,8 @@ func (d *Daemon) startCycle() {
 // CycleResult (success or error) into the store.
 func (d *Daemon) runCycle(id int) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now()}
+	d.progress.begin(id)
+	d.progress.step("触发采集 (dyno)")
 	// This cycle's analysed results (combined JSON, meta, report) are written
 	// to ./daemon_results/<start>/ — OUTSIDE the --profiler-dir root — and
 	// that archive dir is the cycle's dump_dir. The --profiler-dir root is only
@@ -176,6 +193,13 @@ func (d *Daemon) runCycle(id int) {
 		// Results are stored in daemon_results/<start>/ during the cycle; the
 		// whole --profiler-dir is removed at the end of every cycle, success or
 		// failure. dyno re-creates the root on the next trigger.
+		if cr.Error != "" {
+			d.progress.step("失败: %s", cr.Error)
+		} else {
+			d.progress.step("完成 (耗时 %dms, %d 个 .db)", cr.DurationMs, cr.DBs)
+		}
+		d.progress.finish()
+		_ = d.progress.save(filepath.Join(archive, "progress.json"))
 		d.cleanupDump(cr)
 		d.finishCycle(cr)
 	}()
@@ -185,10 +209,13 @@ func (d *Daemon) runCycle(id int) {
 		cr.Error = err.Error()
 		return
 	}
+	d.progress.step("采集已触发，等待 %s ...", d.cfg.CollectWait)
 	time.Sleep(d.cfg.CollectWait)
 	root := d.cfg.ProfilerDir
+	d.progress.step("采集完成")
 
 	// 2. Convert the raw dump to .db (torch_npu analyse) over the whole root.
+	d.progress.step("转换 .db (torch_npu analyse)")
 	if err := runAnalyse(root, d.logf); err != nil {
 		cr.Error = err.Error()
 		return
@@ -201,6 +228,7 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 	cr.DBs = len(dbFiles)
+	d.progress.step("发现 %d 个 .db 文件", len(dbFiles))
 
 	// 4. Parse (StartProcess — not DataParsing, which os.Exit's on zero files).
 	// Reset the per-path sync.Once dedup table: it is a package-level global
@@ -209,24 +237,36 @@ func (d *Daemon) runCycle(id int) {
 	// group_info_/host_info_ JSON writes no-ops → topology lost → slow
 	// comm/CPU/bubble detection silently drops. One-shot mode is unaffected.
 	dataparse.ResetFileWriteOnce()
+	d.progress.step("解析 profiler 数据")
 	if err := dataparse.StartProcess(dbFiles, root); err != nil {
 		cr.Error = fmt.Sprintf("StartProcess: %v", err)
 		return
 	}
+	d.progress.step("解析完成")
 
 	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so
 	//    whether KPI ran (and its outcome) is visible in history: "ok" means
 	//    detection executed; disabled/skipped/failed carry the reason.
+	d.progress.step("KPI 检测")
 	cr.KPI, cr.KPIStatus = d.detectKPI()
+	d.progress.step("KPI 检测完成 (%s)", cr.KPIStatus)
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
-	res, derr := d.detect(root, d.cfg.Degradation, d.cfg.DebugOutput)
+	// degradation is runtime-adjustable via POST /daemon/degradation; snapshot it
+	// under the lock so a concurrent update cannot race the cycle.
+	d.mu.Lock()
+	deg := d.degradation
+	d.mu.Unlock()
+	d.progress.step("Profiler 检测 (阈值基数 %.2f)", deg)
+	res, derr := d.detect(root, deg, d.cfg.DebugOutput)
 	if derr != nil {
 		cr.Error = fmt.Sprintf("profiler detection: %v", derr)
 		return
 	}
 	cr.Result = res.NodeOutput
 	cr.Summary = res.Summary
+	d.progress.step("Profiler 检测完成: cal=%d comm=%d cpu=%d bubble=%d",
+		res.Summary["cal"], res.Summary["comm"], res.Summary["cpu"], res.Summary["npu_bubble"])
 	// Merge the KPI anomaly counts (per metric) into the cycle summary so
 	// history shows both dimensions; the kpi segment is absent when KPI
 	// detection produced no result. Summary is a flat map: the profiler
@@ -242,6 +282,7 @@ func (d *Daemon) runCycle(id int) {
 	//    root. Keeping results out of --profiler-dir is what lets the cycle's
 	//    end delete the heavy profiler folder without touching the query data
 	//    source.
+	d.progress.step("写入结果到 %s", archive)
 	if err := os.MkdirAll(archive, 0o755); err != nil {
 		cr.Error = fmt.Sprintf("mkdir archive: %v", err)
 		return
@@ -281,6 +322,13 @@ func (d *Daemon) runCycle(id int) {
 		if err := copyDir(srcOpMetric, archive); err != nil {
 			d.logf("cycle %d copy op_metric: %v", cr.ID, err)
 		}
+	}
+
+	// 10. When managed, report the aggregated op_metric JSON to the center so it
+	//     can run detection across the whole business. Best effort.
+	if d.IsManaged() {
+		d.progress.step("上报 op_metric 到中心")
+		d.reportOpMetric(cr)
 	}
 }
 
@@ -383,8 +431,8 @@ func (d *Daemon) finishCycle(cr *CycleResult) {
 	d.logf("cycle %d finished: dbs=%d error=%q", cr.ID, cr.DBs, cr.Error)
 }
 
-// shutdown stops the HTTP server, waits for an in-flight cycle (max 10 min),
-// and kills the dynolog child we spawned.
+// shutdown stops the HTTP server and waits for an in-flight cycle (max 10 min).
+// The dynolog child is left running so collection can continue after exit.
 func (d *Daemon) shutdown(srv *http.Server) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -405,10 +453,8 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	if d.dynolog != nil {
-		_ = d.dynolog.Process.Kill()
-		_, _ = d.dynolog.Process.Wait()
-	}
+	// The dynolog child is intentionally NOT killed here — it keeps running so
+	// the user can still collect profiler data after the daemon exits.
 	if d.removeResults {
 		if err := os.RemoveAll("daemon_results"); err != nil {
 			d.logf("remove daemon_results: %v", err)
@@ -449,6 +495,25 @@ func (d *Daemon) Start() {
 	}
 }
 
+// Degradation returns the current sensitivity (CalThreshold = 1 + degradation).
+func (d *Daemon) Degradation() float64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.degradation
+}
+
+// SetDegradation updates the sensitivity for subsequent cycles, validating
+// [0, 1). It does not touch already-completed results.
+func (d *Daemon) SetDegradation(v float64) error {
+	if v < 0 || v >= 1 {
+		return fmt.Errorf("degradation out of range [0, 1)")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.degradation = v
+	return nil
+}
+
 // SetInterval updates the cycle period, validating [60, 86400] seconds. The
 // running timer is re-armed so the new period takes effect immediately.
 func (d *Daemon) SetInterval(sec int64) error {
@@ -466,27 +531,30 @@ func (d *Daemon) SetInterval(sec int64) error {
 }
 
 // Trigger runs one cycle immediately; returns an error when paused or when a
-// cycle is already in flight (HTTP 409). The timer is re-anchored so the next
-// automatic cycle is exactly one interval after the manual one.
+// cycle is already in flight (HTTP 409). In "running" the timer is re-anchored
+// so the next automatic cycle is one interval after this manual one; in
+// "managed" the timer stays stopped (the center schedules the cycles).
 func (d *Daemon) Trigger() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.state != "running" {
+	if d.state == "paused" {
 		return fmt.Errorf("daemon is paused")
 	}
 	if d.cycleInFlight {
 		return fmt.Errorf("a cycle is already running")
 	}
 	d.startCycle()
-	d.resetTimer()
+	if d.state == "running" {
+		d.resetTimer()
+	}
 	return nil
 }
 
 // Stop requests a graceful shutdown of the daemon: Run's select observes the
-// closed stopCh and runs shutdown (HTTP server close, in-flight cycle wait,
-// dynolog child kill). Idempotent — repeated calls are no-ops. All archived
-// result files under daemon_results/ (each cycle's dump_dir) are removed as
-// part of the shutdown.
+// closed stopCh and runs shutdown (HTTP server close, in-flight cycle wait).
+// The dynolog child is left running. Idempotent — repeated calls are no-ops.
+// All archived result files under daemon_results/ (each cycle's dump_dir) are
+// removed as part of the shutdown.
 func (d *Daemon) Stop() {
 	d.stopOnce.Do(func() {
 		d.mu.Lock()
@@ -494,6 +562,161 @@ func (d *Daemon) Stop() {
 		d.mu.Unlock()
 		close(d.stopCh)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Managed (center-node) matching — in-memory only, key per match
+// ---------------------------------------------------------------------------
+
+// Match establishes a managed relationship with a center. The daemon stops
+// self-scheduling (state=managed), records the center/key/business/daemon and
+// starts the reverse heartbeat. Returns an error if already managed.
+func (d *Daemon) Match(centerAddr, key, business, daemonID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.state == "managed" {
+		return fmt.Errorf("already managed by a center")
+	}
+	d.centerAddr = centerAddr
+	d.matchKey = key
+	d.business = business
+	d.daemonID = daemonID
+	d.state = "managed"
+	d.nextRun = time.Time{}
+	d.stopTimer()
+	go d.heartbeatLoop()
+	d.logf("matched by center %s (business=%s daemon=%s)", centerAddr, business, daemonID)
+	return nil
+}
+
+// Unmatch ends the managed relationship and returns to running (self-scheduling
+// resumes). Idempotent when not managed.
+func (d *Daemon) Unmatch() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.state != "managed" {
+		return
+	}
+	d.centerAddr = ""
+	d.matchKey = ""
+	d.business = ""
+	d.daemonID = ""
+	d.state = "running"
+	d.nextRun = time.Now().Add(d.interval)
+	d.resetTimer()
+	d.logf("unmatched, back to running")
+}
+
+// IsManaged reports whether the daemon is currently managed by a center.
+func (d *Daemon) IsManaged() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.state == "managed"
+}
+
+// KeyMatches reports whether key equals the current (non-empty) match key.
+func (d *Daemon) KeyMatches(key string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.state == "managed" && key != "" && d.matchKey == key
+}
+
+// matchState returns the daemon's state plus match info for /daemon/match_status.
+func (d *Daemon) matchState() (state, center string, matched bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.state, d.centerAddr, d.state == "managed" && d.matchKey != ""
+}
+
+// heartbeatLoop polls the center's /center/healthz while managed; 3 consecutive
+// failures (center down) unmatch the daemon back to running.
+func (d *Daemon) heartbeatLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	fails := 0
+	for range ticker.C {
+		d.mu.Lock()
+		if d.state != "managed" {
+			d.mu.Unlock()
+			return
+		}
+		center := d.centerAddr
+		d.mu.Unlock()
+
+		if centerAlive(center) {
+			fails = 0
+			continue
+		}
+		fails++
+		if fails >= 3 {
+			d.logf("center %s heartbeat lost — unmatching", center)
+			d.Unmatch()
+			return
+		}
+	}
+}
+
+// reportOpMetric posts the cycle's aggregated op_metric JSON (rank → artifacts)
+// to the matched center. Best-effort: failures are logged, never fatal.
+func (d *Daemon) reportOpMetric(cr *CycleResult) {
+	d.mu.Lock()
+	if d.state != "managed" || d.centerAddr == "" {
+		d.mu.Unlock()
+		return
+	}
+	center := d.centerAddr
+	key := d.matchKey
+	business := d.business
+	daemonID := d.daemonID
+	d.mu.Unlock()
+
+	view, err := buildOpMetricView(cr)
+	if err != nil {
+		d.logf("cycle %d op_metric view: %v", cr.ID, err)
+		return
+	}
+	// Report only the rank→artifacts map (the center parses it as detector.OpMetric),
+	// not the {cycle,dir,ranks} envelope.
+	payload, err := json.Marshal(view.Ranks)
+	if err != nil {
+		d.logf("cycle %d marshal op_metric: %v", cr.ID, err)
+		return
+	}
+	url := strings.TrimRight(center, "/") + "/center/op_metric/" + url.PathEscape(business) + "/" + url.PathEscape(daemonID)
+	d.logf("cycle %d report op_metric: ranks=%d bytes=%d url=%s", cr.ID, len(view.Ranks), len(payload), url)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		d.logf("cycle %d build report request: %v", cr.ID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Match-Key", key)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		d.logf("cycle %d report op_metric: %v", cr.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		d.logf("cycle %d report op_metric: center returned %d: %s", cr.ID, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+}
+
+// centerAlive checks a center's /center/healthz endpoint.
+func centerAlive(center string) bool {
+	if center == "" {
+		return false
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(strings.TrimRight(center, "/") + "/center/healthz")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
+	return resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "ok"
 }
 
 // stopTimer stops the cycle timer, draining any stale fire so a later Reset

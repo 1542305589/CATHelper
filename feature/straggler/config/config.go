@@ -11,7 +11,8 @@ import (
 // Global configuration variables – set once from CLI before detection runs.
 var (
 	FilePath       string  // Data directory containing ascend_pytorch_profiler_*.db files.
-	CalThreshold   float64 // Threshold for compute / CPU detection (= 1 + degradation).
+	CalThreshold   float64 // Threshold for compute detection (= 1 + degradation).
+	CPUThreshold   float64 // Threshold for CPU detection (= 1 + degradation * 5).
 	CommThreshold  float64 // Threshold for communication detection (= 1 + degradation * 5).
 )
 

@@ -17,9 +17,11 @@
 //     ratio threshold (max direction) or falls below its reciprocal (min
 //     direction, e.g. < 0.5 with the default threshold 2.0).
 //  7. No anomalous cluster → exit.
-//  8. Recurse into anomalous clusters (depth ≤ 10); a deeper anomaly replaces
-//     the parent cluster, deeper silence keeps the parent.
-//  9. Return the deepest anomalous clusters.
+//  8. Recurse into each anomalous cluster (depth ≤ maxDepth) to reduce false
+//     positives: a deeper anomaly replaces the parent cluster, deeper silence
+//     keeps the parent's members.
+//  9. Every flagged point's ratio = its own value / the FIRST level's baseline
+//     mean (the whole-fleet baseline), so all anomalies share one reference.
 package clustering
 
 import (
@@ -41,19 +43,33 @@ const kmeansSeed int64 = 42
 // Result is one detected anomalous data point.
 type Result struct {
 	Index int     // index into the original input values
-	Ratio float64 // cluster mean / baseline mean, unified for both directions (max side: > 1, worse when larger; min side: < 1, worse when smaller)
+	Ratio float64 // value / first-level baseline mean, unified for both directions (max side: > 1, worse when larger; min side: < 1, worse when smaller)
 }
 
-// Detect finds anomalous points in values using recursive kmeans ratio
-// detection. highIsAnomaly selects the direction: true means larger is worse
-// (baseline = min-mean cluster), false means smaller is worse (baseline =
-// max-mean cluster). Values ≤ 0 are ignored.
+// Detect finds anomalous points in values via recursive kmeans ratio detection.
+// highIsAnomaly selects the direction: true means larger is worse (baseline =
+// min-mean cluster), false means smaller is worse (baseline = max-mean cluster).
+// Values ≤ 0 are ignored. Every flagged point's Ratio = its own value / the
+// FIRST level's baseline mean (computed over all values), giving all anomalies
+// one common reference.
 func Detect(values []float64, ratioThreshold float64, highIsAnomaly bool) []Result {
 	idx, vals := filterPositive(values)
 	if len(vals) < 2 {
 		return nil
 	}
-	return detectRec(vals, idx, ratioThreshold, highIsAnomaly, 0)
+
+	// First-level clustering over the whole fleet: its baseline-cluster mean is
+	// the common denominator for every flagged point's ratio.
+	z := zscore(vals)
+	k := elbowK(z)
+	clusters := kmeans(z, k)
+	baseIdx := pickBaselineCluster(clusters, vals, highIsAnomaly)
+	firstBase := clusterMean(clusters[baseIdx], vals)
+	if firstBase <= 0 {
+		firstBase = math.SmallestNonzeroFloat64
+	}
+
+	return detectRec(vals, idx, ratioThreshold, highIsAnomaly, firstBase, 0)
 }
 
 // DiagnoseEntry is one data point's diagnostic at a single kmeans level.
@@ -134,10 +150,12 @@ func filterPositive(values []float64) (idx []int, vals []float64) {
 	return idx, vals
 }
 
-// detectRec runs one kmeans level and recurses into anomaly clusters.
+// detectRec runs one kmeans level and recurses into the anomalous clusters (to
+// reduce false positives). firstBase is the FIRST level's baseline-cluster mean
+// (computed over all values), the common denominator for every flag's ratio.
 // indices[i] is the original index of vals[i]; cluster means are computed on
-// the ORIGINAL values (not the standardized ones).
-func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly bool, depth int) []Result {
+// the ORIGINAL values.
+func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly bool, firstBase float64, depth int) []Result {
 	if len(vals) < 2 || depth > maxDepth {
 		return nil
 	}
@@ -151,12 +169,9 @@ func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly b
 		baseMean = math.SmallestNonzeroFloat64
 	}
 
-	// Step 6-7: baseline = direction extreme cluster. Score = cluster mean /
-	// baseline mean (unified for both directions); max direction flags scores
-	// ABOVE the threshold, min direction flags scores BELOW its reciprocal
-	// (e.g. < 0.5 with the default threshold 2.0).
+	// Identify the anomalous clusters (score = cluster mean / this level's
+	// baseline mean).
 	var anomalyClusters [][]int
-	var anomalyMeans []float64
 	for i, cl := range clusters {
 		if i == baseIdx {
 			continue
@@ -170,31 +185,29 @@ func detectRec(vals []float64, indices []int, threshold float64, highIsAnomaly b
 		}
 		if anomalous {
 			anomalyClusters = append(anomalyClusters, cl)
-			anomalyMeans = append(anomalyMeans, m)
 		}
 	}
 	if len(anomalyClusters) == 0 {
 		return nil
 	}
 
-	// Step 8-9: recurse into each anomaly cluster; deeper anomalies replace the
-	// parent, deeper silence keeps the parent cluster's members.
+	// Recurse into each anomaly cluster: deeper anomalies replace the parent,
+	// deeper silence keeps the parent's members at their value / firstBase ratio.
 	var results []Result
-	for i, cl := range anomalyClusters {
+	for _, cl := range anomalyClusters {
 		subVals := make([]float64, len(cl))
 		subIdx := make([]int, len(cl))
 		for j, li := range cl {
 			subVals[j] = vals[li]
 			subIdx[j] = indices[li]
 		}
-		deeper := detectRec(subVals, subIdx, threshold, highIsAnomaly, depth+1)
+		deeper := detectRec(subVals, subIdx, threshold, highIsAnomaly, firstBase, depth+1)
 		if len(deeper) > 0 {
 			results = append(results, deeper...)
 			continue
 		}
-		ratio := anomalyMeans[i] / baseMean
 		for _, li := range cl {
-			results = append(results, Result{Index: indices[li], Ratio: ratio})
+			results = append(results, Result{Index: indices[li], Ratio: vals[li] / firstBase})
 		}
 	}
 	return results

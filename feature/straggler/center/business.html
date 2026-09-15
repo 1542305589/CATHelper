@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>业务控制台</title>
+<script src="/center/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --border:#e2e4e8; --text:#1f2328; --muted:#6b7280; --primary:#2563eb;
+    --green:#16a34a; --amber:#d97706; --red:#dc2626; --mono:"SFMono-Regular",Consolas,Menlo,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--card); border-bottom:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:12px; position:sticky; top:0; z-index:10; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .back { color:var(--primary); text-decoration:none; font-size:14px; }
+  .refresh { margin-left:auto; color:var(--muted); font-size:12px; }
+  .wrap { display:grid; grid-template-columns:360px 1fr; gap:16px; padding:16px 20px; max-width:1500px; margin:0 auto; }
+  @media (max-width:900px) { .wrap { grid-template-columns:1fr; } }
+  .col { display:flex; flex-direction:column; gap:16px; min-width:0; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; }
+  .card h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
+  .card .body { padding:12px 14px; }
+  .kv { display:grid; grid-template-columns:110px 1fr; row-gap:6px; font-size:13px; }
+  .kv dt { color:var(--muted); }
+  .kv dd { margin:0; word-break:break-all; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; }
+  button { border:1px solid var(--border); background:var(--card); color:var(--text); padding:7px 14px; border-radius:8px; font-size:13px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--primary); color:var(--primary); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  input { border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:13px; width:96px; }
+  .interval-form { display:flex; align-items:center; gap:8px; font-size:13px; margin-top:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:#eef2ff; }
+  tbody tr.selected { background:#dbeafe; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; color:#fff; }
+  .badge.healthy { background:var(--green); }
+  .badge.unmatched { background:var(--amber); }
+  .badge.other { background:#9333ea; }
+  .badge.report_failed { background:#eab308; }
+  .badge.disconnected { background:var(--red); }
+  .daemon-link { color:var(--primary); text-decoration:none; }
+  .daemon-link:hover { text-decoration:underline; }
+  .sum { display:inline-block; margin:1px 4px 1px 0; padding:1px 7px; border-radius:4px; background:#eef2ff; color:#3730a3; font-size:11px; }
+  .sum.bad { background:#fee2e2; color:#991b1b; }
+  .tabs { display:flex; gap:2px; padding:0 14px; border-bottom:1px solid var(--border); }
+  .tabs button { border:none; border-radius:0; background:none; padding:9px 14px; border-bottom:2px solid transparent; font-size:13px; color:var(--muted); }
+  .tabs button.active { color:var(--primary); border-bottom-color:var(--primary); font-weight:600; }
+  .tab-body { padding:14px; }
+  pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:65vh; overflow:auto; background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .empty { color:var(--muted); font-size:13px; padding:20px; text-align:center; }
+  #detail .ts { color:#94a3b8; }
+  #detail .phead { color:#e2e8f0; }
+  .ptag { margin-left:8px; font-size:11px; font-weight:400; color:var(--muted); }
+  .ptag.on { color:var(--green); }
+  .toast { position:fixed; bottom:20px; right:20px; background:#111827; color:#fff; padding:10px 16px; border-radius:8px; font-size:13px; opacity:0; transform:translateY(8px); transition:all .2s; z-index:100; }
+  .toast.show { opacity:1; transform:none; }
+  .toast.ok { background:var(--green); }
+  .toast.fail { background:var(--red); }
+  .charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .chart-title { font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .chart-box { position:relative; height:200px; }
+  .chart-box canvas { width:100% !important; height:100% !important; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--muted); }
+  .legend .item { display:inline-flex; align-items:center; gap:5px; cursor:pointer; user-select:none; padding:2px 6px; border-radius:6px; }
+  .legend .item:hover { background:#eef2ff; }
+  .legend .item.off { opacity:.45; }
+  .legend .swatch { width:10px; height:10px; border-radius:2px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="/">← 返回业务列表</a>
+  <h1 id="title">业务控制台</h1>
+  <span class="refresh">每 5s 自动刷新</span>
+</header>
+
+<div class="wrap">
+  <div class="card" style="grid-column:1/-1">
+    <h2>延迟指标 <span id="metricsInfo" class="muted"></span></h2>
+    <div class="body">
+      <div class="charts">
+        <div>
+          <div class="chart-title">TPOT（每输出 token 平均延迟）</div>
+          <div class="chart-box"><canvas id="tpotChart"></canvas></div>
+        </div>
+        <div>
+          <div class="chart-title">TTFT（首 token 平均延迟）</div>
+          <div class="chart-box"><canvas id="ttftChart"></canvas></div>
+        </div>
+      </div>
+      <div id="metricsLegend" class="legend"></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="body">
+        <dl class="kv">
+          <dt>检测周期</dt><dd id="vInterval">—</dd>
+          <dt>阈值基数</dt><dd id="vDegradation">—</dd>
+          <dt>已运行周期</dt><dd id="vTotal">—</dd>
+          <dt>失败周期</dt><dd id="vFailed">—</dd>
+          <dt>下次运行</dt><dd id="vNext">—</dd>
+          <dt>等待完成采集时间</dt><dd id="vCollectWait">—</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>控制</h2>
+      <div class="body">
+        <div class="controls">
+          <button class="primary" id="btnTrigger">立即触发</button>
+          <button id="btnPause">暂停</button>
+          <button id="btnStart">启动</button>
+        </div>
+        <div class="interval-form">
+          周期(秒):
+          <input id="intervalInput" type="number" min="60">
+          <button id="btnInterval">设置</button>
+        </div>
+        <div class="interval-form">
+          阈值基数:
+          <input id="degradationInput" type="number" step="0.05" min="0" max="0.99">
+          <button id="btnDegradation">设置</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>节点列表</h2>
+      <div class="body">
+        <table>
+          <thead><tr><th>节点</th><th>状态</th><th>等待完成采集时间</th></tr></thead>
+          <tbody id="daemonBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h2>检测历史 <span id="histCount" class="muted"></span></h2>
+      <div style="overflow:auto; max-height:36vh;">
+        <table>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>world_size</th><th>异常摘要</th></tr></thead>
+          <tbody id="histBody"></tbody>
+        </table>
+      </div>
+      <div id="histEmpty" class="empty">加载中…</div>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button id="tabProgress" class="active">检测进度</button>
+        <button id="tabReport">检测报告</button>
+        <button id="tabResult">检测结果（JSON格式）</button>
+        <button id="tabOpMetric">算法输入数据</button>
+      </div>
+      <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const parts = location.pathname.split('/');
+const BIZ = decodeURIComponent(parts[3] || '');
+let selectedTs = null;
+let selectedRunning = false;
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function stateLabel(s) {
+  return {healthy:'已匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
+}
+function timeFmt(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d)) return s;
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function msFmt(ms) {
+  if (ms == null || ms <= 0) return '—';
+  return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+}
+function fmtTs(ts) {
+  if (!ts) return '—';
+  const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return ts;
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+function renderSummary(summary) {
+  if (!summary || !Object.keys(summary).length) return '正常';
+  const order = ['cal','comm','cpu','npu_bubble'];
+  const parts = [];
+  for (const k of order) {
+    if (summary[k] != null && summary[k] > 0) parts.push(`<span class="sum bad">${k}:${summary[k]}</span>`);
+  }
+  for (const [k,v] of Object.entries(summary)) {
+    if (order.includes(k)) continue;
+    if (v > 0) parts.push(`<span class="sum">${k}:${v}</span>`);
+  }
+  return parts.length ? parts.join('') : '正常';
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+async function post(url, body) {
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+  const txt = await r.text().catch(()=> '');
+  let d = {}; try { d = txt ? JSON.parse(txt) : {}; } catch(e){}
+  if (!r.ok) throw new Error(r.status + (txt ? ' ' + txt : ''));
+  return d;
+}
+
+function toast(msg, ok) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'ok' : 'fail');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.className = 'toast', 2500);
+}
+
+function renderStatus(b) {
+  $('title').textContent = '业务控制台 · ' + b.name;
+  $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
+  $('vDegradation').textContent = b.degradation != null ? b.degradation : '—';
+  if (!$('degradationInput').value) $('degradationInput').value = b.degradation != null ? b.degradation : 0.3;
+  $('vTotal').textContent = b.cycles_total != null ? b.cycles_total : '—';
+  $('vFailed').textContent = b.cycles_failed != null ? b.cycles_failed : '—';
+  $('vNext').textContent = timeFmt(b.next_trigger);
+  $('vCollectWait').textContent = b.collect_wait ? b.collect_wait + ' s' : '—';
+  if (!$('intervalInput').value) $('intervalInput').value = b.interval_sec || 600;
+  $('btnPause').disabled = b.paused;
+  $('btnStart').disabled = !b.paused;
+  $('btnTrigger').disabled = b.paused;
+}
+
+function renderDaemons(b) {
+  const tb = $('daemonBody');
+  tb.innerHTML = '';
+  for (const d of b.daemons || []) {
+    tb.innerHTML += `<tr>
+      <td><a class="daemon-link" href="http://${d.ip}:${d.port}/" target="_blank">${d.ip}:${d.port}</a></td>
+      <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
+      <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
+    </tr>`;
+  }
+}
+
+function renderHistory(cycles) {
+  const tb = $('histBody');
+  tb.innerHTML = '';
+  $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
+  $('histEmpty').style.display = cycles.length ? 'none' : 'block';
+  $('histEmpty').textContent = cycles.length ? '' : '暂无检测记录';
+  cycles.forEach((c, i) => {
+    const tr = document.createElement('tr');
+    tr.onclick = () => select(c.ts, tr, c.running);
+    if (c.ts === selectedTs) tr.className = 'selected';
+    const cells = [
+      i + 1,
+      timeFmt(c.started_at) || fmtTs(c.ts),
+      c.running ? '进行中…' : msFmt(c.duration_ms),
+      c.world_size != null ? c.world_size : '—',
+      c.running ? '<span class="ptag on">运行中</span>' : renderSummary(c.summary),
+    ];
+    cells.forEach((h, j) => {
+      const td = document.createElement('td');
+      if (j === 4) td.innerHTML = h; else td.textContent = h;
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+
+function select(ts, tr, running) {
+  selectedTs = ts;
+  selectedRunning = !!running;
+  document.querySelectorAll('#histBody tr').forEach(x => x.classList.remove('selected'));
+  if (tr) tr.classList.add('selected');
+  loadCurrent();
+}
+
+function activeTab() {
+  if ($('tabReport').classList.contains('active')) return 'report';
+  if ($('tabResult').classList.contains('active')) return 'result';
+  if ($('tabOpMetric').classList.contains('active')) return 'op_metric';
+  return 'progress';
+}
+
+// Load the content for the active tab at the selected cycle (?ts).
+function loadCurrent() {
+  const tab = activeTab();
+  if (tab === 'progress') { loadProgressDetail(selectedTs); return; }
+  if (selectedRunning) {
+    $('detail').textContent = '（本轮进行中，暂无检测报告 / 检测结果 / 算法输入数据）';
+    return;
+  }
+  loadDetail(selectedTs, tab);
+}
+
+async function loadProgressDetail(ts) {
+  const q = ts ? ('?ts=' + encodeURIComponent(ts)) : '';
+  try {
+    renderProgress(await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/progress' + q));
+  } catch(e) { $('detail').textContent = '加载失败：' + e.message; }
+}
+
+function renderProgress(p) {
+  const pre = $('detail');
+  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  const lines = p.lines || [];
+  if (!lines.length) { pre.textContent = '暂无进度记录'; return; }
+  const head = p.in_flight ? '<span class="phead">进行中</span>\n' : '';
+  pre.innerHTML = head + lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n');
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+
+async function loadDetail(ts, tab) {
+  const base = '/center/business/' + encodeURIComponent(BIZ) + '/' + tab + '?ts=' + encodeURIComponent(ts || '');
+  try {
+    const r = await fetch(base);
+    if (!r.ok) { $('detail').textContent = '（暂无结果）'; return; }
+    const ct = r.headers.get('Content-Type') || '';
+    $('detail').textContent = ct.includes('json') ? JSON.stringify(await r.json(), null, 2) : await r.text();
+  } catch(e) { $('detail').textContent = '加载失败：' + e.message; }
+}
+
+async function refresh() {
+  try {
+    const list = await getJSON('/center/businesses');
+    const b = (list.businesses || []).find(x => x.name === BIZ);
+    if (!b) { $('title').textContent = '业务不存在'; return; }
+    renderStatus(b);
+    renderDaemons(b);
+  } catch(e) {}
+  try {
+    const h = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/history');
+    renderHistory(h.cycles || []);
+  } catch(e) {}
+}
+
+const METRIC_COLORS = ['#2563eb','#dc2626','#16a34a','#d97706','#9333ea','#0891b2','#db2777','#65a30d'];
+
+async function loadMetrics() {
+  try {
+    const m = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/metrics');
+    renderMetrics(m);
+  } catch(e) {}
+}
+
+let latestMetrics = null;
+const hiddenEngines = new Set();
+
+function renderMetrics(m) {
+  latestMetrics = m;
+  const info = $('metricsInfo');
+  if (m.url) {
+    info.textContent = ' · ' + m.url + (m.last_error ? ' · 抓取失败：' + m.last_error : '');
+  } else {
+    info.textContent = ' · 未配置 vllm metrics 接口';
+  }
+  const engines = m.engines || {};
+  renderMetricChart('tpot', engines, 'tpot');
+  renderMetricChart('ttft', engines, 'ttft');
+  renderLegend(Object.keys(engines));
+}
+
+function renderLegend(names) {
+  const el = $('metricsLegend');
+  el.innerHTML = '';
+  names.forEach((name, i) => {
+    const hidden = hiddenEngines.has(name);
+    const item = document.createElement('span');
+    item.className = 'item' + (hidden ? ' off' : '');
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = hidden ? '#d1d5db' : METRIC_COLORS[i % METRIC_COLORS.length];
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode('engine ' + name));
+    item.onclick = () => {
+      if (hiddenEngines.has(name)) hiddenEngines.delete(name); else hiddenEngines.add(name);
+      if (latestMetrics) renderMetrics(latestMetrics);
+    };
+    el.appendChild(item);
+  });
+}
+
+const metricCharts = {};
+
+function renderMetricChart(key, engines, field) {
+  const names = Object.keys(engines);
+  const datasets = names.map((name, i) => {
+    const color = METRIC_COLORS[i % METRIC_COLORS.length];
+    return {
+      label: 'engine ' + name,
+      data: engines[name].map(p => ({ x: p.ts, y: p[field] * 1000 })),
+      borderColor: color,
+      backgroundColor: color,
+      borderWidth: 1.5,
+      pointRadius: 0,
+      pointHitRadius: 4,
+      tension: 0.15,
+      spanGaps: true,
+      hidden: hiddenEngines.has(name),
+    };
+  });
+
+  const existing = metricCharts[key];
+  if (existing) {
+    existing.data.datasets = datasets;
+    existing.update('none');
+    return;
+  }
+  metricCharts[key] = new Chart($(key + 'Chart'), {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      normalized: true,
+      interaction: { mode: 'nearest', intersect: false },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: { callback: v => fmtClock(v), maxTicksLimit: 8 },
+          grid: { display: false },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { callback: v => fmtMs(v), maxTicksLimit: 6 },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? fmtClock(items[0].parsed.x) : '',
+            label: ctx => ctx.dataset.label + ': ' + fmtMs(ctx.parsed.y),
+          },
+        },
+      },
+    },
+  });
+}
+
+function fmtMs(ms) {
+  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+  if (ms >= 1) return (ms >= 100 ? ms.toFixed(0) : ms.toFixed(1)) + 'ms';
+  return (ms * 1000).toFixed(0) + 'µs';
+}
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+const controlMsg = { trigger:'已触发检测', pause:'已暂停', start:'已启动', interval:'周期已更新' };
+async function control(kind) {
+  try {
+    const body = kind === 'interval' ? { interval_sec: parseInt($('intervalInput').value, 10) } : undefined;
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/' + kind, body);
+    toast(controlMsg[kind] || '操作成功', true);
+    setTimeout(refresh, 400);
+  } catch(e) { toast('操作失败：' + e.message, false); }
+}
+
+$('btnTrigger').onclick = () => control('trigger');
+$('btnPause').onclick = () => control('pause');
+$('btnStart').onclick = () => control('start');
+$('btnInterval').onclick = () => {
+  const v = parseInt($('intervalInput').value, 10);
+  if (!v || v < 60 || v > 86400) { toast('周期需在 [60, 86400] 秒之间', false); return; }
+  control('interval');
+};
+$('btnDegradation').onclick = async () => {
+  const v = parseFloat($('degradationInput').value);
+  if (isNaN(v) || v < 0 || v >= 1) { toast('阈值基数需在 [0, 1) 之间', false); return; }
+  try {
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/degradation', { degradation: v });
+    toast('阈值基数已更新为 ' + v, true);
+    setTimeout(refresh, 400);
+  } catch(e) { toast('操作失败：' + e.message, false); }
+};
+
+['tabProgress','tabReport','tabResult','tabOpMetric'].forEach(id => {
+  $(id).onclick = () => {
+    ['tabProgress','tabReport','tabResult','tabOpMetric'].forEach(t => $(t).classList.remove('active'));
+    $(id).classList.add('active');
+    loadCurrent();
+  };
+});
+
+refresh();
+setInterval(refresh, 5000);
+loadMetrics();
+setInterval(loadMetrics, 20000);
+loadCurrent();
+// Keep the progress view live (1s) while it is the active tab.
+setInterval(() => { if (activeTab() === 'progress') loadProgressDetail(selectedTs); }, 1000);
+</script>
+</body>
+</html>

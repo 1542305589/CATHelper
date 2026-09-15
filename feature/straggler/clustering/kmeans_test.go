@@ -77,23 +77,23 @@ func TestDetectMinDirection(t *testing.T) {
 }
 
 // Recursive replacement: the top-level anomaly cluster {40,40,60} recurses and
-// isolates the 60 (ratio 1.5 > 1.3) as the deepest anomaly, replacing the
-// parent — the 40s are dropped. With a threshold ≥ 1.5 the deeper split is
-// silent (60/40 = 1.5 is not strictly greater), so the parent survives
-// instead.
+// isolates the 60 as the deepest anomaly, replacing the parent and dropping the
+// 40s. Ratio = value / FIRST baseline (10), so the 60 reports 6.0. With a
+// threshold ≥ 1.5 the deeper split is silent (60/40 = 1.5 is not strictly
+// greater), so the parent survives instead.
 func TestDetectRecursiveReplacement(t *testing.T) {
 	vals := []float64{10, 10, 10, 10, 40, 40, 60}
 	res := Detect(vals, 1.3, true)
-	assertFlagged(t, res, map[int]float64{6: 1.5})
+	assertFlagged(t, res, map[int]float64{6: 6.0})
 
-	// Deeper silence keeps the parent: all three high cards flagged at the
-	// parent-cluster ratio 46.7/10.
+	// Deeper silence keeps the parent: all three high cards flagged at their
+	// own value / first baseline (10).
 	resParent := Detect(vals, 1.5, true)
-	assertFlagged(t, resParent, map[int]float64{4: 14.0 / 3, 5: 14.0 / 3, 6: 14.0 / 3})
+	assertFlagged(t, resParent, map[int]float64{4: 4.0, 5: 4.0, 6: 6.0})
 }
 
 // Recursive silence keeps the parent: an anomaly cluster with no internal
-// structure reports all its members at the parent ratio.
+// structure reports all its members at their value / first baseline ratio.
 func TestDetectRecursiveKeepsParent(t *testing.T) {
 	vals := []float64{10, 10, 10, 10, 20, 20, 20}
 	res := Detect(vals, 1.5, true)

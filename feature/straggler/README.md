@@ -9,12 +9,13 @@ AI 智算集群中识别性能劣化 NPU 卡的两道独立检测。**Profiling 
 - [一、安装与构建](#一安装与构建)
 - [二、基于 Profiling 算子数据的慢卡检测](#二基于-profiling-算子数据的慢卡检测)
 - [三、基于资源 KPI 指标数据的慢卡检测](#三基于资源-kpi-指标数据的慢卡检测)
-- [四、HTTP 接口](#四http-接口)
-- [五、输出与解读](#五输出与解读)
-- [六、CLI 参数参考](#六cli-参数参考)
-- [七、边界情况](#七边界情况)
-- [八、目录结构](#八目录结构)
-- [九、设计文档](#九设计文档)
+- [四、HTTP 接口（守护进程）](#四http-接口守护进程)
+- [五、中心节点模式](#五中心节点模式)
+- [六、输出与解读](#六输出与解读)
+- [七、CLI 参数参考](#七cli-参数参考)
+- [八、边界情况](#八边界情况)
+- [九、目录结构](#九目录结构)
+- [十、设计文档](#十设计文档)
 
 ---
 
@@ -84,7 +85,7 @@ python3 -c "import msmonitor; print('mindstudio_monitor OK')"
 
 ### 2.1 在容器/hostOS 内拉起慢节点的守护进程
 
-在训练容器内或 hostOS 上常驻拉起守护进程，周期性自动完成 Profiler 采集→检测（配 `--kpi-dir` 时同时做 KPI 检测），结果经 HTTP 查询（见[四、HTTP 接口](#四http-接口)）。前置：已跑 `bash build.sh`（见 1.2）；训练进程以 `MSMONITOR_USE_DAEMON=1` 启动（见 2.2）；准备 `--profiler-dir`（采集落盘根，可空目录）：
+在训练容器内或 hostOS 上常驻拉起守护进程，周期性自动完成 Profiler 采集→检测（配 `--kpi-dir` 时同时做 KPI 检测），结果经 HTTP 查询（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）。前置：已跑 `bash build.sh`（见 1.2）；训练进程以 `MSMONITOR_USE_DAEMON=1` 启动（见 2.2）；准备 `--profiler-dir`（采集落盘根，可空目录）：
 
 ```bash
 cd feature/straggler
@@ -117,7 +118,7 @@ cd feature/straggler
 - 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。
 - `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
 
-**HTTP 查询与控制**（完整接口见[四、HTTP 接口](#四http-接口)）：
+**HTTP 查询与控制**（完整接口见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）：
 
 | 方法 & 路径 | 作用 |
 |-------------|------|
@@ -162,7 +163,7 @@ Profiler 检测(整个根目录) → KPI 检测(读 --kpi-dir) → 合并 JSON +
 
 - **采集转换**：每个 NPU 卡获得一个 Ascend PyTorch Profiler Level0 SQLite 文件，位于 `--profiler-dir` 下；
 - **检测**：守护进程内部自动执行，即一次性检测管线（等价于 `./slowNodeDetection path=/data/profiler_output degradation=0.3`），无需手动运行；
-- **归档与查询**：结果落盘 `daemon_results/<start>/` 并经 HTTP 查询（见[四、HTTP 接口](#四http-接口)）；周期结束时 daemon 自动清理 `--profiler-dir`，`.db` 文件无需手动处理。
+- **归档与查询**：结果落盘 `daemon_results/<start>/` 并经 HTTP 查询（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）；周期结束时 daemon 自动清理 `--profiler-dir`，`.db` 文件无需手动处理。
 
 > **不依赖守护进程的一次性检测**：把自行准备好的 `.db` 目录（每卡一个 Level0 SQLite 文件）直接喂给检测器，跑完即退出：
 >
@@ -187,7 +188,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 |------|------|-----------|------|
 | 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向自适应 |
 | 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小卡为代表，按 PP stage 分桶后 kmeans |
-| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取去 min/max 均值消除节点内差异 |
+| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CPUThreshold`(1+deg×5) | 同主机卡取去 min/max 均值消除节点内差异 |
 | Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
 
 > cal / comm / cpu 统一走共享 `clustering` 包（kmeans 比例检测，与 3.3 的 KPI 空间 cluster 同一算法）；Bubble 走固定阈值。
@@ -300,14 +301,15 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 
 ---
 
-## 四、HTTP 接口
+## 四、HTTP 接口（守护进程）
 
 路由无 `/api/v1` 前缀。查询类只读，控制类需 POST。以下假设端口 8080（`--daemon-port` 可改）。
 
 | 方法 & 路径 | 作用 | 请求体 |
 |-------------|------|--------|
+| `GET /` | Web 控制台页面（HTML，纯前端） | — |
 | `GET /healthz` | 存活探针 | — |
-| `GET /status` | 状态总览（state / interval_sec / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
+| `GET /status` | 状态总览（state / interval_sec / degradation / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
 | `GET /straggler/results/latest` | 最近一轮合并结果 JSON | — |
 | `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（倒序；`?limit=N` 可选限制条数） | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
@@ -320,7 +322,12 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） | — |
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
+| `GET /daemon/degradation` | 读取阈值基数（当前灵敏度） | — |
+| `POST /daemon/degradation` | 修改阈值基数（只影响后续检测，不改历史结果） | `{"degradation": 0.3}`（[0,1)） |
 | `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
+| `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon"}` |
+| `POST /daemon/unmatch` | 解除托管（回到 running，需 `X-Match-Key`） | — |
+| `GET /daemon/match_status` | 查询匹配状态（`X-Match-Key` 匹配则确认归属） | — |
 
 **curl 示例**：
 
@@ -393,9 +400,89 @@ curl -s -X POST localhost:8080/daemon/stop
 
 ---
 
-## 五、输出与解读
+## 五、中心节点模式
 
-### 5.1 合并 JSON：`straggler_output.json`
+中心节点（`--center`）统一管理多个**业务**（business）——每个业务是一个真实训练任务，对应 1..N 个守护进程（一个任务跨节点、全局唯一 rank）。中心按周期触发业务内所有守护进程「采集→检测→上报」，接收它们上报的 op_metric，合并后**再检测一遍**（多节点数据放一起，可触发跨节点/主机级指标），落盘结果并对外提供业务级 Web 控制台。
+
+### 5.1 启动
+
+```bash
+./slowNodeDetection --center \
+    --center-port=8080 \
+    --center-data-dir=center_data \
+    --center-interval=600
+```
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--center` | — | — | 进入中心节点模式 |
+| `--center-port` | 否 | 8080 | 中心节点 HTTP 端口 |
+| `--center-data-dir` | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
+| `--center-interval` | 否 | 600 | 新业务默认触发周期（秒，≥60） |
+
+### 5.2 核心概念
+
+- **业务（business）**：一个真实训练任务；含名称、触发周期、守护进程列表、阈值基数、vllm `/metrics` 端点。
+- **守护进程（daemon）**：业务内的一个 `--daemon`（ip:port）。
+- **匹配（match）**：中心为每个守护进程生成**独立密钥**并下发，守护进程进入 `managed` 托管状态。密钥持久化落盘，中心重启后带同一密钥自证身份，无需守护进程重新匹配。
+- **阈值基数（degradation）**：每个业务独立，初始值继承节点启动时的 `degradation`，可在业务控制台动态调整。
+
+### 5.3 托管（managed）语义
+
+- 进入 managed 后，守护进程**停止自主调度**：`/daemon/start`、`/daemon/pause`、`/daemon/interval` 被拒绝；`/daemon/trigger` 必须带中心密钥（`X-Match-Key`）才能触发。
+- 中心按业务周期**并发 trigger** 业务内所有守护进程：各守护进程「采集 → 分析 → 本地检测 → 上报 op_metric」，中心收齐（或 `max(各守护进程 collect-wait)+60s` 超时）后合并检测。
+- **双向心跳**：中心每 5s 探守护进程 `/healthz` + `/daemon/match_status`（带密钥）；守护进程反向探中心 `/center/healthz`，中心挂则自动解除匹配回 `running`。
+
+### 5.4 守护进程状态（中心视角）
+
+| 状态 | 判定 | 说明 |
+|------|------|------|
+| 已匹配 | healthz 通 + 匹配当前中心 | 可触发 |
+| 断连 | 连续 3 次 healthz 失败 | 业务冻结，恢复即解冻 |
+| 未匹配 | healthz 通但不在 managed | 需手动「匹配」 |
+| 匹配他人 | managed 但密钥非本中心 | 需到对方中心解除 |
+| 上报失败 | trigger 后超时未上报 | 下次探测自动恢复 |
+
+业务**任一**守护进程非「已匹配」即整体冻结（跳过本轮触发）。
+
+### 5.5 HTTP 接口（中心节点）
+
+| 方法 & 路径 | 作用 |
+|-------------|------|
+| `GET /` | 业务管理 Web 控制台 |
+| `GET /center/healthz` | 中心存活探针（守护进程反向心跳用） |
+| `GET /center/businesses` | 业务列表（含每守护进程状态） |
+| `POST /center/business` | 添加业务 `{"name","interval_sec","daemons":[{"ip","port"}]}` |
+| `DELETE /center/business/{name}` | 删除业务 |
+| `POST /center/business/{name}/daemon` | 添加守护进程 `{"ip","port"}` |
+| `DELETE /center/business/{name}/daemon?ip=&port=` | 删除守护进程 |
+| `POST /center/business/{name}/daemon/match` | 手动匹配（重连）`{"ip","port"}` |
+| `POST /center/business/{name}/daemon/unmatch` | 手动解除匹配 `{"ip","port"}` |
+| `POST /center/business/{name}/trigger` | 立即触发业务检测 |
+| `POST /center/business/{name}/pause` | 暂停业务调度 |
+| `POST /center/business/{name}/start` | 恢复业务调度 |
+| `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |
+| `POST /center/business/{name}/degradation` | 修改业务阈值基数 `{"degradation":0.3}` |
+| `POST /center/business/{name}/vllm` | 设置业务 vllm `/metrics` 端点 `{"url"}` |
+| `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |
+| `GET /center/business/{name}/metrics` | 业务 TPOT/TTFT 延迟时序（按 engine） |
+| `POST /center/op_metric/{business}/{daemon}` | 守护进程上报 op_metric（`X-Match-Key` 鉴权） |
+| `GET /center/business/{name}/history` | 业务检测历史 |
+| `GET /center/business/{name}/report` | 业务最新合并检测报告（text/plain） |
+| `GET /center/business/{name}/result` | 业务最新合并结果 JSON |
+| `GET /center/business/{name}/op_metric` | 业务最新合并 op_metric JSON |
+
+### 5.6 Web 控制台 / 业务控制台
+
+浏览器访问 `http://<host>:<center-port>/` 打开**业务管理控制台**：业务列表（名称/周期/守护进程/健康汇总）、守护进程状态徽章、添加业务与守护进程、匹配/解除/删除，以及每业务的「进入控制台」。
+
+每个业务有独立的**业务控制台**（`/center/business/{name}/console`）：运行状态、控制（立即触发/暂停/启动/改周期/改阈值基数）、节点列表（守护进程 ip:port）、检测历史/报告/结果/op_metric，以及顶部的 **vllm 延迟指标图**（TPOT / TTFT，按 engine 分曲线，点击图例可显示/隐藏单条 engine，20s 采样一个点）。
+
+---
+
+## 六、输出与解读
+
+### 6.1 合并 JSON：`straggler_output.json`
 
 一次性模式写在**运行目录**；守护进程模式额外归档到 `daemon_results/<start>/straggler_output.json`：
 
@@ -438,15 +525,15 @@ daemon_results/<start>/
 - KPI：`anomaly_metrics` 对全部 11 个指标列出其 `cards`（含正常的，`abnormal` 区分），正常卡 `score` 约 1.0。
 - Profiler：`node_result[]` 含所有节点、`comm_domain_result` 含所有通信组，正常卡/组 `score` 约 1.0，对照阈值可看出"为什么没被标"。
 
-### 5.2 文本报告
+### 6.2 文本报告
 
 | 报告 | 路径 | 内容 |
 |------|------|------|
-| Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel 跨 rank 排序柱状图、ZP_Host 跨节点对比（≥2 节点）、通信域分组对比 |
+| Profiler 报告 | `path/analysis_result/detection_report.log` | 头部（数据来源 / 生成时间 / 有效 rank 数）、检测摘要表（4 类状态，含计算类/通信类阈值）、计算类算子耗时排序（带劣化指数）、ZP_Host 跨节点对比（≥2 节点，慢CPU）、通信域分组对比（耗时 + 劣化指数，按耗时降序） |
 
-守护进程会把该报告归档到 `daemon_results/<start>/analysis_result/` 并经 `/straggler/report/{id}` 提供。KPI 无文本报告文件，文本仅打印到 stdout。
+守护进程会把该报告归档到 `daemon_results/<start>/analysis_result/` 并经 `/straggler/report/{id}` 提供。KPI 无文本报告文件，文本仅打印到 stdout。报告头部「数据来源」：守护进程/一次性模式为数据目录，中心节点模式为业务内所有守护进程的 `ip:port`（英文逗号分隔）。
 
-### 5.3 stdout 摘要
+### 6.3 stdout 摘要
 
 一次性模式与守护进程日志均打到 stderr；KPI 文本报告仅 stdout。Profiler 逐类摘要示例：
 
@@ -459,7 +546,7 @@ Bubble (npu_bubble): 无异常
 
 ---
 
-## 六、CLI 参数参考
+## 七、CLI 参数参考
 
 ### 顶层参数（一次性模式）
 
@@ -470,7 +557,7 @@ Bubble (npu_bubble): 无异常
 | `--kpi-path` | string | 否* | — | KPI 模式：每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_*.jsonl` 目录（优先于 `--kpi-path`） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮） |
-| `--debug-output` | bool | 否 | 假 | 结果含全部正常/异常数据便于排查（见 5.1） |
+| `--debug-output` | bool | 否 | 假 | 结果含全部正常/异常数据便于排查（见 6.1） |
 
 \* `path` 与 KPI 输入至少提供一个；都没有则打印用法并退出。
 
@@ -486,6 +573,17 @@ Bubble (npu_bubble): 无异常
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
 | `--profiler-iterations` | int | 否 | 1 | dyno nputrace 每轮采集迭代数 |
 
+### 中心节点参数（`--center`）
+
+| 参数 | 类型 | 必需 | 默认 | 说明 |
+|------|------|------|------|------|
+| `--center` | bool | 否 | 假 | 进入中心节点模式（管理多个业务/守护进程） |
+| `--center-port` | int | 否 | 8080 | 中心节点 HTTP 端口 |
+| `--center-data-dir` | string | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
+| `--center-interval` | int | 否 | 600 | 新业务默认触发周期（秒，≥60） |
+
+> 中心节点模式的 `degradation`（阈值基数）**每个业务独立**，新业务继承节点启动时的初始值，之后可在业务控制台动态调整（见[五、中心节点模式](#五中心节点模式)）。
+
 ### 阈值计算
 
 ```
@@ -493,9 +591,12 @@ KPI 模式:
   SpaceRatioThreshold = --space-ratio-threshold      # 默认 2.0（独立旋钮）
 
 Profiler 模式:
-  CalThreshold  = 1 + degradation                    # 慢计算/慢CPU 阈值（默认 1.3）
+  CalThreshold  = 1 + degradation                    # 慢计算阈值（默认 1.3）
+  CPUThreshold  = 1 + degradation × 5                # 慢CPU 阈值（默认 2.5）
   CommThreshold = 1 + degradation × 5                # 慢通信阈值（默认 2.5）
 ```
+
+> `degradation`（阈值基数）除了启动时用 CLI 设置初始值外，运行期还可通过守护进程/业务控制台或 API 动态调整（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)与[五、中心节点模式](#五中心节点模式)），只影响后续检测，不改写历史结果。
 
 ### KPI 内部配置（代码内默认值，非 CLI）
 
@@ -508,7 +609,7 @@ Profiler 模式:
 
 ---
 
-## 七、边界情况
+## 八、边界情况
 
 | 场景 | 处理 |
 |------|------|
@@ -529,17 +630,28 @@ Profiler 模式:
 
 ---
 
-## 八、目录结构
+## 九、目录结构
 
 ```
 straggler/
-├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON、--daemon 入口
+├── main.go                 # 统一入口：CLI 解析、三模式编排（一次性/守护进程/中心节点）、合并 JSON
 ├── daemon/                 # 守护进程：dynolog/dyno 采集 + 周期检测 + HTTP 查询/控制
 │   ├── daemon.go           #   运行循环（周期调度、生命周期、优雅退出）
 │   ├── dyno.go             #   dynolog 拉起 + dyno 触发校验 + python analyse 转 .db
 │   ├── store.go            #   会话历史 + 周期计数
 │   ├── server.go           #   HTTP 路由（/status /straggler/* /daemon/*）
 │   └── types.go            #   Config / CycleResult / HTTP 响应类型
+├── center/                 # 中心节点：业务管理 + 匹配/心跳 + 合并检测 + Web 控制台
+│   ├── center.go           #   Center 结构、持久化、Run 循环
+│   ├── manage.go           #   匹配、探测、触发、合并检测、上报接收
+│   ├── server.go           #   HTTP 路由（业务 CRUD / op_metric / results / vllm）
+│   ├── result.go           #   每业务检测结果目录定义
+│   ├── types.go            #   Business / Daemon / Config
+│   ├── metrics.go          #   vllm /metrics 抓取（TPOT/TTFT 时序，按 engine）
+│   ├── console.go          #   go:embed 控制台页面
+│   ├── console.html        #   业务管理 Web 控制台（自包含）
+│   ├── business.html       #   业务控制台（自包含）
+│   └── chart.umd.min.js    #   本地嵌入的 Chart.js（延迟指标图）
 ├── README.md               # 本文件
 ├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
 ├── build.sh                # 一键构建：架构/版本检查 + 装 dyno/dynolog + wheel + go build
@@ -577,7 +689,7 @@ straggler/
 
 ---
 
-## 九、设计文档
+## 十、设计文档
 
 - [DESIGN_NPU_RESOURCE.md](./DESIGN_NPU_RESOURCE.md) — KPI 资源指标检测设计
 - [DESIGN.md](./DESIGN.md) — Profiling 检测设计

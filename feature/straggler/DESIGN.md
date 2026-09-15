@@ -112,7 +112,7 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 对主检测组每个子组：
   1. 检查 ZP_Kernel 可用性（组内所有卡 > 0）
      ✓ → 指标 = ZP_Kernel，方向 = "max"
-     ✗ → 指标 = ZP_Duration，方向 = "min"
+     ✗ → 跳过该组（无降级指标）
   2. 收集非零值，要求 >= minRanksInGroup(2)
   3. kmeans 比例检测 → AddSingle("cal", rank, degradation)
 ```
@@ -174,8 +174,8 @@ func HomogenizationComparisonFunc(fileRanks []int, alignedData []float64,
 7. 簇均值比 > threshold → 异常簇
    "max": 簇均值 / 基线均值 > threshold
    "min": 基线均值 / 簇均值 > threshold
-8. 对异常簇递归（深度 ≤10）：更深层异常替换父层，更深层无异常保持父层
-9. 返回最深异常簇；degradation = 对应簇比例
+8. 递归进入每个异常簇（深度 ≤ 10）减少误检：更深层异常替换父簇，更深层静默则保留父簇成员
+9. 所有异常卡的 degradation = 卡值 / 第一次 kmeans（全部数据）的基线簇均值，统一基准
 ```
 
 固定种子（kmeansSeed=42）：kmeans++ 采样确定性，同一数据多次运行结果一致。
