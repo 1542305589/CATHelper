@@ -17,9 +17,13 @@
   .wrap { display:grid; grid-template-columns:360px 1fr; gap:16px; padding:16px 20px; max-width:1500px; margin:0 auto; }
   @media (max-width:900px) { .wrap { grid-template-columns:1fr; } }
   .col { display:flex; flex-direction:column; gap:16px; min-width:0; }
-  .prog-row { display:grid; grid-template-columns:320px 1fr; gap:16px; align-items:start; }
-  @media (max-width:1200px) { .prog-row { grid-template-columns:1fr; } }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; }
+  .prog-split { display:grid; grid-template-columns:320px 1fr; }
+  @media (max-width:1200px) { .prog-split { grid-template-columns:1fr; } }
+  .prog-pane { border-right:1px solid var(--border); min-width:0; }
+  @media (max-width:1200px) { .prog-pane { border-right:none; border-bottom:1px solid var(--border); } }
+  .pane-head { font-size:13px; font-weight:600; padding:10px 14px; border-bottom:1px solid var(--border); }
+  .report-pane { min-width:0; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
   .card h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
   .card .body { padding:12px 14px; }
   .kv { display:grid; grid-template-columns:110px 1fr; row-gap:6px; font-size:13px; }
@@ -55,8 +59,9 @@
   pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:65vh; overflow:auto; background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:20px; text-align:center; }
-  pre.term { height:220px; max-height:220px; background:#0b1220; }
+  pre.term { height:300px; max-height:300px; background:#0b1220; border-radius:0; }
   pre.term .ts { color:#64748b; }
+  .prog-split .tab-body pre { height:300px; max-height:300px; border-radius:0; }
   .ptag { margin-left:8px; font-size:11px; font-weight:400; color:var(--muted); }
   .ptag.on { color:var(--green); }
   .toast { position:fixed; bottom:20px; right:20px; background:#111827; color:#fff; padding:10px 16px; border-radius:8px; font-size:13px; opacity:0; transform:translateY(8px); transition:all .2s; z-index:100; }
@@ -158,18 +163,20 @@
       <div id="histEmpty" class="empty">加载中…</div>
     </div>
 
-    <div class="prog-row">
-      <div class="card">
-        <h2>本次采集进度 <span id="progressBadge" class="ptag">空闲</span></h2>
-        <pre id="progress" class="term">等待检测开始…</pre>
-      </div>
-      <div class="card">
-        <div class="tabs">
-          <button id="tabReport" class="active">检测报告</button>
-          <button id="tabResult">结果 JSON</button>
-          <button id="tabOpMetric">op_metric</button>
+    <div class="card">
+      <div class="prog-split">
+        <div class="prog-pane">
+          <div class="pane-head">本次采集进度 <span id="progressBadge" class="ptag">空闲</span></div>
+          <pre id="progress" class="term">等待检测开始…</pre>
         </div>
-        <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
+        <div class="report-pane">
+          <div class="tabs">
+            <button id="tabReport" class="active">检测报告</button>
+            <button id="tabResult">结果 JSON</button>
+            <button id="tabOpMetric">op_metric</button>
+          </div>
+          <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
+        </div>
       </div>
     </div>
   </div>
