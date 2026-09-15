@@ -1,23 +1,21 @@
 # CATHelper — 慢节点（Straggler）检测
 
-AI 智算集群中识别性能劣化 NPU 卡的两道防线检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制；还支持**中心节点模式**（`--center`）：一个中心统一管理多个业务的多个守护进程，合并 op_metric 做跨节点检测并下发触发。
+AI 智算集群中识别性能劣化 NPU 卡的两道独立检测。**Profiling 深查**（优先执行）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查；**KPI 资源检测**（轻量）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）。两道检查互不阻塞，结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制。
 
 ---
 
 ## 目录
 
 - [一、安装与构建](#一安装与构建)
-- [二、数据准备](#二数据准备)
-- [三、一次性检测](#三一次性检测)
-- [四、守护进程模式](#四守护进程模式)
+- [二、基于 Profiling 算子数据的慢卡检测](#二基于-profiling-算子数据的慢卡检测)
+- [三、基于资源 KPI 指标数据的慢卡检测](#三基于资源-kpi-指标数据的慢卡检测)
+- [四、HTTP 接口（守护进程）](#四http-接口守护进程)
 - [五、中心节点模式](#五中心节点模式)
-- [六、HTTP 接口（守护进程）](#六http-接口守护进程)
-- [七、输出与解读](#七输出与解读)
-- [八、CLI 参数参考](#八cli-参数参考)
-- [九、检测原理](#九检测原理)
-- [十、边界情况](#十边界情况)
-- [十一、目录结构](#十一目录结构)
-- [十二、设计文档](#十二设计文档)
+- [六、输出与解读](#六输出与解读)
+- [七、CLI 参数参考](#七cli-参数参考)
+- [八、边界情况](#八边界情况)
+- [九、目录结构](#九目录结构)
+- [十、设计文档](#十设计文档)
 
 ---
 
@@ -56,16 +54,7 @@ bash build.sh
 
 产物 `./slowNodeDetection`。dyno/dynolog 装到系统，可从 PATH 直接调用；下载的中间文件在临时目录，退出即清理。
 
-### 1.3 验证
-
-```bash
-./slowNodeDetection path=/nonexistent    # 应报"Invalid directory"而非"dyno not found"
-dyno --help >/dev/null && echo "dyno OK"
-dynolog --help >/dev/null && echo "dynolog OK"
-python3 -c "import msmonitor; print('mindstudio_monitor OK')"
-```
-
-### 1.4 只手动编译（不改采集依赖）
+### 1.3 只手动编译（不改采集依赖，1.2 的替代方案）
 
 若只想出包、不装 dyno/dynolog 和 mindstudio_monitor，可跳过 `build.sh` 直接编译（Go 编译不依赖这些）：
 
@@ -79,13 +68,140 @@ CGO_ENABLED=0 go build -o slowNodeDetection .
 - 跨平台（仅一次性模式，无守护进程采集）：`GOOS=linux GOARCH=amd64` / `GOOS=windows GOARCH=amd64` 同理。
 - 产物全静态、无 CGo（Profiler 用纯 Go SQLite 驱动）。
 
+### 1.4 验证
+
+```bash
+./slowNodeDetection path=/nonexistent    # 应报"Invalid directory"而非"dyno not found"
+dyno --help >/dev/null && echo "dyno OK"
+dynolog --help >/dev/null && echo "dynolog OK"
+python3 -c "import msmonitor; print('mindstudio_monitor OK')"
+```
+
 ---
 
-## 二、数据准备
+## 二、基于 Profiling 算子数据的慢卡检测
 
-检测有两种输入：**KPI 数据**（资源指标，轻量第一道）和 **Profiler 数据**（`.db`，深查第二道）。至少提供其一。
+基于 Ascend PyTorch Profiler 算子数据识别慢卡，覆盖慢计算/慢通信/慢CPU/Bubble 四个维度，深查定位。跑完即退出（一次性检测），产物是运行目录下的 `straggler_output.json`（只跑本维度时仅含 `profiler` 键）。
 
-### 2.1 KPI 数据（二选一）
+### 2.1 在容器/hostOS 内拉起慢节点的守护进程
+
+在训练容器内或 hostOS 上常驻拉起守护进程，周期性自动完成 Profiler 采集→检测（配 `--kpi-dir` 时同时做 KPI 检测），结果经 HTTP 查询（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）。前置：已跑 `bash build.sh`（见 1.2）；训练进程以 `MSMONITOR_USE_DAEMON=1` 启动（见 2.2）；准备 `--profiler-dir`（采集落盘根，可空目录）：
+
+```bash
+cd feature/straggler
+./slowNodeDetection --daemon \
+    --profiler-dir=/data/profiler \
+    --kpi-dir=/data/kpi \
+    --interval=600 \
+    --collect-wait=60 \
+    --profiler-iterations=1 \
+    --daemon-port=8080 \
+    --degradation=0.3
+```
+
+启动参数说明：
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--profiler-dir` | 是 | — | dyno 采集落盘根目录（传给 dyno 的 `--log-file`） |
+| `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler |
+| `--interval` | 否 | 600 | 检测周期（秒，≥60） |
+| `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
+| `--profiler-iterations` | 否 | 1 | dyno nputrace 每轮采集迭代数 |
+| `--daemon-port` | 否 | 8080 | HTTP 端口 |
+| `--degradation` | 否 | 0.3 | 灵敏度（与一次性模式同义） |
+
+> 命令为**可直接复制执行**写法：续行 `\` 后不留注释/空格，否则 shell 会把反斜杠当成普通字符导致参数被拆散。
+
+**启动后行为**：
+- 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
+- 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。
+- `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
+
+**HTTP 查询与控制**（完整接口见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）：
+
+| 方法 & 路径 | 作用 |
+|-------------|------|
+| `GET /status` | 状态总览（state / 周期 / cycles_total / last_cycle 等） |
+| `GET /straggler/results/latest` | 最近一轮合并结果 JSON |
+| `GET /straggler/results/history?limit=N` | 本次会话周期摘要（倒序） |
+| `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告 |
+| `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） |
+| `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） |
+| `POST /daemon/stop` | 优雅关闭守护进程（删除全部落盘结果） |
+
+```bash
+curl -s localhost:8080/status | jq
+curl -s localhost:8080/straggler/results/latest | jq
+curl -s -X POST localhost:8080/daemon/trigger
+```
+
+### 2.2 拉起训练/推理业务
+
+训练或推理进程在启动时，需要在 CLI 启动命令前加上 `MSMONITOR_USE_DAEMON=1`，dyno 才能命中进程并触发采集。例如：
+
+```bash
+MSMONITOR_USE_DAEMON=1 vllm serve /path/to/model ...
+```
+
+### 2.3 Profiler 数据准备与检测
+
+守护进程模式下，通过 curl 触发常驻进程开启一轮数据采集（`POST /daemon/trigger`；也可等待 `--interval` 周期自动触发）：
+
+```bash
+curl -s -X POST localhost:8080/daemon/trigger
+```
+
+触发后整条链路**自动完成，无需人工干预**：
+
+```
+dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm) → 等待 collect-wait →
+python analyse 转 .db（覆盖根下所有 rank）→ dataparse 解析 →
+Profiler 检测(整个根目录) → KPI 检测(读 --kpi-dir) → 合并 JSON + meta 落盘 daemon_results/<start>/ →
+周期结束删除整个 profiler-dir
+```
+
+- **采集转换**：每个 NPU 卡获得一个 Ascend PyTorch Profiler Level0 SQLite 文件，位于 `--profiler-dir` 下；
+- **检测**：守护进程内部自动执行，即一次性检测管线（等价于 `./slowNodeDetection path=/data/profiler_output degradation=0.3`），无需手动运行；
+- **归档与查询**：结果落盘 `daemon_results/<start>/` 并经 HTTP 查询（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）；周期结束时 daemon 自动清理 `--profiler-dir`，`.db` 文件无需手动处理。
+
+> **不依赖守护进程的一次性检测**：把自行准备好的 `.db` 目录（每卡一个 Level0 SQLite 文件）直接喂给检测器，跑完即退出：
+>
+> ```
+> /data/profiler_output/
+> ├── ascend_pytorch_profiler_0.db
+> ├── ascend_pytorch_profiler_1.db
+> └── ...
+> ```
+>
+> ```bash
+> ./slowNodeDetection path=/data/profiler_output degradation=0.3
+> ```
+
+### 2.4 检测原理
+
+```
+SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点聚合 → 合并 JSON
+```
+
+| 类别 | 数据 | 阈值/方向 | 说明 |
+|------|------|-----------|------|
+| 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向自适应 |
+| 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小卡为代表，按 PP stage 分桶后 kmeans |
+| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CPUThreshold`(1+deg×5) | 同主机卡取去 min/max 均值消除节点内差异 |
+| Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
+
+> cal / comm / cpu 统一走共享 `clustering` 包（kmeans 比例检测，与 3.3 的 KPI 空间 cluster 同一算法）；Bubble 走固定阈值。
+
+**中间产物（`op_metric/`）**：解析阶段在每个数据目录下生成每 rank 三件套——`group_info_{N}.json`（并行拓扑）、`host_info_{N}.json`（rank→hostUid）、`global_rank_{N}.csv`（各域通信耗时/计数 + ZP_* 指标）。守护进程会把每轮 `op_metric/` 归档到 `daemon_results/<start>/op_metric/` 供复查。
+
+---
+
+## 三、基于资源 KPI 指标数据的慢卡检测
+
+基于 NPU 资源指标的空间 peer 对比（最后一个聚合点）识别慢卡，轻量、无侵入。跑完即退出（一次性检测），产物是运行目录下的 `straggler_output.json`（只跑本维度时仅含 `kpi` 键）。
+
+### 3.1 KPI 数据准备（二选一）
 
 #### 选项 A：CATMonitor JSONL 目录（`--kpi-jsonl-dir`，推荐）
 
@@ -141,26 +257,7 @@ timestamp,NPU_CARD_TEMP,NPU_CARD_POWER,NPU_CARD_AICORE_FREQ,...
 { "node1.csv": { "node": "node-1", "cards": [0, 1] }, "node2.csv": { "node": "node-2", "cards": [0, 1] } }
 ```
 
-### 2.2 Profiler 数据
-
-一个目录，内含每卡一个 Ascend PyTorch Profiler Level0 SQLite 文件：
-
-```
-/data/profiler_output/
-├── ascend_pytorch_profiler_0.db
-├── ascend_pytorch_profiler_1.db
-└── ...
-```
-
-守护进程模式下这些 `.db` 由 dyno 采集 + `python analyse` 自动生成，见[第四章](#四守护进程模式常驻巡检)。
-
----
-
-## 三、一次性检测
-
-把准备好的数据目录直接喂给检测器，跑完即退出，适合按需排查或联调。产物是运行目录下的 `straggler_output.json`。
-
-### 模式 1：仅 KPI
+### 3.2 一次性检测
 
 ```bash
 cd feature/straggler
@@ -169,178 +266,50 @@ cd feature/straggler
 ./slowNodeDetection --kpi-path=/data/kpi_csv_dir
 ```
 
-### 模式 2：仅 Profiler
+> **联合 Profiler 检测**：同时提供 `path`（Profiler `.db` 目录）时自动先跑 Profiler 深查、再跑 KPI（两道检查相互独立、互不阻塞，见 2.3）：
+>
+> ```bash
+> ./slowNodeDetection path=/data/profiler_output --kpi-jsonl-dir=/var/lib/catmonitor/straggler degradation=0.3
+> ```
 
-```bash
-./slowNodeDetection path=/data/profiler_output degradation=0.3
+### 3.3 检测原理
+
+```
+CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
+按指标分组异常卡(含空间劣化程度) → 合并 JSON
 ```
 
-### 模式 3：KPI + Profiler 联合
+**指标注册表**（cluster 方向自适应，双方向标记数少者为异常）：
 
-```bash
-./slowNodeDetection path=/data/profiler_output --kpi-jsonl-dir=/var/lib/catmonitor/straggler degradation=0.3
-```
+| 指标 | 分类 | 空间方法 | 说明 |
+|------|------|---------|------|
+| `temp` | 计算 | cluster | 温度 (°C) |
+| `power` | 计算 | cluster | 功耗 (W) |
+| `aicore_freq` | 计算 | cluster | AI Core 频率 (MHz)，离散档位 |
+| `aicore_util` | 计算 | cluster | AI Core 利用率 (%) |
+| `hbm_bandwidth_util` | 计算 | cluster | HBM 带宽使用率 (%) |
+| `hbm_util` | 计算 | cluster | HBM 内存使用率 (%) |
+| `tx_bandwidth` | 通信 | cluster | TX 带宽 |
+| `rx_pfc_pkt` | 通信 | absolute | PFC 暂停帧（计数） |
+| `roce_tx_err_pkt` | 通信 | absolute | RoCE 发送错误包（计数） |
+| `roce_out_of_order` | 通信 | absolute | RoCE 乱序包（计数） |
+| `roce_new_pkt_rty` | 通信 | absolute | RoCE 重传包（计数） |
 
-**检测顺序**：先跑 KPI（轻量、无侵入）→ 发现异常且有 `path` → 继续跑 Profiler 做交叉验证；KPI 无异常 → 自动 fallback 到 Profiler 精查；仅 KPI 无 `path` → KPI 结果即为最终输出。两道结果合并进 `straggler_output.json`（只跑哪个维度就只有哪个键）。
-
-> 需要排查"某卡为什么没被判异常"时，加 `--debug-output`，结果会包含所有正常卡/正常通信组的诊断分（见[七、输出与解读](#七输出与解读)）。
+**空间维度（peer 对比）**：只取全部数据的最后一个聚合点（时间维度/基线/检测窗口已移除）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
+- **cluster（kmeans 比例）**：≤0 读数钳制到极小值 `zeroFloor=1e-3` 参与聚类 → z-score 标准化（std≈0 强制 1）→ 肘部法选 k → kmeans++ + Lloyd 迭代（固定种子，结果确定）→ 双方向各检一次（max：基线=最小均值簇；min：基线=最大均值簇）→ 标记数少的方向为异常、相等不上报 → 对选中方向异常簇递归精化。score = **簇均值 / 基线均值**（统一 min/max 两侧：max 侧 `> 阈值` 判异常，min 侧 `< 1/阈值` 判异常）；判定用递归 `Detect` 的标记，不随比值变化。
+- **absolute**：错误计数类指标，值 `> 0` 即异常。
 
 ---
 
-## 四、守护进程模式
-
-周期自动采集并检测，HTTP 查询与控制。适合接入手管/调度系统持续巡检。
-
-### 4.1 前置条件
-
-| 条件 | 说明 |
-|------|------|
-| 采集链路 | 训练（vLLM）进程需以 `MSMONITOR_USE_DAEMON=1` 启动，dyno 才能命中并触发采集 |
-| 构建 | 已跑过 `bash build.sh`（装好 dyno/dynolog/mindstudio_monitor/go） |
-| 目录 | 准备 `--profiler-dir`（采集落盘根，可空目录）、可选 `--kpi-dir` |
-
-### 4.2 启动
-
-```bash
-cd feature/straggler
-./slowNodeDetection --daemon \
-    --profiler-dir=/data/profiler \
-    --kpi-dir=/data/kpi \
-    --interval=600 \
-    --collect-wait=60 \
-    --profiler-iterations=1 \
-    --daemon-port=8080 \
-    --degradation=0.3
-```
-
-启动参数说明：
-
-| 参数 | 必需 | 默认 | 说明 |
-|------|------|------|------|
-| `--profiler-dir` | 是 | — | dyno 采集落盘根目录（传给 dyno 的 `--log-file`） |
-| `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler |
-| `--interval` | 否 | 600 | 检测周期（秒，≥60） |
-| `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | 否 | 1 | dyno nputrace 每轮采集迭代数 |
-| `--daemon-port` | 否 | 8080 | HTTP 端口 |
-| `--degradation` | 否 | 0.3 | 灵敏度（与一次性模式同义） |
-
-> 命令为**可直接复制执行**写法：续行 `\` 后不留注释/空格，否则 shell 会把反斜杠当成普通字符导致参数被拆散。
-
-**启动后行为**：
-- 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
-- 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。
-- `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
-
-### 4.3 单周期流程
-
-```
-dyno 触发采集 → 校验生效(commandStatus=effective + 命中 vllm) → 等待 collect-wait →
-python analyse 转 .db（覆盖根下所有 rank）→ dataparse 解析 →
-KPI 检测(读 --kpi-dir) + Profiler 检测(整个根目录) → 合并 JSON + meta 落盘 daemon_results/<start>/ →
-周期结束删除整个 profiler-dir
-```
-
-### 4.4 数据落盘
-
-结果放**运行目录**下 `daemon_results/<start>/`（`--profiler-dir` 之外，不受周期清理影响）：
-
-```
-daemon_results/<start>/
-├── straggler_output.json          # 本轮合并结果（HTTP 读取的数据源）
-├── daemon_meta.json               # 周期元数据（归档记录）
-├── op_metric/                     # 检测输入快照（group_info_*.json / host_info_*.json / global_rank_*.csv）
-└── analysis_result/
-    └── detection_report.log       # 本轮 Profiler 文本报告
-```
-
-运行目录另有一份最新的 `straggler_output.json`（覆盖写，与一次性模式同形状）。
-
-- 查询接口读**进程内 store**（本次会话），daemon 重启后清空，不读磁盘历史；历史无条数上限，可用 `?limit=N` 截断。
-- `POST /daemon/stop` 会在优雅关闭后**删除整个 `daemon_results/`**（所有落盘结果一并清掉）。
-
----
-
-## 五、中心节点模式
-
-中心节点（`--center`）管理多个**业务**（business），每个业务对应 1..N 个守护进程（一个训练任务跨节点的**全局唯一 rank**）。中心节点统一按周期触发业务内所有守护进程、接收它们上报的 op_metric，合并后**再检测一次**（多守护进程的数据放一起检查，可触发跨节点的 host 级指标），并落盘结果、提供业务级 Web 控制台。
-
-### 5.1 启动
-
-```bash
-./slowNodeDetection --center \
-    --center-port=8080 \
-    --center-data-dir=center_data \
-    --center-interval=600
-```
-
-参数说明：
-
-| 参数 | 必需 | 默认 | 说明 |
-|------|------|------|------|
-| `--center-port` | 否 | 8080 | 中心节点 HTTP 端口 |
-| `--center-data-dir` | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
-| `--center-interval` | 否 | 600 | 新业务的默认触发周期（秒） |
-
-### 5.2 核心概念
-
-- **业务（business）**：一个真实训练任务；含名称、触发周期、守护进程列表。
-- **守护进程（daemon）**：业务内的一个 `--daemon`（ip:port），全局唯一 rank。
-- **匹配（match）**：中心为每个守护进程生成**独立密钥**并下发，守护进程进入 `managed` 托管状态。密钥不持久化，中心或守护进程任一重启都需重新匹配。
-
-### 5.3 托管（managed）语义
-
-- 进入 managed 后，守护进程**停止自主调度**：`/daemon/start`、`/daemon/pause`、`/daemon/interval` 被拒绝；`/daemon/trigger` 必须带中心的密钥（`X-Match-Key`）才能触发。
-- 中心按业务周期**并发 trigger** 业务内所有守护进程 → 各守护进程「采集 → 分析 → 本地检测 → 上报 op_metric」→ 中心收齐（或 `max(各守护进程 collect-wait) + 60s` 超时）后合并检测。
-- **双向心跳**：中心每 5s 探守护进程 `/healthz` + `/daemon/match_status`（带密钥）；守护进程反向探中心 `/center/healthz`，中心挂则自动解除匹配回 `running`。
-
-### 5.4 守护进程状态（中心视角）
-
-| 状态 | 判定 | 可触发 | 恢复 |
-|------|------|--------|------|
-| 健康匹配 | healthz 通 + 匹配当前中心 | ✅ | — |
-| 断连 | 连续 3 次 healthz 失败 | ❌（业务冻结） | 自动：持续 healthz，恢复即解冻 |
-| 未匹配 | healthz 通但不在 managed | ❌ | 用户手动「匹配」 |
-| 匹配他人 | managed 但密钥非本中心 | ❌ | 去那个中心解除 |
-| 上报失败 | trigger 后超时未上报 | ❌ | 自动：下次探测恢复 |
-
-业务内**任一**守护进程非「健康匹配」即整体冻结（跳过触发）。
-
-### 5.5 中心节点 HTTP 接口
-
-| 方法 & 路径 | 作用 |
-|-------------|------|
-| `GET /` | 业务管理 Web 控制台（业务列表 + 状态 + 增删/匹配/解除） |
-| `GET /center/healthz` | 中心存活探针（守护进程反向心跳用） |
-| `GET /center/businesses` | 业务列表（含每守护进程状态） |
-| `POST /center/business` | 添加业务 `{"name","interval_sec","daemons":[{"ip","port"}]}` |
-| `DELETE /center/business/{name}` | 删除业务（解除其所有守护进程匹配） |
-| `POST /center/business/{name}/daemon` | 添加守护进程 `{"ip","port"}` |
-| `DELETE /center/business/{name}/daemon?ip=&port=` | 删除守护进程（若已匹配则先解除） |
-| `POST /center/business/{name}/daemon/match` | 手动匹配（重连）`{"ip","port"}` |
-| `POST /center/business/{name}/daemon/unmatch` | 手动解除匹配 `{"ip","port"}` |
-| `POST /center/op_metric/{business}/{daemon}` | 守护进程上报 op_metric（`X-Match-Key` 鉴权） |
-| `GET /center/business/{name}/report` | 该业务最新合并检测报告（text/plain） |
-| `GET /center/business/{name}/result` | 该业务最新合并结果 JSON |
-| `GET /center/business/{name}/op_metric` | 该业务最新合并 op_metric JSON |
-
-### 5.6 Web 控制台
-
-浏览器访问 `http://<host>:<center-port>/`：业务列表（名称/周期/守护进程数/健康汇总）、每业务守护进程状态徽章（健康匹配/断连/未匹配/匹配他人/上报失败）、添加业务与守护进程、匹配/解除/删除操作，以及每业务的检测报告/结果/op_metric 查看。
-
----
-
-## 六、HTTP 接口（守护进程）
+## 四、HTTP 接口（守护进程）
 
 路由无 `/api/v1` 前缀。查询类只读，控制类需 POST。以下假设端口 8080（`--daemon-port` 可改）。
 
-浏览器访问 `http://<host>:<port>/` 打开 **Web 控制台**：状态总览、周期历史、报告/结果/op_metric 查看、启停/触发/改周期等操作，都通过下面的 REST 接口完成（控制台是纯前端，接口仍可直接 curl 调用）。
-
 | 方法 & 路径 | 作用 | 请求体 |
 |-------------|------|--------|
-| `GET /` | Web 控制台页面（HTML） | — |
+| `GET /` | Web 控制台页面（HTML，纯前端） | — |
 | `GET /healthz` | 存活探针 | — |
-| `GET /status` | 状态总览（state / interval_sec / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
+| `GET /status` | 状态总览（state / interval_sec / degradation / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
 | `GET /straggler/results/latest` | 最近一轮合并结果 JSON | — |
 | `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（倒序；`?limit=N` 可选限制条数） | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |
@@ -353,7 +322,12 @@ daemon_results/<start>/
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） | — |
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
+| `GET /daemon/degradation` | 读取阈值基数（当前灵敏度） | — |
+| `POST /daemon/degradation` | 修改阈值基数（只影响后续检测，不改历史结果） | `{"degradation": 0.3}`（[0,1)） |
 | `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
+| `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon"}` |
+| `POST /daemon/unmatch` | 解除托管（回到 running，需 `X-Match-Key`） | — |
+| `GET /daemon/match_status` | 查询匹配状态（`X-Match-Key` 匹配则确认归属） | — |
 
 **curl 示例**：
 
@@ -422,11 +396,91 @@ curl -s -X POST localhost:8080/daemon/stop
 | 周期失败，`error` 含 `python analyse` | `torch_npu`/`mindstudio_monitor` 未装或版本不符 → 重跑 `bash build.sh` |
 | `dynolog exited` 日志但能检测 | IPC 端口已被占用，daemon 复用现有实例，属正常 |
 | `trigger` 返回 409 | 已有周期在跑（single-flight），稍后再试 |
-| 传 `--daemon-port` 却不生效 | 多半是启动命令续行 `\` 后带了注释/空格把参数拆散（见 4.2 注意） |
+| 传 `--daemon-port` 却不生效 | 多半是启动命令续行 `\` 后带了注释/空格把参数拆散（见 2.1 注意） |
 
 ---
 
-## 七、输出与解读
+## 五、中心节点模式
+
+中心节点（`--center`）统一管理多个**业务**（business）——每个业务是一个真实训练任务，对应 1..N 个守护进程（一个任务跨节点、全局唯一 rank）。中心按周期触发业务内所有守护进程「采集→检测→上报」，接收它们上报的 op_metric，合并后**再检测一遍**（多节点数据放一起，可触发跨节点/主机级指标），落盘结果并对外提供业务级 Web 控制台。
+
+### 5.1 启动
+
+```bash
+./slowNodeDetection --center \
+    --center-port=8080 \
+    --center-data-dir=center_data \
+    --center-interval=600
+```
+
+| 参数 | 必需 | 默认 | 说明 |
+|------|------|------|------|
+| `--center` | — | — | 进入中心节点模式 |
+| `--center-port` | 否 | 8080 | 中心节点 HTTP 端口 |
+| `--center-data-dir` | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
+| `--center-interval` | 否 | 600 | 新业务默认触发周期（秒，≥60） |
+
+### 5.2 核心概念
+
+- **业务（business）**：一个真实训练任务；含名称、触发周期、守护进程列表、阈值基数、vllm `/metrics` 端点。
+- **守护进程（daemon）**：业务内的一个 `--daemon`（ip:port）。
+- **匹配（match）**：中心为每个守护进程生成**独立密钥**并下发，守护进程进入 `managed` 托管状态。密钥持久化落盘，中心重启后带同一密钥自证身份，无需守护进程重新匹配。
+- **阈值基数（degradation）**：每个业务独立，初始值继承节点启动时的 `degradation`，可在业务控制台动态调整。
+
+### 5.3 托管（managed）语义
+
+- 进入 managed 后，守护进程**停止自主调度**：`/daemon/start`、`/daemon/pause`、`/daemon/interval` 被拒绝；`/daemon/trigger` 必须带中心密钥（`X-Match-Key`）才能触发。
+- 中心按业务周期**并发 trigger** 业务内所有守护进程：各守护进程「采集 → 分析 → 本地检测 → 上报 op_metric」，中心收齐（或 `max(各守护进程 collect-wait)+60s` 超时）后合并检测。
+- **双向心跳**：中心每 5s 探守护进程 `/healthz` + `/daemon/match_status`（带密钥）；守护进程反向探中心 `/center/healthz`，中心挂则自动解除匹配回 `running`。
+
+### 5.4 守护进程状态（中心视角）
+
+| 状态 | 判定 | 说明 |
+|------|------|------|
+| 已匹配 | healthz 通 + 匹配当前中心 | 可触发 |
+| 断连 | 连续 3 次 healthz 失败 | 业务冻结，恢复即解冻 |
+| 未匹配 | healthz 通但不在 managed | 需手动「匹配」 |
+| 匹配他人 | managed 但密钥非本中心 | 需到对方中心解除 |
+| 上报失败 | trigger 后超时未上报 | 下次探测自动恢复 |
+
+业务**任一**守护进程非「已匹配」即整体冻结（跳过本轮触发）。
+
+### 5.5 HTTP 接口（中心节点）
+
+| 方法 & 路径 | 作用 |
+|-------------|------|
+| `GET /` | 业务管理 Web 控制台 |
+| `GET /center/healthz` | 中心存活探针（守护进程反向心跳用） |
+| `GET /center/businesses` | 业务列表（含每守护进程状态） |
+| `POST /center/business` | 添加业务 `{"name","interval_sec","daemons":[{"ip","port"}]}` |
+| `DELETE /center/business/{name}` | 删除业务 |
+| `POST /center/business/{name}/daemon` | 添加守护进程 `{"ip","port"}` |
+| `DELETE /center/business/{name}/daemon?ip=&port=` | 删除守护进程 |
+| `POST /center/business/{name}/daemon/match` | 手动匹配（重连）`{"ip","port"}` |
+| `POST /center/business/{name}/daemon/unmatch` | 手动解除匹配 `{"ip","port"}` |
+| `POST /center/business/{name}/trigger` | 立即触发业务检测 |
+| `POST /center/business/{name}/pause` | 暂停业务调度 |
+| `POST /center/business/{name}/start` | 恢复业务调度 |
+| `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |
+| `POST /center/business/{name}/degradation` | 修改业务阈值基数 `{"degradation":0.3}` |
+| `POST /center/business/{name}/vllm` | 设置业务 vllm `/metrics` 端点 `{"url"}` |
+| `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |
+| `GET /center/business/{name}/metrics` | 业务 TPOT/TTFT 延迟时序（按 engine） |
+| `POST /center/op_metric/{business}/{daemon}` | 守护进程上报 op_metric（`X-Match-Key` 鉴权） |
+| `GET /center/business/{name}/history` | 业务检测历史 |
+| `GET /center/business/{name}/report` | 业务最新合并检测报告（text/plain） |
+| `GET /center/business/{name}/result` | 业务最新合并结果 JSON |
+| `GET /center/business/{name}/op_metric` | 业务最新合并 op_metric JSON |
+
+### 5.6 Web 控制台 / 业务控制台
+
+浏览器访问 `http://<host>:<center-port>/` 打开**业务管理控制台**：业务列表（名称/周期/守护进程/健康汇总）、守护进程状态徽章、添加业务与守护进程、匹配/解除/删除，以及每业务的「进入控制台」。
+
+每个业务有独立的**业务控制台**（`/center/business/{name}/console`）：运行状态、控制（立即触发/暂停/启动/改周期/改阈值基数）、节点列表（守护进程 ip:port）、检测历史/报告/结果/op_metric，以及顶部的 **vllm 延迟指标图**（TPOT / TTFT，按 engine 分曲线，点击图例可显示/隐藏单条 engine，20s 采样一个点）。
+
+---
+
+## 六、输出与解读
 
 ### 6.1 合并 JSON：`straggler_output.json`
 
@@ -434,24 +488,40 @@ curl -s -X POST localhost:8080/daemon/stop
 
 ```json
 {
-  "kpi": {
-    "summary": { "total_cards": 8, "total_nodes": 2, "anomalies": 1, "normal": 7, "source": "...", "data_points": 129600, "space_ratio_threshold": 2.0 },
-    "anomaly_metrics": [ { "metric": "aicore_freq", "method": "cluster", "cards": [ { "node": "node-1", "card_id": 0, "score": 0.44 } ] } ]
-  },
   "profiler": {
     "node_result": [
       { "hostname": "<hostName>", "npu": [ { "id": 0, "cal": { "score": 1.5 }, "npu_bubble": { "score": 3200.0 } } ], "cpu": { "score": 1.4 } }
     ],
     "comm_domain_result": { "tp": { "0,1,2,3": 3.2 } }
+  },
+  "kpi": {
+    "summary": { "total_cards": 8, "total_nodes": 2, "anomalies": 1, "normal": 7, "source": "...", "data_points": 129600, "space_ratio_threshold": 2.0 },
+    "anomaly_metrics": [ { "metric": "aicore_freq", "method": "cluster", "cards": [ { "node": "node-1", "card_id": 0, "score": 0.44 } ] } ]
   }
 }
 ```
 
-- **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键。
-- `kpi` 段 = summary + `anomaly_metrics`（指标优先：每个异常指标下列异常卡及其空间 score）。
+- **只跑 Profiler** → 只有 `"profiler"` 键；**只跑 KPI** → 只有 `"kpi"` 键。
 - `profiler` 段 = `node_result[]` 按物理节点分组（hostname，缺失回退 hostUid），`npu[]` 只含异常 NPU（cal / npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
+- `kpi` 段 = summary + `anomaly_metrics`（指标优先：每个异常指标下列异常卡及其空间 score）。
 
-**`--debug-output` 调试输出**（不额外生成文件，直接在现有结果里展示全量）：
+**守护进程模式的数据落盘**（`--profiler-dir` 之外，不受周期清理影响）：
+
+```
+daemon_results/<start>/
+├── straggler_output.json          # 本轮合并结果（HTTP 读取的数据源）
+├── daemon_meta.json               # 周期元数据（归档记录）
+├── op_metric/                     # 检测输入快照（group_info_*.json / host_info_*.json / global_rank_*.csv）
+└── analysis_result/
+    └── detection_report.log       # 本轮 Profiler 文本报告
+```
+
+运行目录另有一份最新的 `straggler_output.json`（覆盖写，与一次性模式同形状）。
+
+- 查询接口读**进程内 store**（本次会话），daemon 重启后清空，不读磁盘历史；历史无条数上限，可用 `?limit=N` 截断。
+- `POST /daemon/stop` 会在优雅关闭后**删除整个 `daemon_results/`**（所有落盘结果一并清掉）。
+
+**`--debug-output` 调试输出**（排查"某卡为什么没被判异常"时使用；不额外生成文件，直接在现有结果里展示全量）：
 - KPI：`anomaly_metrics` 对全部 11 个指标列出其 `cards`（含正常的，`abnormal` 区分），正常卡 `score` 约 1.0。
 - Profiler：`node_result[]` 含所有节点、`comm_domain_result` 含所有通信组，正常卡/组 `score` 约 1.0，对照阈值可看出"为什么没被标"。
 
@@ -459,9 +529,9 @@ curl -s -X POST localhost:8080/daemon/stop
 
 | 报告 | 路径 | 内容 |
 |------|------|------|
-| Profiler 报告 | `path/analysis_result/detection_report.log` | 检测摘要表（4 类状态）、ZP_Kernel 跨 rank 排序柱状图、ZP_Host 跨节点对比（≥2 节点）、通信域分组对比 |
+| Profiler 报告 | `path/analysis_result/detection_report.log` | 头部（数据来源 / 生成时间 / 有效 rank 数）、检测摘要表（4 类状态，含计算类/通信类阈值）、计算类算子耗时排序（带劣化指数）、ZP_Host 跨节点对比（≥2 节点，慢CPU）、通信域分组对比（耗时 + 劣化指数，按耗时降序） |
 
-守护进程会把该报告归档到 `daemon_results/<start>/analysis_result/` 并经 `/straggler/report/{id}` 提供。KPI 无文本报告文件，文本仅打印到 stdout。
+守护进程会把该报告归档到 `daemon_results/<start>/analysis_result/` 并经 `/straggler/report/{id}` 提供。KPI 无文本报告文件，文本仅打印到 stdout。报告头部「数据来源」：守护进程/一次性模式为数据目录，中心节点模式为业务内所有守护进程的 `ip:port`（英文逗号分隔）。
 
 ### 6.3 stdout 摘要
 
@@ -476,7 +546,7 @@ Bubble (npu_bubble): 无异常
 
 ---
 
-## 八、CLI 参数参考
+## 七、CLI 参数参考
 
 ### 顶层参数（一次性模式）
 
@@ -509,8 +579,10 @@ Bubble (npu_bubble): 无异常
 |------|------|------|------|------|
 | `--center` | bool | 否 | 假 | 进入中心节点模式（管理多个业务/守护进程） |
 | `--center-port` | int | 否 | 8080 | 中心节点 HTTP 端口 |
-| `--center-data-dir` | string | 否 | center_data | 持久化根目录 |
+| `--center-data-dir` | string | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
 | `--center-interval` | int | 否 | 600 | 新业务默认触发周期（秒，≥60） |
+
+> 中心节点模式的 `degradation`（阈值基数）**每个业务独立**，新业务继承节点启动时的初始值，之后可在业务控制台动态调整（见[五、中心节点模式](#五中心节点模式)）。
 
 ### 阈值计算
 
@@ -519,9 +591,12 @@ KPI 模式:
   SpaceRatioThreshold = --space-ratio-threshold      # 默认 2.0（独立旋钮）
 
 Profiler 模式:
-  CalThreshold  = 1 + degradation                    # 慢计算/慢CPU 阈值（默认 1.3）
+  CalThreshold  = 1 + degradation                    # 慢计算阈值（默认 1.3）
+  CPUThreshold  = 1 + degradation × 5                # 慢CPU 阈值（默认 2.5）
   CommThreshold = 1 + degradation × 5                # 慢通信阈值（默认 2.5）
 ```
+
+> `degradation`（阈值基数）除了启动时用 CLI 设置初始值外，运行期还可通过守护进程/业务控制台或 API 动态调整（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)与[五、中心节点模式](#五中心节点模式)），只影响后续检测，不改写历史结果。
 
 ### KPI 内部配置（代码内默认值，非 CLI）
 
@@ -534,55 +609,7 @@ Profiler 模式:
 
 ---
 
-## 九、检测原理
-
-### 8.1 KPI 检测（resource/）
-
-```
-CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
-按指标分组异常卡(含空间劣化程度) → 合并 JSON
-```
-
-**指标注册表**（cluster 方向自适应，双方向标记数少者为异常）：
-
-| 指标 | 分类 | 空间方法 | 说明 |
-|------|------|---------|------|
-| `temp` | 计算 | cluster | 温度 (°C) |
-| `power` | 计算 | cluster | 功耗 (W) |
-| `aicore_freq` | 计算 | cluster | AI Core 频率 (MHz)，离散档位 |
-| `aicore_util` | 计算 | cluster | AI Core 利用率 (%) |
-| `hbm_bandwidth_util` | 计算 | cluster | HBM 带宽使用率 (%) |
-| `hbm_util` | 计算 | cluster | HBM 内存使用率 (%) |
-| `tx_bandwidth` | 通信 | cluster | TX 带宽 |
-| `rx_pfc_pkt` | 通信 | absolute | PFC 暂停帧（计数） |
-| `roce_tx_err_pkt` | 通信 | absolute | RoCE 发送错误包（计数） |
-| `roce_out_of_order` | 通信 | absolute | RoCE 乱序包（计数） |
-| `roce_new_pkt_rty` | 通信 | absolute | RoCE 重传包（计数） |
-
-**空间维度（peer 对比）**：只取全部数据的最后一个聚合点（时间维度/基线/检测窗口已移除）；peer 组 = 同一节点内的在场卡（跨节点不互比）。
-- **cluster（kmeans 比例）**：≤0 读数钳制到极小值 `zeroFloor=1e-3` 参与聚类 → z-score 标准化（std≈0 强制 1）→ 肘部法选 k → kmeans++ + Lloyd 迭代（固定种子，结果确定）→ 双方向各检一次（max：基线=最小均值簇；min：基线=最大均值簇）→ 标记数少的方向为异常、相等不上报 → 对选中方向异常簇递归精化。score = **簇均值 / 基线均值**（统一 min/max 两侧：max 侧 `> 阈值` 判异常，min 侧 `< 1/阈值` 判异常）；判定用递归 `Detect` 的标记，不随比值变化。
-- **absolute**：错误计数类指标，值 `> 0` 即异常。
-
-### 8.2 Profiler 检测（profiling/）
-
-```
-SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点聚合 → 合并 JSON
-```
-
-| 类别 | 数据 | 阈值/方向 | 说明 |
-|------|------|-----------|------|
-| 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向自适应 |
-| 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小卡为代表，按 PP stage 分桶后 kmeans |
-| 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取去 min/max 均值消除节点内差异 |
-| Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
-
-> cal / comm / cpu 统一走共享 `clustering` 包（kmeans 比例检测，与 KPI 空间 cluster 同一算法）；Bubble 走固定阈值。
-
-**中间产物（`op_metric/`）**：解析阶段在每个数据目录下生成每 rank 三件套——`group_info_{N}.json`（并行拓扑）、`host_info_{N}.json`（rank→hostUid）、`global_rank_{N}.csv`（各域通信耗时/计数 + ZP_* 指标）。守护进程会把每轮 `op_metric/` 归档到 `daemon_results/<start>/op_metric/` 供复查。
-
----
-
-## 十、边界情况
+## 八、边界情况
 
 | 场景 | 处理 |
 |------|------|
@@ -595,18 +622,19 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | JSONL 某天文件不存在 | 天然跳过（只读存在的文件） |
 | CSV 列不完整 | 缺失列告警但不阻断，对应 metric dict 为空 |
 | 仅 KPI 无 `path` | 只输出 KPI 结果（JSON 只有 `kpi` 键） |
-| KPI 检测失败（有 `path`） | 告警后继续执行 Profiler |
+| KPI 检测失败 | 只记录告警，不影响 Profiler 检查（互不阻塞） |
+| Profiler 检测失败 | 只记录错误，KPI 检查照常执行（互不阻塞） |
 | Profiler 单节点 | 慢CPU 无法检测，stdout 不显示该行 |
 | Profiler 无并行拓扑 | 降级为仅慢计算（cal-only）检测 |
 | `aicore_freq` 轻度降频 | 簇比例未超阈值 → 空间不标记（时间维度已移除，无其他兜底） |
 
 ---
 
-## 十一、目录结构
+## 九、目录结构
 
 ```
 straggler/
-├── main.go                 # 统一入口：CLI 解析、双模式编排、合并 JSON、--daemon 入口
+├── main.go                 # 统一入口：CLI 解析、三模式编排（一次性/守护进程/中心节点）、合并 JSON
 ├── daemon/                 # 守护进程：dynolog/dyno 采集 + 周期检测 + HTTP 查询/控制
 │   ├── daemon.go           #   运行循环（周期调度、生命周期、优雅退出）
 │   ├── dyno.go             #   dynolog 拉起 + dyno 触发校验 + python analyse 转 .db
@@ -616,25 +644,28 @@ straggler/
 ├── center/                 # 中心节点：业务管理 + 匹配/心跳 + 合并检测 + Web 控制台
 │   ├── center.go           #   Center 结构、持久化、Run 循环
 │   ├── manage.go           #   匹配、探测、触发、合并检测、上报接收
-│   ├── server.go           #   HTTP 路由（业务 CRUD / op_metric / results）
-│   ├── result.go           #   每业务检测结果目录定位
+│   ├── server.go           #   HTTP 路由（业务 CRUD / op_metric / results / vllm）
+│   ├── result.go           #   每业务检测结果目录定义
 │   ├── types.go            #   Business / Daemon / Config
+│   ├── metrics.go          #   vllm /metrics 抓取（TPOT/TTFT 时序，按 engine）
 │   ├── console.go          #   go:embed 控制台页面
-│   └── console.html        #   业务管理 Web 控制台（自包含）
+│   ├── console.html        #   业务管理 Web 控制台（自包含）
+│   ├── business.html       #   业务控制台（自包含）
+│   └── chart.umd.min.js    #   本地嵌入的 Chart.js（延迟指标图）
 ├── README.md               # 本文件
 ├── go.mod / go.sum         # 独立 Go module（依赖 modernc.org/sqlite）
 ├── build.sh                # 一键构建：架构/版本检查 + 装 dyno/dynolog + wheel + go build
 ├── 3rdparty/msmonitor/     # msmonitor 子模块（build.sh 优先从中构建 dynolog/wheel）
 ├── clustering/             # 共享 kmeans 比例检测算法
 │   └── kmeans.go
-├── resource/               # 第一道防线：KPI 资源指标检测
+├── resource/               # KPI 资源指标检测
 │   ├── types.go            #   数据结构 & 指标注册表 & 配置
 │   ├── parser.go           #   CSV / KPI 目录解析（node 感知全局卡号）
 │   ├── json_reader.go      #   CATMonitor straggler_kpi JSONL 读取
 │   ├── aggregator.go       #   10 秒聚合（裁剪均值 / 计数器增量）
 │   ├── space_detector.go   #   空间维度检测（peer 对比，最后一点）
 │   └── report.go           #   管线编排 + 文本报告（stdout）
-├── profiling/              # 第二道防线：Profiling 检测
+├── profiling/              # Profiling 检测
 │   ├── dataparse/          #   数据清洗（SQLite → CSV/JSON 中间件）
 │   │   ├── data_process.go
 │   │   ├── scenario_segregate.go
@@ -658,7 +689,7 @@ straggler/
 
 ---
 
-## 十二、设计文档
+## 十、设计文档
 
 - [DESIGN_NPU_RESOURCE.md](./DESIGN_NPU_RESOURCE.md) — KPI 资源指标检测设计
 - [DESIGN.md](./DESIGN.md) — Profiling 检测设计
