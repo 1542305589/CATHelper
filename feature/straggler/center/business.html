@@ -107,7 +107,7 @@
           <dt>已运行周期</dt><dd id="vTotal">—</dd>
           <dt>失败周期</dt><dd id="vFailed">—</dd>
           <dt>下次运行</dt><dd id="vNext">—</dd>
-          <dt>collect_wait</dt><dd id="vCollectWait">—</dd>
+          <dt>等待完成采集时间</dt><dd id="vCollectWait">—</dd>
         </dl>
       </div>
     </div>
@@ -137,7 +137,7 @@
       <h2>节点列表</h2>
       <div class="body">
         <table>
-          <thead><tr><th>节点</th><th>状态</th><th>collect_wait</th></tr></thead>
+          <thead><tr><th>节点</th><th>状态</th><th>等待完成采集时间</th></tr></thead>
           <tbody id="daemonBody"></tbody>
         </table>
       </div>
@@ -160,8 +160,8 @@
       <div class="tabs">
         <button id="tabProgress" class="active">检测进度</button>
         <button id="tabReport">检测报告</button>
-        <button id="tabResult">结果 JSON</button>
-        <button id="tabOpMetric">op_metric</button>
+        <button id="tabResult">检测结果（JSON格式）</button>
+        <button id="tabOpMetric">算法输入数据</button>
       </div>
       <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
     </div>
@@ -306,7 +306,7 @@ function loadCurrent() {
   const tab = activeTab();
   if (tab === 'progress') { loadProgressDetail(selectedTs); return; }
   if (selectedRunning) {
-    $('detail').textContent = '（本轮进行中，暂无检测报告 / 结果 JSON / op_metric）';
+    $('detail').textContent = '（本轮进行中，暂无检测报告 / 检测结果 / 算法输入数据）';
     return;
   }
   loadDetail(selectedTs, tab);

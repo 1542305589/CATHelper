@@ -150,7 +150,7 @@ function render(list) {
       </div>
       <div class="body" style="display:${expanded.has(b.name) ? '' : 'none'}">
         <table>
-          <thead><tr><th>守护进程</th><th>状态</th><th>collect_wait</th><th>操作</th></tr></thead>
+          <thead><tr><th>守护进程</th><th>状态</th><th>等待完成采集时间</th><th>操作</th></tr></thead>
           <tbody>${b.daemons.map(d => daemonRow(b.name, d)).join('')}</tbody>
         </table>
         <div class="row mt">

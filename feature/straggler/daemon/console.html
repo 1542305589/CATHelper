@@ -126,8 +126,8 @@
       <div class="tabs">
         <button id="tabProgress" class="active">检测进度</button>
         <button id="tabReport">检测报告</button>
-        <button id="tabResult">结果 JSON</button>
-        <button id="tabOpMetric">op_metric</button>
+        <button id="tabResult">检测结果（JSON格式）</button>
+        <button id="tabOpMetric">算法输入数据</button>
       </div>
       <div class="tab-body">
         <pre id="detail">请选择左侧历史周期查看详情。</pre>
@@ -263,7 +263,7 @@ function loadCurrent() {
   const tab = activeTab();
   if (tab === 'progress') { loadProgressDetail(selectedId); return; }
   if (selectedRunning) {
-    $('detail').textContent = '（本轮进行中，暂无检测报告 / 结果 JSON / op_metric）';
+    $('detail').textContent = '（本轮进行中，暂无检测报告 / 检测结果 / 算法输入数据）';
     return;
   }
   loadDetail(selectedId, tab);
@@ -297,7 +297,7 @@ async function loadDetail(id, tab) {
       $('detail').textContent = JSON.stringify(await r.json(), null, 2);
     } else if (tab === 'opMetric') {
       const r = await fetch('/straggler/op_metric/' + id);
-      if (!r.ok) throw new Error('op_metric 不可用：' + r.status);
+      if (!r.ok) throw new Error('算法输入数据不可用：' + r.status);
       $('detail').textContent = JSON.stringify(await r.json(), null, 2);
     }
   } catch (e) {
