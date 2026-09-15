@@ -17,13 +17,7 @@
   .wrap { display:grid; grid-template-columns:360px 1fr; gap:16px; padding:16px 20px; max-width:1500px; margin:0 auto; }
   @media (max-width:900px) { .wrap { grid-template-columns:1fr; } }
   .col { display:flex; flex-direction:column; gap:16px; min-width:0; }
-  .prog-split { display:grid; grid-template-columns:320px 1fr; }
-  @media (max-width:1200px) { .prog-split { grid-template-columns:1fr; } }
-  .prog-pane { border-right:1px solid var(--border); min-width:0; }
-  @media (max-width:1200px) { .prog-pane { border-right:none; border-bottom:1px solid var(--border); } }
-  .pane-head { font-size:13px; font-weight:600; padding:10px 14px; border-bottom:1px solid var(--border); }
-  .report-pane { min-width:0; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; }
   .card h2 { font-size:13px; margin:0; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; }
   .card .body { padding:12px 14px; }
   .kv { display:grid; grid-template-columns:110px 1fr; row-gap:6px; font-size:13px; }
@@ -59,9 +53,8 @@
   pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:65vh; overflow:auto; background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:20px; text-align:center; }
-  pre.term { height:300px; max-height:300px; background:#0b1220; border-radius:0; }
-  pre.term .ts { color:#64748b; }
-  .prog-split .tab-body pre { height:300px; max-height:300px; border-radius:0; }
+  #detail .ts { color:#94a3b8; }
+  #detail .phead { color:#e2e8f0; }
   .ptag { margin-left:8px; font-size:11px; font-weight:400; color:var(--muted); }
   .ptag.on { color:var(--green); }
   .toast { position:fixed; bottom:20px; right:20px; background:#111827; color:#fff; padding:10px 16px; border-radius:8px; font-size:13px; opacity:0; transform:translateY(8px); transition:all .2s; z-index:100; }
@@ -164,20 +157,13 @@
     </div>
 
     <div class="card">
-      <div class="prog-split">
-        <div class="prog-pane">
-          <div class="pane-head">本次采集进度 <span id="progressBadge" class="ptag">空闲</span></div>
-          <pre id="progress" class="term">等待检测开始…</pre>
-        </div>
-        <div class="report-pane">
-          <div class="tabs">
-            <button id="tabReport" class="active">检测报告</button>
-            <button id="tabResult">结果 JSON</button>
-            <button id="tabOpMetric">op_metric</button>
-          </div>
-          <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
-        </div>
+      <div class="tabs">
+        <button id="tabProgress" class="active">本次采集进度</button>
+        <button id="tabReport">检测报告</button>
+        <button id="tabResult">结果 JSON</button>
+        <button id="tabOpMetric">op_metric</button>
       </div>
+      <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
     </div>
   </div>
 </div>
@@ -189,6 +175,8 @@ const $ = id => document.getElementById(id);
 const parts = location.pathname.split('/');
 const BIZ = decodeURIComponent(parts[3] || '');
 let selectedTs = null;
+let selectedRunning = false;
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function stateLabel(s) {
   return {healthy:'已匹配', unmatched:'未匹配', other:'已和其他中心匹配', report_failed:'上报失败', disconnected:'断连'}[s] || s;
@@ -299,20 +287,47 @@ function renderHistory(cycles) {
 
 function select(ts, tr, running) {
   selectedTs = ts;
+  selectedRunning = !!running;
   document.querySelectorAll('#histBody tr').forEach(x => x.classList.remove('selected'));
   if (tr) tr.classList.add('selected');
-  refreshProgress();
-  if (running) {
-    $('detail').textContent = '（本轮进行中，暂无检测报告 / 结果 JSON / op_metric）';
-    return;
-  }
-  loadDetail(ts, activeTab());
+  loadCurrent();
 }
 
 function activeTab() {
+  if ($('tabReport').classList.contains('active')) return 'report';
   if ($('tabResult').classList.contains('active')) return 'result';
   if ($('tabOpMetric').classList.contains('active')) return 'op_metric';
-  return 'report';
+  return 'progress';
+}
+
+// Load the content for the active tab at the selected cycle (?ts).
+function loadCurrent() {
+  const tab = activeTab();
+  if (tab === 'progress') { loadProgressDetail(selectedTs); return; }
+  if (selectedRunning) {
+    $('detail').textContent = '（本轮进行中，暂无检测报告 / 结果 JSON / op_metric）';
+    return;
+  }
+  loadDetail(selectedTs, tab);
+}
+
+async function loadProgressDetail(ts) {
+  const q = ts ? ('?ts=' + encodeURIComponent(ts)) : '';
+  try {
+    renderProgress(await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/progress' + q));
+  } catch(e) { $('detail').textContent = '加载失败：' + e.message; }
+}
+
+function renderProgress(p) {
+  const pre = $('detail');
+  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  const lines = p.lines || [];
+  if (!lines.length) { pre.textContent = '暂无进度记录'; return; }
+  const head = p.cycle
+    ? `<span class="phead">周期 #${p.cycle}${p.in_flight ? ' · 进行中' : ''}</span>\n`
+    : '';
+  pre.innerHTML = head + lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n');
+  if (stick) pre.scrollTop = pre.scrollHeight;
 }
 
 async function loadDetail(ts, tab) {
@@ -484,40 +499,21 @@ $('btnDegradation').onclick = async () => {
   } catch(e) { toast('操作失败：' + e.message, false); }
 };
 
-['tabReport','tabResult','tabOpMetric'].forEach(id => {
+['tabProgress','tabReport','tabResult','tabOpMetric'].forEach(id => {
   $(id).onclick = () => {
-    ['tabReport','tabResult','tabOpMetric'].forEach(t => $(t).classList.remove('active'));
+    ['tabProgress','tabReport','tabResult','tabOpMetric'].forEach(t => $(t).classList.remove('active'));
     $(id).classList.add('active');
-    if (selectedTs != null) loadDetail(selectedTs, activeTab());
+    loadCurrent();
   };
 });
-
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-async function refreshProgress() {
-  const q = selectedTs ? ('?ts=' + encodeURIComponent(selectedTs)) : '';
-  try { renderProgress(await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/progress' + q)); } catch (e) {}
-}
-
-function renderProgress(p) {
-  const pre = $('progress'), badge = $('progressBadge');
-  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
-  const lines = p.lines || [];
-  pre.innerHTML = lines.length
-    ? lines.map(l => `<span class="ts">[${esc(l.ts)}]</span> ${esc(l.text)}`).join('\n')
-    : '暂无进度记录';
-  if (p.in_flight) { badge.textContent = '进行中 · 第 ' + p.cycle + ' 轮'; badge.className = 'ptag on'; }
-  else if (p.cycle) { badge.textContent = '第 ' + p.cycle + ' 轮'; badge.className = 'ptag'; }
-  else { badge.textContent = '空闲'; badge.className = 'ptag'; }
-  if (stick) pre.scrollTop = pre.scrollHeight;
-}
 
 refresh();
 setInterval(refresh, 5000);
 loadMetrics();
 setInterval(loadMetrics, 20000);
-refreshProgress();
-setInterval(refreshProgress, 1000);
+loadCurrent();
+// Keep the progress view live (1s) while it is the active tab.
+setInterval(() => { if (activeTab() === 'progress') loadProgressDetail(selectedTs); }, 1000);
 </script>
 </body>
 </html>
