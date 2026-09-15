@@ -93,6 +93,9 @@ func (c *Center) load() {
 	}
 	for _, b := range st.Businesses {
 		if b.Name != "" {
+			if b.Degradation <= 0 {
+				b.Degradation = c.cfg.Degradation
+			}
 			c.biz[b.Name] = b
 		}
 	}

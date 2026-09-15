@@ -46,7 +46,8 @@ type Business struct {
 	Paused       bool      `json:"paused,omitempty"`
 	CyclesTotal  int       `json:"cycles_total"`
 	CyclesFailed int       `json:"cycles_failed"`
-	VLLMMetrics  string    `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL (one per business)
+	VLLMMetrics  string    `json:"vllm_metrics,omitempty"`  // vllm /metrics endpoint URL (one per business)
+	Degradation  float64   `json:"degradation,omitempty"`   // merged-detection sensitivity (0 = inherit center default)
 
 	nextTrigger time.Time // next scheduled trigger (in-memory)
 	triggering  bool      // a trigger round is currently in flight (in-memory, single-flight)

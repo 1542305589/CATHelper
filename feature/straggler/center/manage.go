@@ -329,8 +329,8 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	defer os.RemoveAll(tmp)
 
 	config.FilePath = tmp
-	config.CalThreshold = 1 + c.cfg.Degradation
-	config.CommThreshold = 1 + c.cfg.Degradation*5
+	config.CalThreshold = 1 + b.Degradation
+	config.CommThreshold = 1 + b.Degradation*5
 
 	parallels, validRanks := detector.GetCurDetectionInfo(tmp)
 	if len(validRanks) == 0 {
@@ -342,7 +342,7 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	if err != nil {
 		return fmt.Errorf("build node result: %w", err)
 	}
-	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, c.cfg.Degradation)
+	reportText := report.GenerateReport(stepData, parallels, validRanks, result, b.Name, b.Degradation)
 
 	summary := map[string]int{
 		"cal":        len(result["cal"]),

@@ -93,6 +93,7 @@ type statusResponse struct {
 	State        string        `json:"state"`
 	IntervalSec  int64         `json:"interval_sec"`
 	CollectWait  int64         `json:"collect_wait"`
+	Degradation  float64       `json:"degradation"`
 	Managed      bool          `json:"managed"`
 	CenterAddr   string        `json:"center_addr,omitempty"`
 	ProfilerDir  string        `json:"profiler_dir"`

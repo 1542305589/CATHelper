@@ -32,6 +32,7 @@ type Daemon struct {
 	mu            sync.Mutex
 	state         string        // "running" | "paused" | "managed"
 	interval      time.Duration // current cycle period (POST /daemon/interval updates it)
+	degradation   float64       // current sensitivity (CLI initial, POST /daemon/degradation updates it)
 	nextRun       time.Time     // when the next cycle starts (zero when paused)
 	cycleID       int           // per-process id, starting from 1
 	cycleInFlight bool
@@ -68,9 +69,10 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		detect:   detect,
 		st:       newStore(),
 		logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
-		state:    "running",
-		interval: cfg.Interval,
-		stopCh:   make(chan struct{}),
+		state:       "running",
+		interval:    cfg.Interval,
+		degradation: cfg.Degradation,
+		stopCh:      make(chan struct{}),
 	}
 }
 
@@ -230,7 +232,12 @@ func (d *Daemon) runCycle(id int) {
 	cr.KPI, cr.KPIStatus = d.detectKPI()
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
-	res, derr := d.detect(root, d.cfg.Degradation, d.cfg.DebugOutput)
+	// degradation is runtime-adjustable via POST /daemon/degradation; snapshot it
+	// under the lock so a concurrent update cannot race the cycle.
+	d.mu.Lock()
+	deg := d.degradation
+	d.mu.Unlock()
+	res, derr := d.detect(root, deg, d.cfg.DebugOutput)
 	if derr != nil {
 		cr.Error = fmt.Sprintf("profiler detection: %v", derr)
 		return
@@ -461,6 +468,25 @@ func (d *Daemon) Start() {
 		d.nextRun = time.Now().Add(d.interval)
 		d.resetTimer()
 	}
+}
+
+// Degradation returns the current sensitivity (CalThreshold = 1 + degradation).
+func (d *Daemon) Degradation() float64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.degradation
+}
+
+// SetDegradation updates the sensitivity for subsequent cycles, validating
+// [0, 1). It does not touch already-completed results.
+func (d *Daemon) SetDegradation(v float64) error {
+	if v < 0 || v >= 1 {
+		return fmt.Errorf("degradation out of range [0, 1)")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.degradation = v
+	return nil
 }
 
 // SetInterval updates the cycle period, validating [60, 86400] seconds. The

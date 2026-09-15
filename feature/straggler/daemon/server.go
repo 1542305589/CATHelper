@@ -36,6 +36,8 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("POST /daemon/pause", d.handleDaemonPause)
 	mux.HandleFunc("POST /daemon/stop", d.handleDaemonStop)
 	mux.HandleFunc("POST /daemon/interval", d.handleDaemonInterval)
+	mux.HandleFunc("GET /daemon/degradation", d.handleDaemonGetDegradation)
+	mux.HandleFunc("POST /daemon/degradation", d.handleDaemonSetDegradation)
 	mux.HandleFunc("POST /daemon/trigger", d.handleDaemonTrigger)
 	mux.HandleFunc("POST /daemon/match", d.handleDaemonMatch)
 	mux.HandleFunc("POST /daemon/unmatch", d.handleDaemonUnmatch)
@@ -58,6 +60,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		State:        state,
 		IntervalSec:  int64(interval.Seconds()),
 		CollectWait:  int64(d.cfg.CollectWait.Seconds()),
+		Degradation:  d.Degradation(),
 		Managed:      managed,
 		CenterAddr:   centerAddr,
 		ProfilerDir:  d.cfg.ProfilerDir,
@@ -370,6 +373,34 @@ func (d *Daemon) handleDaemonInterval(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, struct {
 		IntervalSec int64 `json:"interval_sec"`
 	}{req.IntervalSec})
+}
+
+// handleDaemonGetDegradation returns the current sensitivity.
+func (d *Daemon) handleDaemonGetDegradation(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, struct {
+		Degradation float64 `json:"degradation"`
+	}{d.Degradation()})
+}
+
+// handleDaemonSetDegradation updates the sensitivity for subsequent cycles.
+func (d *Daemon) handleDaemonSetDegradation(w http.ResponseWriter, r *http.Request) {
+	if !d.requireManagedKey(w, r) {
+		return
+	}
+	var req struct {
+		Degradation float64 `json:"degradation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "无效请求体: {\"degradation\": 0.3}", http.StatusBadRequest)
+		return
+	}
+	if err := d.SetDegradation(req.Degradation); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, struct {
+		Degradation float64 `json:"degradation"`
+	}{req.Degradation})
 }
 
 func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {

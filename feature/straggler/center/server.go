@@ -37,6 +37,7 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/business/{name}/pause", c.handleBusinessPause)
 	mux.HandleFunc("POST /center/business/{name}/start", c.handleBusinessStart)
 	mux.HandleFunc("POST /center/business/{name}/interval", c.handleBusinessInterval)
+	mux.HandleFunc("POST /center/business/{name}/degradation", c.handleBusinessDegradation)
 	mux.HandleFunc("POST /center/business/{name}/vllm", c.handleSetVLLMMetrics)
 	mux.HandleFunc("DELETE /center/business/{name}/vllm", c.handleUnsetVLLMMetrics)
 	mux.HandleFunc("GET /center/business/{name}/metrics", c.handleBusinessMetrics)
@@ -73,6 +74,7 @@ type businessStatus struct {
 	NextTrigger  string         `json:"next_trigger,omitempty"`
 	CollectWait  int64          `json:"collect_wait"`           // max across the business's daemons
 	VLLMMetrics  string         `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL
+	Degradation  float64        `json:"degradation,omitempty"`  // merged-detection sensitivity
 	Daemons      []daemonStatus `json:"daemons"`
 }
 
@@ -112,6 +114,7 @@ func businessStatusOfLocked(b *Business) businessStatus {
 		CyclesTotal:  b.CyclesTotal,
 		CyclesFailed: b.CyclesFailed,
 		VLLMMetrics:  b.VLLMMetrics,
+		Degradation:  b.Degradation,
 		Daemons:      make([]daemonStatus, 0, len(b.Daemons)),
 	}
 	if !b.nextTrigger.IsZero() {
@@ -148,6 +151,9 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	b := &Business{Name: req.Name, IntervalSec: req.IntervalSec, Daemons: req.Daemons}
 	if b.Daemons == nil {
 		b.Daemons = []*Daemon{}
+	}
+	if b.Degradation <= 0 {
+		b.Degradation = c.cfg.Degradation
 	}
 	c.biz[req.Name] = b
 	c.save()
@@ -465,6 +471,28 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 	b.nextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
 	c.save()
 	writeJSON(w, map[string]any{"interval_sec": req.IntervalSec})
+}
+
+// handleBusinessDegradation updates a business's merged-detection sensitivity.
+// Only affects future detection rounds; past results are untouched.
+func (c *Center) handleBusinessDegradation(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Degradation float64 `json:"degradation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Degradation < 0 || req.Degradation >= 1 {
+		http.Error(w, `invalid body: {"degradation": 0.3}`, http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.Degradation = req.Degradation
+	c.save()
+	writeJSON(w, map[string]any{"degradation": req.Degradation})
 }
 
 // handleSetVLLMMetrics attaches a vllm /metrics endpoint URL to a business.
