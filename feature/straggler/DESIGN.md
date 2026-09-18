@@ -6,7 +6,9 @@
 ```go
 var FilePath string                                  // CLI path= 设置
 var CalThreshold float64                             // = 1 + degradation（默认 1.3）
-var CommThreshold float64                            // = 1 + degradation × 5（默认 2.5）
+var CPUThreshold float64                             // = 1 + degradation × 5（默认 2.5）
+var SlowCommRatio float64                            // 慢通信带宽劣化阈值（--comm-slow-ratio，默认 1.3）
+var SlowCommMinCount int                             // 带宽统计最小 op 计数（--comm-min-count，默认 1000）
 
 type DegradationData map[string]map[string]float64   // 类别 → (key → 劣化分数)
 func NewDegradationData() DegradationData
@@ -68,6 +70,7 @@ func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err erro
 - COMMUNICATION_OP.groupName 是 STRING_IDS 中组名字符串的 id；`parallel_group_info` 的**顶层 key**（长名，如 `"group_name_3"`）即 STRING_IDS 里的组名字符串，而每项的 `group_name` 字段是**短名**（如 `"tp"`）
 - `xpToGroupName` 以短名为键、长名为值；`idToXp` 反向映射为 **STRING_IDS id → 短名**，CSV 的域列以短名命名（`tp_Duration, tp_Count`），与 detector 的域常量一致
 - 某域在 STRING_IDS/COMMUNICATION_OP 中无算子 → 该域无列（正常，无数据可测）
+- **慢通信带宽回填列（`{domain}_<opType>_<count>`）**：解析完成后的全局回填 pass（`BackfillSlowDomainBandwidth`）重新扫 `.db` 对齐集合通信 op、按组内最短时长算带宽后追加写入 CSV；仅集合通信域产生，`pp` / `Send` / `Recv` 跳过，op 计数 < `SlowCommMinCount` 时不写。
 
 **三种数据缺失场景**：
 - `xpToGroupName` 为空 → 全部填充 -99999，ZP_Kernel/DataLoader 独立查询
@@ -118,18 +121,23 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 ```
 主检测组无可用并行域（组名未注册/仅未知域如 mc2）时，GetCalDetectionGroup 降级为**全体 rank 一组**（default_group），cal 仍可检测；comm/CPU/Bubble 无数据保持静默。
 
-#### 慢通信（detectionAllCommunicationParallel → HomogenizationForSlowCommunication）
+#### 慢通信（DetectSlowDomainByBandwidth，带宽比较）
 ```
-对每个非 PP/非 embd 域：
-  ppStageNum = len(parallels["pp"][0])（若无 PP 则为 1）
-  1. 每个子组内部排序，组间字典序排序
-  2. 每组取 {domain}_Duration 最小的卡为代表
-  3. detectionCards 按 ppStageNum 均分桶
-  4. 每桶内对代表卡做 kmeans 比例检测（方向 "max"）
-  5. 异常代表卡通过 rank2Group 映射回完整组
-  → AddGroup("comm", fullGroup, degradation)
+前置：dataparse.BackfillSlowDomainBandwidth 回填带宽列
+  重新扫 .db、重建拓扑，按 (opType, count) 对齐集合通信 op（跳过 pp / Send / Recv），
+  用组内最短时长算带宽（慢 rank 不等待，最短值最接近真实传输时间），
+  写入 CSV 动态列 {domain}_<opType>_<count>（仅 count ≥ SlowCommMinCount 的 op 参与）。
+
+检测：
+  对每个非 PP/非 embd 域（组数 < 2 跳过）：
+    收集每组所有 (opType, count) 带宽 → bwEntry
+    组两两配对：
+      对 a 的每个 combo，在 b 中找同 opType 且 count 比值 ≤ ±1.3× 的最优匹配
+      带宽 max/min ≥ SlowCommRatio → 记慢侧一个 degradation
+    慢侧 degradation 更多的一方 → AddGroup("comm", group, maxRatio)
 ```
-PP=1 时所有代表卡在同一桶，算法天然降级为普通聚类。
+- `slowCommMatchTolerance = 1.3`：count 容差，超出视为不可比。
+- 比较粒度仍是卡组；`SlowCommRatio` 默认 1.3、`SlowCommMinCount` 默认 1000（均 CLI 可调）。
 
 #### 慢CPU（getSlowHostRanksByHomogenize）
 ```
@@ -311,7 +319,7 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 | DataLoader 查询失败 | DataLoader = 0 |
 | Kernel 查询无数据 | ZP_Kernel = 0 |
 | 通信耗时 > step 总耗时 | ZP_Device 钳位到 0 + 警告 |
-| 某域在 STRING_IDS/COMMUNICATION_OP 无算子 | 该域无 Durations 列（不参与慢通信检测） |
+| 某域在 STRING_IDS/COMMUNICATION_OP 无算子 | 该域无带宽回填列（不参与慢通信检测） |
 | 组名未注册（无并行拓扑） | 降级 cal-only：validRanks 从 global_rank_*.csv 收集，全体 rank 一组检测慢计算；comm/CPU/Bubble 无数据不检测 |
 
 ## 日志前缀
@@ -470,7 +478,7 @@ master_<pid>_<ts>_ascend_pt），周期之间互不共享状态：
    删除不依赖结果写入是否成功
 ```
 
-`config.FilePath` / `CalThreshold` / `CommThreshold` 全局量按周期设置（FilePath 每周期 = --profiler-dir 根目录）。
+`config.FilePath` / `CalThreshold` / `CPUThreshold` / `SlowCommRatio` / `SlowCommMinCount` 全局量按周期设置（FilePath 每周期 = --profiler-dir 根目录）；`SlowCommRatio` / `SlowCommMinCount` 在启动时由 CLI 解析后设置一次。
 
 ### 与一次性模式的代码复用（main.go 重构点）
 

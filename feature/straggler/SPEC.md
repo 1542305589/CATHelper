@@ -81,8 +81,10 @@ KPI 模式:
   SpaceRatioThreshold = --space-ratio-threshold   # 默认 2.0（独立旋钮）
 
 Profiler 模式:
-  CalThreshold  = 1 + degradation                 # 慢计算/慢CPU（默认 1.3）
-  CommThreshold = 1 + degradation × 5             # 慢通信（默认 2.5）
+  CalThreshold     = 1 + degradation             # 慢计算（默认 1.3）
+  CPUThreshold     = 1 + degradation × 5         # 慢CPU（默认 2.5）
+  SlowCommRatio    = --comm-slow-ratio           # 慢通信带宽劣化阈值（默认 1.3）
+  SlowCommMinCount = --comm-min-count            # 带宽统计最小 op 计数（默认 1000）
 ```
 
 ---
@@ -354,21 +356,22 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 | `DataLoader` | MSTX_EVENTS 中 DataLoader 耗时 |
 | `{domain}_Duration` | 该并行域内通信算子平均耗时 |
 | `{domain}_Count` | 该并行域内通信算子平均计数 |
+| `{domain}_<opType>_<count>` | 回填的该域某类集合通信 op 的带宽（组内最短时长 / 数据量，仅集合通信域） |
 
 ### 2.5 检测类型
 
 | 类别 | 标签 | 指标 | 方向 | 阈值 | 结果粒度 |
 |------|------|------|------|------|---------|
 | 慢计算 | `cal` | ZP_Kernel | max | CalThreshold | 单卡 |
-| 慢通信 | `comm` | `{domain}_Duration`（各域独立） | max | CommThreshold | 卡组 |
-| 慢CPU | `cpu` | ZP_Host（按 hostUid 平滑预处理） | max | CalThreshold | 单卡 |
+| 慢通信 | `comm` | `{domain}_<opType>_<count>`（带宽，各域独立） | min | SlowCommRatio | 卡组 |
+| 慢CPU | `cpu` | ZP_Host（按 hostUid 平滑预处理） | max | CPUThreshold | 单卡 |
 | NPU Bubble | `npu_bubble` | ZP_Bubble | — | 固定 < 5000ns | 单卡 |
 
 #### 检测方法
 
 **慢计算**：对主检测组内每组卡，使用 ZP_Kernel（方向 max，值大 = 计算慢）；要求组内所有 rank 都有且 > 0，否则跳过该组（不降级）。组内有效卡 < 2 → 跳过该组。
 
-**慢通信**：对每个非 PP/非 embd 并行域，每组取通信时间最小的卡为代表，按 PP stage 分桶后均质化聚类（方向 max），异常代表卡映射回完整组上报。代表卡 < 2 或桶内 < 2 → 跳过该部分。
+**慢通信（带宽比较）**：解析完成后先做全局回填 —— 重新扫描 `.db`、重建并行拓扑，将各 rank 的集合通信 op 按 (opType, count) 对齐（跳过 pp / Send / Recv 点对点），用组内最短时长计算每类 op 的带宽，写入 CSV 动态列 `{domain}_<opType>_<count>`。检测时对每个非 PP/非 embd 域，把组两两配对：count 在 ±1.3× 容差内视为可比，带宽 `max/min ≥ SlowCommRatio`（默认 1.3）判该组在此 combo 劣化；劣化 combo 更多的一方判为慢通信组，写入 `comm`（复用 `comm_domain_result`）。组数 < 2 或无带宽列 → 跳过该域。
 
 **慢CPU**：从每张卡的 `.db` 文件读取 `HOST_INFO.hostUid`，将相同 hostUid 的卡视为同一物理节点。每组节点内计算去 min/max 的修剪均值（≤2 个则普通均值），覆盖原始值后均质化聚类（方向 max），消除节点内差异暴露节点间差异。旧版 profiler 缺少 HOST_INFO 表时对应卡跳过预处理，保留原始 ZP_Host 参与聚类。物理节点数 < 2 时该检测无意义，stdout 摘要整行不显示。
 
@@ -611,10 +614,10 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 | `main` | CLI 参数解析、双模式编排（KPI → Profiler 降级链）、合并 JSON 输出、daemon 启动时 PATH 解析 dyno/dynolog |
 | `daemon` | 守护进程：周期调度（dynolog/dyno 采集）、runCycle 编排、HTTP 查询/控制、结果落盘 |
 | `resource` | KPI 检测引擎：解析 → 聚合 → 空间检测 → 指标分组 → 报告 → JSON 导出 |
-| `clustering` | 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 均质化聚类共用） |
-| `config` | Profiler 全局配置（FilePath、CalThreshold、CommThreshold）、DegradationData 结果聚合 |
-| `profiling/dataparse` | SQLite `.db` 解析 → CSV + JSON 中间文件（含 host_info/npu_info） |
-| `profiling/detector` | 并行域拓扑解析、单步快照、四类检测逻辑、debug 诊断分 |
+| `clustering` | 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 慢计算/慢CPU 聚类共用） |
+| `config` | Profiler 全局配置（FilePath、CalThreshold、CPUThreshold、SlowCommRatio、SlowCommMinCount）、DegradationData 结果聚合 |
+| `profiling/dataparse` | SQLite `.db` 解析 → CSV + JSON 中间文件（含 host_info/npu_info）；含慢通信带宽回填 `slow_domain.go` |
+| `profiling/detector` | 并行域拓扑解析、单步快照、四类检测逻辑（慢通信走带宽比较 `slow_domain.go`）、debug 诊断分 |
 | `utils` | Profiler 结果写入（stdout 摘要 + 节点聚合结构） |
 | `report` | Profiler 文本报告生成 |
 
