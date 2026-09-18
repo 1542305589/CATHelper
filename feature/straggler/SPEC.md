@@ -371,7 +371,7 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 
 **慢计算**：对主检测组内每组卡，使用 ZP_Kernel（方向 max，值大 = 计算慢）；要求组内所有 rank 都有且 > 0，否则跳过该组（不降级）。组内有效卡 < 2 → 跳过该组。
 
-**慢通信（带宽比较）**：解析完成后先做全局回填 —— 重新扫描 `.db`、重建并行拓扑，将各 rank 的集合通信 op 按 (opType, count) 对齐（跳过 pp / Send / Recv 点对点），用组内最短时长计算每类 op 的带宽，写入 CSV 动态列 `{domain}_<opType>_<count>`。检测时对每个非 PP/非 embd 域，把组两两配对：count 在 ±1.3× 容差内视为可比，带宽 `max/min ≥ SlowCommRatio`（默认 1.3）判该组在此 combo 劣化；劣化 combo 更多的一方判为慢通信组，写入 `comm`（复用 `comm_domain_result`）。组数 < 2 或无带宽列 → 跳过该域。
+**慢通信（带宽聚类）**：解析完成后先做全局回填 —— 重新扫描 `.db`、重建并行拓扑，将各 rank 的集合通信 op 按 (opType, count) 对齐（跳过 pp / Send / Recv 点对点），用组内最短时长计算每类 op 的带宽，写入 CSV 动态列 `{domain}_<opType>_<count>`。检测时对每个非 PP/非 embd 域，对每个 (opType,count) 组合，收集各组带宽并用共享 kmeans 递归聚类（`clustering.Detect`，方向 min：带宽越小越慢，阈值 `SlowCommRatio` 默认 1.3）检出劣化组；某组缺该 combo 数据则跳过该组，只要参与聚类的带宽 ≥ 2 个就检测。然后**将该域所有 (opType,count) 判出的异常组的劣化指数（= 基线带宽/该组带宽，>1）放在一起比较，只选劣化指数最大的那一个组**上报为该域的通信异常，写入 `comm`（复用 `comm_domain_result`）。组数 < 2 或该域无带宽列 → 跳过。
 
 **慢CPU**：从每张卡的 `.db` 文件读取 `HOST_INFO.hostUid`，将相同 hostUid 的卡视为同一物理节点。每组节点内计算去 min/max 的修剪均值（≤2 个则普通均值），覆盖原始值后均质化聚类（方向 max），消除节点内差异暴露节点间差异。旧版 profiler 缺少 HOST_INFO 表时对应卡跳过预处理，保留原始 ZP_Host 参与聚类。物理节点数 < 2 时该检测无意义，stdout 摘要整行不显示。
 

@@ -73,8 +73,12 @@ func opSeqB(nm string) int {
 	return n
 }
 
+// isCollectiveOpKind reports whether an op kind is a collective (as opposed to
+// point-to-point Send/Recv). Case-insensitive so "hcom_send__" / "HcclSend__"
+// variants are all treated as point-to-point.
 func isCollectiveOpKind(k string) bool {
-	return k != p2pSendOp && k != p2pRecvOp
+	lk := strings.ToLower(k)
+	return lk != strings.ToLower(p2pSendOp) && lk != strings.ToLower(p2pRecvOp)
 }
 
 // ---------------------------------------------------------------------------

@@ -121,7 +121,7 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 ```
 主检测组无可用并行域（组名未注册/仅未知域如 mc2）时，GetCalDetectionGroup 降级为**全体 rank 一组**（default_group），cal 仍可检测；comm/CPU/Bubble 无数据保持静默。
 
-#### 慢通信（DetectSlowDomainByBandwidth，带宽比较）
+#### 慢通信（DetectSlowDomainByBandwidth，带宽 kmeans 递归聚类）
 ```
 前置：dataparse.BackfillSlowDomainBandwidth 回填带宽列
   重新扫 .db、重建拓扑，按 (opType, count) 对齐集合通信 op（跳过 pp / Send / Recv），
@@ -131,12 +131,14 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 检测：
   对每个非 PP/非 embd 域（组数 < 2 跳过）：
     收集每组所有 (opType, count) 带宽 → bwEntry
-    组两两配对：
-      对 a 的每个 combo，在 b 中找同 opType 且 count 比值 ≤ ±1.3× 的最优匹配
-      带宽 max/min ≥ SlowCommRatio → 记慢侧一个 degradation
-    慢侧 degradation 更多的一方 → AddGroup("comm", group, maxRatio)
+对每个 (opType, count) combo：
+    取各组该 combo 的带宽（缺数据的组跳过），≥ 2 个才聚类
+    clustering.Detect(bws, SlowCommRatio, min) 递归聚类 → 劣化组 + Ratio
+    劣化程度 = 1/Ratio（= 基线带宽/该组带宽，>1 越大越慢）
+  该域所有 combo 的异常组放在一起，只选劣化指数最大的一个 → AddGroup("comm", group, maxDeg)
 ```
-- `slowCommMatchTolerance = 1.3`：count 容差，超出视为不可比。
+- 带宽采用**方向 min**（带宽越小越慢）；匹配按 (opType, count) **严格相等**，无容差。
+- **每个并行域只报一个异常组**（各 combo 异常组中劣化指数最大者）。
 - 比较粒度仍是卡组；`SlowCommRatio` 默认 1.3、`SlowCommMinCount` 默认 1000（均 CLI 可调）。
 
 #### 慢CPU（getSlowHostRanksByHomogenize）

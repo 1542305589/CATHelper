@@ -38,14 +38,15 @@ func TestOpSeqB(t *testing.T) {
 }
 
 func TestIsCollectiveOpKind(t *testing.T) {
-	if isCollectiveOpKind("Send") {
-		t.Error("Send should not be collective")
+	for _, k := range []string{"Send", "send", "SEND", "Recv", "recv", "RECV"} {
+		if isCollectiveOpKind(k) {
+			t.Errorf("%q should not be collective", k)
+		}
 	}
-	if isCollectiveOpKind("Recv") {
-		t.Error("Recv should not be collective")
-	}
-	if !isCollectiveOpKind("allReduce") || !isCollectiveOpKind("AllGather") {
-		t.Error("allReduce / AllGather should be collective")
+	for _, k := range []string{"allReduce", "AllGather", "ReduceScatter"} {
+		if !isCollectiveOpKind(k) {
+			t.Errorf("%q should be collective", k)
+		}
 	}
 }
 
