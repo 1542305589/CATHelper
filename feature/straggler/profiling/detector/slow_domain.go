@@ -13,11 +13,16 @@ import (
 //
 // The dataparse backfill pass writes per-(opType,count) bandwidths into the CSV
 // as dynamic columns "<domain>_<opType>_<count>". For each collective parallel
-// domain, we take each (opType,count) combo and cluster the per-group bandwidth
-// of that combo with the shared kmeans recursive detector (min direction: lower
-// bandwidth is slower) using SlowCommRatio as the threshold. A group is
-// reported when it is flagged on at least one combo; its reported degradation
-// is the largest ratio across all its flagged combos.
+// domain and each opType, we:
+//  1. take, per group, the entry with the largest count as its representative
+//     (a larger count reflects the true bandwidth better);
+//  2. take the max of those representative counts and drop any group whose
+//     representative count is below that max's decimal magnitude;
+//  3. cluster the remaining representative bandwidths with the shared kmeans
+//     recursive detector (min direction: lower bandwidth is slower), using
+//     SlowCommRatio as the threshold (default 1.3);
+//  4. across all opTypes of the domain, report only the single group with the
+//     largest degradation.
 // ---------------------------------------------------------------------------
 
 // bwEntry is one group's (opType × count) bandwidth.
@@ -27,10 +32,9 @@ type bwEntry struct {
 	bw     float64
 }
 
-// DetectSlowDomainByBandwidth flags slow communication groups for every
-// collective parallel domain by clustering per-(opType,count) bandwidths with
-// the shared kmeans detector. Slow groups are written into the "comm" category
-// (reusing comm_domain_result).
+// DetectSlowDomainByBandwidth flags the slowest communication group per
+// collective parallel domain using the shared kmeans detector. The slow group
+// is written into the "comm" category (reusing comm_domain_result).
 func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[string]map[int]float64, localResult config.DegradationData) {
 	ratio := config.SlowCommRatio
 	if ratio <= 0 {
@@ -51,40 +55,63 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 			groupBWs[i] = bwSetForGroup(domain, group, stepData)
 		}
 
-		// Collect every (opType,count) combo across the domain, together with
-		// the (group index, bandwidth) of each group that has it.
-		type comboKey struct {
-			opType string
-			count  int
-		}
-		type comboEntry struct {
-			groupIdx int
-			bw       float64
-		}
-		comboMap := make(map[comboKey][]comboEntry)
-		for gi, bws := range groupBWs {
-			for _, e := range bws {
-				k := comboKey{e.opType, e.count}
-				comboMap[k] = append(comboMap[k], comboEntry{groupIdx: gi, bw: e.bw})
-			}
-		}
-
-		// Across ALL combos of this domain, collect every flagged group's
-		// degradation and report only the single group with the largest one.
 		bestGroup := -1
 		bestDeg := 0.0
 
-		for _, entries := range comboMap {
-			if len(entries) < 2 {
-				continue // need ≥2 groups with this combo to cluster
+		for opType := range collectOpTypes(groupBWs) {
+			// Representative per group: the entry with the largest count.
+			type rep struct {
+				groupIdx int
+				count    int
+				bw       float64
 			}
-			bws := make([]float64, len(entries))
-			for i, e := range entries {
-				bws[i] = e.bw
+			var reps []rep
+			for gi, bws := range groupBWs {
+				maxC := -1
+				var maxBW float64
+				for _, e := range bws {
+					if e.opType != opType || e.count <= maxC {
+						continue
+					}
+					maxC = e.count
+					maxBW = e.bw
+				}
+				if maxC >= 0 {
+					reps = append(reps, rep{groupIdx: gi, count: maxC, bw: maxBW})
+				}
 			}
-			// min direction: lower bandwidth = slower = anomalous.
+			if len(reps) < 2 {
+				continue
+			}
+
+			// Max representative count and its decimal magnitude.
+			maxCount := 0
+			for _, r := range reps {
+				if r.count > maxCount {
+					maxCount = r.count
+				}
+			}
+			mag := magnitudeOf(maxCount)
+
+			// Drop groups whose representative count is below the magnitude
+			// (data too small to reflect true bandwidth).
+			var kept []rep
+			for _, r := range reps {
+				if r.count >= mag {
+					kept = append(kept, r)
+				}
+			}
+			if len(kept) < 2 {
+				continue
+			}
+
+			// Cluster the remaining representative bandwidths (min direction).
+			bws := make([]float64, len(kept))
+			for i, r := range kept {
+				bws[i] = r.bw
+			}
 			for _, r := range clustering.Detect(bws, ratio, false) {
-				gi := entries[r.Index].groupIdx
+				gi := kept[r.Index].groupIdx
 				deg := 1.0 / r.Ratio // baseline/value → >1, larger = slower
 				if deg > bestDeg {
 					bestDeg = deg
@@ -97,6 +124,31 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 			localResult.AddGroup("comm", groups[bestGroup], bestDeg)
 		}
 	}
+}
+
+// collectOpTypes returns the distinct op types across all groups of a domain.
+func collectOpTypes(groupBWs [][]bwEntry) map[string]bool {
+	s := make(map[string]bool)
+	for _, bws := range groupBWs {
+		for _, e := range bws {
+			s[e.opType] = true
+		}
+	}
+	return s
+}
+
+// magnitudeOf returns the decimal magnitude of v: 1, 10, 100, 1000, ...
+// (i.e. 10^floor(log10(v))).
+func magnitudeOf(v int) int {
+	if v < 1 {
+		return 1
+	}
+	m := 1
+	for v >= 10 {
+		v /= 10
+		m *= 10
+	}
+	return m
 }
 
 // bwSetForGroup collects the bandwidth for every (opType,count) column of one
