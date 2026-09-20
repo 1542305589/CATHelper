@@ -11,9 +11,7 @@ func resetSlowCommConfig() {
 	config.SlowCommMinCount = 1000
 }
 
-// TestParseBandwidthCol verifies dynamic column-name parsing: it must accept
-// "<opType>_<count>" bandwidth columns and reject the diagnostic Duration/Count
-// columns and any non-numeric tail.
+// TestParseBandwidthCol verifies dynamic column-name parsing.
 func TestParseBandwidthCol(t *testing.T) {
 	prefix := "tp_"
 	cases := []struct {
@@ -27,7 +25,7 @@ func TestParseBandwidthCol(t *testing.T) {
 		{"tp_Duration", "", 0, false},
 		{"tp_Count", "", 0, false},
 		{"tp_foo", "", 0, false},
-		{"dp_allGather_4096", "", 0, false}, // wrong domain prefix
+		{"dp_allGather_4096", "", 0, false},
 	}
 	for _, c := range cases {
 		op, cnt, ok := parseBandwidthCol(prefix, c.col)
@@ -38,21 +36,10 @@ func TestParseBandwidthCol(t *testing.T) {
 	}
 }
 
-func TestMagnitudeOf(t *testing.T) {
-	cases := map[int]int{5: 1, 50: 10, 500: 100, 1000: 1000, 5000: 1000, 100000: 100000, 250000: 100000}
-	for v, want := range cases {
-		if got := magnitudeOf(v); got != want {
-			t.Errorf("magnitudeOf(%d) = %d, want %d", v, got, want)
-		}
-	}
-}
-
 // TestDetectSlowDomainByBandwidth flags the low-bandwidth group via kmeans.
 func TestDetectSlowDomainByBandwidth(t *testing.T) {
 	resetSlowCommConfig()
-	parallels := map[string][][]int{
-		"tp": {{0, 1}, {2, 3}},
-	}
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}}}
 	stepData := map[string]map[int]float64{
 		"tp_allReduce_1000": {0: 5.0, 1: 5.0, 2: 20.0, 3: 20.0},
 	}
@@ -61,12 +48,12 @@ func TestDetectSlowDomainByBandwidth(t *testing.T) {
 
 	comm := res["comm"]
 	if len(comm) != 1 {
-		t.Fatalf("comm result = %v, want 1 entry", comm)
+		t.Fatalf("comm = %v, want 1 entry", comm)
 	}
 	if v, ok := comm["0,1"]; !ok {
-		t.Errorf("expected slow group 0,1, got %v", comm)
+		t.Errorf("expected group 0,1, got %v", comm)
 	} else if v < 1.0 {
-		t.Errorf("degradation should be >1 (baseline/value), got %v", v)
+		t.Errorf("degradation should be >1, got %v", v)
 	}
 }
 
@@ -74,94 +61,109 @@ func TestDetectSlowDomainByBandwidth(t *testing.T) {
 // entry as its bandwidth representative (ignoring a small-count anomaly).
 func TestDetectSlowDomainMaxCountRepresentative(t *testing.T) {
 	resetSlowCommConfig()
-	parallels := map[string][][]int{
-		"tp": {{0, 1}, {2, 3}},
-	}
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}}}
 	stepData := map[string]map[int]float64{
-		// group 0 slow only on the SMALL count; big count is normal.
-		"tp_allReduce_1000": {0: 5.0, 1: 5.0, 2: 100.0, 3: 100.0},
+		"tp_allReduce_1000": {0: 5.0, 1: 5.0, 2: 100.0, 3: 100.0}, // small count slow
 		"tp_allReduce_2000": {0: 100.0, 1: 100.0, 2: 100.0, 3: 100.0},
 	}
 	res := config.NewDegradationData()
 	DetectSlowDomainByBandwidth(parallels, stepData, res)
 	if got := res["comm"]; len(got) != 0 {
-		t.Errorf("expected no slow comm (representative = max count 2000), got %v", got)
+		t.Errorf("expected no slow (representative = max count 2000), got %v", got)
 	}
 }
 
-// TestDetectSlowDomainMagnitudeFilter drops groups whose representative count is
-// below the max count's magnitude, so the tiny-count group never participates.
-func TestDetectSlowDomainMagnitudeFilter(t *testing.T) {
+// TestDetectSlowDomainHalfRangeFilter drops groups whose representative count
+// is below 50% of the largest count.
+func TestDetectSlowDomainHalfRangeFilter(t *testing.T) {
 	resetSlowCommConfig()
-	parallels := map[string][][]int{
-		"tp": {{0, 1}, {2, 3}, {4, 5}},
-	}
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}, {4, 5}}}
 	stepData := map[string]map[int]float64{
-		// group 0 slow on count 5000; group 2 super-slow but count 500 (<1000).
 		"tp_allReduce_5000": {0: 20, 1: 20, 2: 100, 3: 100},
-		"tp_allReduce_500":  {4: 1, 5: 1},
+		"tp_allReduce_2000": {4: 1, 5: 1}, // count 2000 < 5000*0.5 → filtered out
 	}
 	res := config.NewDegradationData()
 	DetectSlowDomainByBandwidth(parallels, stepData, res)
 
 	comm := res["comm"]
-	if len(comm) != 1 {
-		t.Fatalf("comm result = %v, want 1 entry", comm)
-	}
 	if _, ok := comm["0,1"]; !ok {
-		t.Errorf("expected slow group 0,1, got %v", comm)
+		t.Fatalf("expected group 0,1, got %v", comm)
 	}
 	if _, ok := comm["4,5"]; ok {
-		t.Errorf("group 4,5 (count 500) should be filtered out, got %v", comm)
+		t.Errorf("group 4,5 (count 2000) should be filtered out, got %v", comm)
 	}
 }
 
-// TestDetectSlowDomainReportsSingleGroup reports only ONE group per domain —
-// the largest-degradation one — even when different opTypes flag different
-// groups.
-func TestDetectSlowDomainReportsSingleGroup(t *testing.T) {
+// TestDetectSlowDomainAllOpsAnomalous reports a group only when it is anomalous
+// on EVERY opType of the domain.
+func TestDetectSlowDomainAllOpsAnomalous(t *testing.T) {
 	resetSlowCommConfig()
-	parallels := map[string][][]int{
-		"tp": {{0, 1}, {2, 3}, {4, 5}, {6, 7}},
-	}
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}}}
 	stepData := map[string]map[int]float64{
-		"tp_allReduce_5000": {0: 20, 1: 20, 2: 100, 3: 100, 4: 100, 5: 100, 6: 100, 7: 100},
-		"tp_allGather_5000": {0: 100, 1: 100, 2: 50, 3: 50, 4: 100, 5: 100, 6: 100, 7: 100},
+		"tp_allReduce_1000": {0: 5, 1: 5, 2: 20, 3: 20}, // group 0 slow
+		"tp_allGather_1000": {0: 5, 1: 5, 2: 20, 3: 20}, // group 0 slow
+	}
+	res := config.NewDegradationData()
+	DetectSlowDomainByBandwidth(parallels, stepData, res)
+	if _, ok := res["comm"]["0,1"]; !ok {
+		t.Errorf("expected group 0,1 (slow on all ops), got %v", res["comm"])
+	}
+}
+
+// TestDetectSlowDomainPartialOpsNotReported does NOT report a group that is
+// anomalous on only some opTypes.
+func TestDetectSlowDomainPartialOpsNotReported(t *testing.T) {
+	resetSlowCommConfig()
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}}}
+	stepData := map[string]map[int]float64{
+		"tp_allReduce_1000": {0: 5, 1: 5, 2: 20, 3: 20},  // group 0 slow
+		"tp_allGather_1000": {0: 20, 1: 20, 2: 20, 3: 20}, // group 0 normal
+	}
+	res := config.NewDegradationData()
+	DetectSlowDomainByBandwidth(parallels, stepData, res)
+	if got := res["comm"]; len(got) != 0 {
+		t.Errorf("expected no report (group 0 not slow on all ops), got %v", got)
+	}
+}
+
+// TestDetectSlowDomainReportsMultipleGroups can report more than one group when
+// multiple groups are anomalous on every opType.
+func TestDetectSlowDomainReportsMultipleGroups(t *testing.T) {
+	resetSlowCommConfig()
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}, {4, 5}}}
+	stepData := map[string]map[int]float64{
+		"tp_allReduce_1000": {0: 5, 1: 5, 2: 20, 3: 20, 4: 5, 5: 5}, // groups 0,2 slow
 	}
 	res := config.NewDegradationData()
 	DetectSlowDomainByBandwidth(parallels, stepData, res)
 
 	comm := res["comm"]
-	if len(comm) != 1 {
-		t.Fatalf("comm result = %v, want exactly 1 entry", comm)
-	}
 	if _, ok := comm["0,1"]; !ok {
-		t.Fatalf("expected group 0,1 (allReduce 5x) to win over group 2,3 (allGather 2x), got %v", comm)
+		t.Errorf("expected group 0,1, got %v", comm)
+	}
+	if _, ok := comm["4,5"]; !ok {
+		t.Errorf("expected group 4,5, got %v", comm)
 	}
 }
 
 // TestDetectSlowDomainByBandwidthNoSlow leaves near-equal bandwidth un-flagged.
 func TestDetectSlowDomainByBandwidthNoSlow(t *testing.T) {
 	resetSlowCommConfig()
-	parallels := map[string][][]int{
-		"tp": {{0, 1}, {2, 3}},
-	}
+	parallels := map[string][][]int{"tp": {{0, 1}, {2, 3}}}
 	stepData := map[string]map[int]float64{
 		"tp_allReduce_1000": {0: 100, 1: 100, 2: 101, 3: 101},
 	}
 	res := config.NewDegradationData()
 	DetectSlowDomainByBandwidth(parallels, stepData, res)
 	if got := res["comm"]; len(got) != 0 {
-		t.Errorf("expected no slow comm, got %v", got)
+		t.Errorf("expected no slow, got %v", got)
 	}
 }
 
 // TestDetectSlowDomainByBandwidthSkipsPP skips the point-to-point pp domain.
 func TestDetectSlowDomainByBandwidthSkipsPP(t *testing.T) {
 	resetSlowCommConfig()
-	parallels := map[string][][]int{
-		"pp": {{0, 1}, {2, 3}},
-	}
+	parallels := map[string][][]int{"pp": {{0, 1}, {2, 3}}}
 	stepData := map[string]map[int]float64{
 		"pp_allReduce_1000": {0: 5, 1: 5, 2: 20, 3: 20},
 	}

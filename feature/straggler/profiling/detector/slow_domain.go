@@ -16,13 +16,13 @@ import (
 // domain and each opType, we:
 //  1. take, per group, the entry with the largest count as its representative
 //     (a larger count reflects the true bandwidth better);
-//  2. take the max of those representative counts and drop any group whose
-//     representative count is below that max's decimal magnitude;
+//  2. take the max of those representative counts and keep only the groups
+//     whose count is within -50% of that max (count >= max*0.5);
 //  3. cluster the remaining representative bandwidths with the shared kmeans
 //     recursive detector (min direction: lower bandwidth is slower), using
 //     SlowCommRatio as the threshold (default 1.3);
-//  4. across all opTypes of the domain, report only the single group with the
-//     largest degradation.
+//  4. a group is reported only when it is anomalous on EVERY opType of the
+//     domain; its reported degradation is the largest across those opTypes.
 // ---------------------------------------------------------------------------
 
 // bwEntry is one group's (opType × count) bandwidth.
@@ -32,9 +32,9 @@ type bwEntry struct {
 	bw     float64
 }
 
-// DetectSlowDomainByBandwidth flags the slowest communication group per
-// collective parallel domain using the shared kmeans detector. The slow group
-// is written into the "comm" category (reusing comm_domain_result).
+// DetectSlowDomainByBandwidth flags slow communication groups per collective
+// parallel domain using the shared kmeans detector. A group must be anomalous
+// on every opType to be reported (reusing comm_domain_result).
 func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[string]map[int]float64, localResult config.DegradationData) {
 	ratio := config.SlowCommRatio
 	if ratio <= 0 {
@@ -55,10 +55,16 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 			groupBWs[i] = bwSetForGroup(domain, group, stepData)
 		}
 
-		bestGroup := -1
-		bestDeg := 0.0
+		opTypes := collectOpTypes(groupBWs)
+		if len(opTypes) == 0 {
+			continue
+		}
 
-		for opType := range collectOpTypes(groupBWs) {
+		// anomalous[groupIdx][opType] = degradation (>1), only for flagged
+		// (group, opType) pairs.
+		anomalous := make(map[int]map[string]float64)
+
+		for opType := range opTypes {
 			// Representative per group: the entry with the largest count.
 			type rep struct {
 				groupIdx int
@@ -84,20 +90,18 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 				continue
 			}
 
-			// Max representative count and its decimal magnitude.
+			// Keep only groups within -50% of the largest representative count.
 			maxCount := 0
 			for _, r := range reps {
 				if r.count > maxCount {
 					maxCount = r.count
 				}
 			}
-			mag := magnitudeOf(maxCount)
+			half := float64(maxCount) * 0.5
 
-			// Drop groups whose representative count is below the magnitude
-			// (data too small to reflect true bandwidth).
 			var kept []rep
 			for _, r := range reps {
-				if r.count >= mag {
+				if float64(r.count) >= half {
 					kept = append(kept, r)
 				}
 			}
@@ -113,15 +117,26 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 			for _, r := range clustering.Detect(bws, ratio, false) {
 				gi := kept[r.Index].groupIdx
 				deg := 1.0 / r.Ratio // baseline/value → >1, larger = slower
-				if deg > bestDeg {
-					bestDeg = deg
-					bestGroup = gi
+				if anomalous[gi] == nil {
+					anomalous[gi] = map[string]float64{}
 				}
+				anomalous[gi][opType] = deg
 			}
 		}
 
-		if bestGroup >= 0 {
-			localResult.AddGroup("comm", groups[bestGroup], bestDeg)
+		// Report only groups anomalous on EVERY opType of the domain, with the
+		// largest degradation across those opTypes.
+		for gi, opDegs := range anomalous {
+			if len(opDegs) != len(opTypes) {
+				continue
+			}
+			maxDeg := 0.0
+			for _, deg := range opDegs {
+				if deg > maxDeg {
+					maxDeg = deg
+				}
+			}
+			localResult.AddGroup("comm", groups[gi], maxDeg)
 		}
 	}
 }
@@ -135,20 +150,6 @@ func collectOpTypes(groupBWs [][]bwEntry) map[string]bool {
 		}
 	}
 	return s
-}
-
-// magnitudeOf returns the decimal magnitude of v: 1, 10, 100, 1000, ...
-// (i.e. 10^floor(log10(v))).
-func magnitudeOf(v int) int {
-	if v < 1 {
-		return 1
-	}
-	m := 1
-	for v >= 10 {
-		v /= 10
-		m *= 10
-	}
-	return m
 }
 
 // bwSetForGroup collects the bandwidth for every (opType,count) column of one
