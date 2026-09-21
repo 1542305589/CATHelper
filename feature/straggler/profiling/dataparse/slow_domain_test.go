@@ -5,22 +5,35 @@ import (
 	"testing"
 )
 
-func TestOpKind(t *testing.T) {
+func TestPureCommKind(t *testing.T) {
 	cases := []struct {
 		name string
 		want string
 	}{
-		{"hcom_allReduce__503_96_4", "allReduce"},
-		{"hcom_allGather__182_142_4", "allGather"},
-		{"hcom_reduceScatter__182_140_4", "reduceScatter"},
-		{"HcclAllreduce__12_3_2", "Allreduce"},
-		{"HcclAllGather__9_1_2", "AllGather"},
-		{"reduceScatterFallbackName", "ReduceScatter"},
-		{"allGatherFallbackName", "AllGather"},
+		{"hcom_allGather_AicpuKernel_503_483_1", "allgather"},
+		{"HcclAllGather", "allgather"},
+		{"hcom_allgather_v2_2_1", "allgather"},
+		{"HcclAllGatherv", "allgatherv"},
+		{"HcclAllGatherBase", "allgatherbase"},
+		{"HcclAlltoAll", "alltoall"},
+		{"hcom_alltoall_AicpuKernel_503_1_1", "alltoall"},
+		{"HcclAlltoAllv", "alltoallv"},
+		{"HcclAlltoAllSingle", "alltoallsingle"},
+		{"HcclBroadcast", "broadcast"},
+		{"hcom_broadcast_123_1_1", "broadcast"},
+		{"hcom_scatter_123_1_1", "scatter"},
+		{"hcom_gather_123_1_1", "gather"},
+		// Non-whitelist names → "".
+		{"hcom_reduceScatter_AicpuKernel_503_490_1", ""},
+		{"hcom_allReduce__503_96_4", ""},
+		{"HcclAllreduce", ""},
+		{"HcclReduceScatter", ""},
+		{"hcom_send_1_2_1", ""},
+		{"hcom_recv_1_2_1", ""},
 	}
 	for _, c := range cases {
-		if got := opKind(c.name); got != c.want {
-			t.Errorf("opKind(%q) = %q, want %q", c.name, got, c.want)
+		if got := pureCommKind(c.name); got != c.want {
+			t.Errorf("pureCommKind(%q) = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
@@ -34,19 +47,6 @@ func TestOpSeqB(t *testing.T) {
 	}
 	if got := opSeqB("HcclAllreduce"); got != -1 {
 		t.Errorf("opSeqB = %d, want -1 (no sequence marker)", got)
-	}
-}
-
-func TestIsCollectiveOpKind(t *testing.T) {
-	for _, k := range []string{"Send", "send", "SEND", "Recv", "recv", "RECV"} {
-		if isCollectiveOpKind(k) {
-			t.Errorf("%q should not be collective", k)
-		}
-	}
-	for _, k := range []string{"allReduce", "AllGather", "ReduceScatter"} {
-		if !isCollectiveOpKind(k) {
-			t.Errorf("%q should be collective", k)
-		}
 	}
 }
 

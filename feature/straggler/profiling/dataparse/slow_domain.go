@@ -35,30 +35,62 @@ import (
 const (
 	ppDomainName         = "pp"
 	embdDomainName       = "embd"
-	p2pSendOp            = "Send"
-	p2pRecvOp            = "Recv"
 	wallclockToleranceNs = 5e6 // 5 ms: tolerate tiny phase differences / long-op misalignment
 )
 
-// Op-name parsing (mirrors slow-domain-detect skill).
-var (
-	opTypeRe = regexp.MustCompile(`^(?:hcom|Hccl)_?([A-Za-z]+)__`)
-	seqBRe   = regexp.MustCompile(`__\d+_(\d+)_\d+$`)
-)
+// seqBRe extracts the sequence index "B" from an op name ("hcom_xxx__A_B_C").
+var seqBRe = regexp.MustCompile(`__\d+_(\d+)_\d+$`)
 
-// opKind extracts the collective operator type from an op name, e.g.
-// "hcom_allReduce__503_96_4" -> "allReduce", "HcclAllreduce" -> "Allreduce".
-func opKind(nm string) string {
-	if m := opTypeRe.FindStringSubmatch(nm); m != nil {
-		return m[1]
+// pureCommTypes is the PURE_COMM_TYPES whitelist: only these pure-collective
+// operator families participate in slow-communication bandwidth detection.
+var pureCommTypes = map[string]bool{
+	"allgather":      true,
+	"allgatherv":     true,
+	"allgatherbase":  true,
+	"alltoall":       true,
+	"alltoallv":      true,
+	"alltoallsingle": true,
+	"broadcast":      true,
+	"scatter":        true,
+	"gather":         true,
+}
+
+// pureCommKind normalizes an op name to its pure-collective token, or "" when
+// it is not in the whitelist (allReduce/reduceScatter/Send/Recv and unknown
+// names all yield "" and are skipped). Matching: strip the vendor prefix
+// (hcom/Hccl/acl, with optional "_"), take the leading run of letters, then
+// lowercase and look it up.
+func pureCommKind(nm string) string {
+	s := stripVendorPrefix(nm)
+	s = leadingLetters(s)
+	s = strings.ToLower(s)
+	if pureCommTypes[s] {
+		return s
 	}
-	if strings.Contains(nm, "reduceScatter") {
-		return "ReduceScatter"
-	}
-	if strings.Contains(nm, "allGather") {
-		return "AllGather"
+	return ""
+}
+
+func stripVendorPrefix(nm string) string {
+	lower := strings.ToLower(nm)
+	for _, p := range []string{"hcom", "hccl", "acl"} {
+		if strings.HasPrefix(lower, p) {
+			return strings.TrimPrefix(nm[len(p):], "_")
+		}
 	}
 	return nm
+}
+
+func leadingLetters(s string) string {
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			i++
+		} else {
+			break
+		}
+	}
+	return s[:i]
 }
 
 // opSeqB extracts the sequence index "B" from an op name
@@ -71,14 +103,6 @@ func opSeqB(nm string) int {
 	}
 	n, _ := strconv.Atoi(m[1])
 	return n
-}
-
-// isCollectiveOpKind reports whether an op kind is a collective (as opposed to
-// point-to-point Send/Recv). Case-insensitive so "hcom_send__" / "HcclSend__"
-// variants are all treated as point-to-point.
-func isCollectiveOpKind(k string) bool {
-	lk := strings.ToLower(k)
-	return lk != strings.ToLower(p2pSendOp) && lk != strings.ToLower(p2pRecvOp)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,8 +371,8 @@ func loadDomainOps(db *sql.DB, pgi map[string]interface{}, typ string, step Step
 	var out []bwOp
 	for _, op := range ops {
 		nm := nameMap[op.OpName]
-		k := opKind(nm)
-		if !isCollectiveOpKind(k) {
+		k := pureCommKind(nm)
+		if k == "" {
 			continue
 		}
 		if op.Count < minCount {
