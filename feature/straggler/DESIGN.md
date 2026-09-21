@@ -125,19 +125,20 @@ func DebugCommScores(stepData map[string]map[int]float64, parallels map[string][
 ```
 前置：dataparse.BackfillSlowDomainBandwidth 回填带宽列
   重新扫 .db、重建拓扑，按 (opType, count) 对齐集合通信 op（跳过 pp / Send / Recv），
-  用组内最短时长算带宽（慢 rank 不等待，最短值最接近真实传输时间），
+  带宽 = count /（组内单次算子最小时间升序排序后前 10% 的均值时间），
   写入 CSV 动态列 {domain}_<opType>_<count>（仅 count ≥ SlowCommMinCount 的 op 参与）。
 
 检测（对每个非 PP/非 embd 域，组数 < 2 跳过）：
   先按算子类型 opType 分类；对每个 opType：
     每组取该 opType 下 count 最大的带宽作代表（大数据量更能体现真实带宽）
-    所有组代表 count 取最大值，仅保留 count ≥ 最大值 ×50% 的组（其余不参与该算子检测）
+    所有组代表 count 取最大值，仅保留 count ≥ 最大值 ×50% 且 count > 10240 的组
     剩余组代表带宽 → clustering.Detect(bws, SlowCommRatio, min) 递归聚类
       → 劣化组 + Ratio；劣化程度 = 1/Ratio（= 基线带宽/该组带宽，>1 越大越慢）
   一个组须在该域**所有 opType 都异常**才上报；劣化数值 = 该组各 opType 劣化指数中的最大值
     → AddGroup("comm", group, maxDeg)
 ```
 - 带宽采用**方向 min**（带宽越小越慢）；匹配按算子类型分类后，组内取 count 最大代表，无 count 严格匹配。
+- **筛选**：count ≥ 最大 count×50% 且 count > 10240（`slowCommCountFloor`）。
 - **上报条件**：一个组必须在所有算子类型都异常（降低误报）；可同时上报多个满足条件的组。
 - 比较粒度仍是卡组；`SlowCommRatio` 默认 1.3、`SlowCommMinCount` 默认 1000（均 CLI 可调）。
 

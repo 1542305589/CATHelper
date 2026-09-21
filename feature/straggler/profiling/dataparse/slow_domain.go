@@ -195,10 +195,10 @@ func (b *bwIndex) seq(op bwOp) int {
 // ---------------------------------------------------------------------------
 
 // computeBandwidthFromOps aligns ops across the group's ranks and returns a
-// per-(opType,count) bandwidth (G elements/s) map. Each combo's bandwidth is
-// the mean over its aligned occurrences, where each occurrence's duration is
-// the shortest across the group's ranks (the slow rank doesn't wait, so this
-// is closest to the real transfer time).
+// per-(opType,count) bandwidth (G elements/s) map. Each combo's bandwidth uses
+// the mean of the fastest 10% of per-occurrence shortest durations as the
+// denominator (the slow rank doesn't wait, so the fastest occurrences are
+// closest to the real transfer time).
 func computeBandwidthFromOps(members map[int][]bwOp, ranks []int) map[bucketKey]float64 {
 	if len(ranks) == 0 {
 		return nil
@@ -255,16 +255,28 @@ func computeBandwidthFromOps(members map[int][]bwOp, ranks []int) map[bucketKey]
 
 	res := make(map[bucketKey]float64)
 	for k, durs := range combos {
-		if len(durs) == 0 {
-			continue
-		}
-		var sum float64
+		// Keep positive durations, sort ascending (fastest first), and take the
+		// mean of the fastest 10% as the denominator.
+		valid := make([]int, 0, len(durs))
 		for _, d := range durs {
 			if d > 0 {
-				sum += bandwidthFor(k.count, d)
+				valid = append(valid, d)
 			}
 		}
-		res[k] = sum / float64(len(durs))
+		if len(valid) == 0 {
+			continue
+		}
+		sort.Ints(valid)
+		n := int(math.Ceil(float64(len(valid)) * 0.10))
+		if n < 1 {
+			n = 1
+		}
+		var sum int64
+		for _, d := range valid[:n] {
+			sum += int64(d)
+		}
+		meanDur := float64(sum) / float64(n)
+		res[k] = float64(k.count) / meanDur
 	}
 	return res
 }

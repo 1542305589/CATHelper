@@ -74,14 +74,13 @@ func TestComputeBandwidthFromOps(t *testing.T) {
 		t.Fatalf("expected 2 combos, got %d", len(res))
 	}
 
-	// (allReduce,1000): shortest durations 100 and 150 -> bw mean.
+	// (allReduce,1000): fastest 10% of durations [100,150] = [100] -> bw = 10.
 	ar := res[bucketKey{"allReduce", 1000}]
-	wantAR := (bandwidthFor(1000, 100) + bandwidthFor(1000, 150)) / 2
-	if math.Abs(ar-wantAR) > 1e-9 {
-		t.Errorf("allReduce bandwidth = %v, want %v", ar, wantAR)
+	if math.Abs(ar-10) > 1e-9 {
+		t.Errorf("allReduce bandwidth = %v, want 10", ar)
 	}
 
-	// (allGather,2000): shortest duration 100 -> bw = 2000/100 = 20.
+	// (allGather,2000): fastest 10% of [100] -> bw = 20.
 	ag := res[bucketKey{"allGather", 2000}]
 	if math.Abs(ag-20) > 1e-9 {
 		t.Errorf("allGather bandwidth = %v, want 20", ag)
@@ -109,10 +108,9 @@ func TestComputeBandwidthFromOpsSeqAlignment(t *testing.T) {
 	if len(res) != 1 {
 		t.Fatalf("expected 1 combo, got %d", len(res))
 	}
-	// Two aligned occurrences: shortest durations 100 (bw 10) and 200 (bw 5),
-	// bandwidth is their mean = 7.5 (mirrors the skill's mean-of-bandwidths).
+	// Two aligned occurrences: fastest 10% of [100,200] = [100] -> bw = 10.
 	got := res[bucketKey{"allReduce", 1000}]
-	want := (bandwidthFor(1000, 100) + bandwidthFor(1000, 200)) / 2
+	want := 10.0
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("bandwidth = %v, want %v", got, want)
 	}

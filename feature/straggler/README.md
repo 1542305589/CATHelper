@@ -187,7 +187,7 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | 类别 | 数据 | 阈值/方向 | 说明 |
 |------|------|-----------|------|
 | 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向自适应 |
-| 慢通信 `comm` | `{域}_<opType>_<count>`（带宽回填列） | `SlowCommRatio`(默认 1.3) | 按算子类型分类，每组取 count 最大带宽作代表，仅保留 count ≥ 最大 count×50% 的组后做 kmeans 递归聚类（带宽小=慢）；一个组须在**所有算子类型都异常**才上报，劣化数值取各算子中的最大值 |
+| 慢通信 `comm` | `{域}_<opType>_<count>`（带宽回填列） | `SlowCommRatio`(默认 1.3) | 按算子类型分类，每组取 count 最大带宽作代表（带宽=count/组内单次算子最小时间的升序前10%均值），仅保留 count ≥ 最大 count×50% 且 count > 10240 的组后做 kmeans 递归聚类（带宽小=慢）；一个组须在**所有算子类型都异常**才上报，劣化数值取各算子中的最大值 |
 | 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CPUThreshold`(1+deg×5) | 同主机卡取去 min/max 均值消除节点内差异 |
 | Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
 
