@@ -50,7 +50,6 @@ var pureCommTypes = map[string]bool{
 	"alltoall":       true,
 	"alltoallv":      true,
 	"alltoallsingle": true,
-	"broadcast":      true,
 	"scatter":        true,
 	"gather":         true,
 }

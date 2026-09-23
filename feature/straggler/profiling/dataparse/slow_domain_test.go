@@ -19,8 +19,8 @@ func TestPureCommKind(t *testing.T) {
 		{"hcom_alltoall_AicpuKernel_503_1_1", "alltoall"},
 		{"HcclAlltoAllv", "alltoallv"},
 		{"HcclAlltoAllSingle", "alltoallsingle"},
-		{"HcclBroadcast", "broadcast"},
-		{"hcom_broadcast_123_1_1", "broadcast"},
+		{"HcclBroadcast", ""},
+		{"hcom_broadcast_123_1_1", ""},
 		{"hcom_scatter_123_1_1", "scatter"},
 		{"hcom_gather_123_1_1", "gather"},
 		// Non-whitelist names → "".
