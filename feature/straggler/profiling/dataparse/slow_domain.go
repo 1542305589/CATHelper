@@ -35,7 +35,7 @@ import (
 const (
 	ppDomainName         = "pp"
 	embdDomainName       = "embd"
-	wallclockToleranceNs = 5e6 // 5 ms: tolerate tiny phase differences / long-op misalignment
+	wallclockToleranceNs = 5e6 // 5 ms: widen the overlap-match window for tiny phase differences (overlap is still required)
 )
 
 // seqBRe extracts the sequence index "B" from an op name ("hcom_xxx__A_B_C").
@@ -153,8 +153,11 @@ func newBWIndex(ops []bwOp) *bwIndex {
 }
 
 // wallclock matches a reference op against this rank's ops of the same
-// (opType, count): prefer the greatest positive wall-clock overlap, falling
-// back to the nearest start time within the tolerance. Returns the ops index
+// (opType, count) by their temporal overlap: the candidate with the greatest
+// positive overlap wins. The tolerance widens the candidate window to
+// [op.start-tol, op.end), but an op with no overlap is never matched (two ops
+// that merely start within tol of each other but do not overlap do not look
+// like one collective communication on a Gantt chart). Returns the ops index
 // or -1.
 func (b *bwIndex) wallclock(op bwOp, tol int) int {
 	k := bucketKey{op.opType, op.count}
@@ -164,19 +167,6 @@ func (b *bwIndex) wallclock(op bwOp, tol int) int {
 	}
 	starts := b.starts[k]
 	n := len(bucket)
-
-	// Nearest start time by binary search.
-	i := sort.SearchInts(starts, op.start)
-	nearest, nd := -1, math.MaxInt
-	for _, j := range []int{i - 1, i} {
-		if j < 0 || j >= n {
-			continue
-		}
-		d := absInt(starts[j] - op.start)
-		if d < nd {
-			nd, nearest = d, bucket[j]
-		}
-	}
 
 	// Greatest overlap among candidates with start in [op.start-tol, op.end).
 	lo := sort.SearchInts(starts, op.start-tol)
@@ -192,9 +182,6 @@ func (b *bwIndex) wallclock(op bwOp, tol int) int {
 	}
 	if best >= 0 && bov > 0 {
 		return best
-	}
-	if nearest >= 0 && nd <= tol {
-		return nearest
 	}
 	return -1
 }
@@ -647,13 +634,6 @@ func joinRankKey(ranks []int) string {
 		parts[i] = strconv.Itoa(r)
 	}
 	return strings.Join(parts, ",")
-}
-
-func absInt(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
 }
 
 func minInt(a, b int) int {
