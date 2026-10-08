@@ -32,9 +32,8 @@ type bwEntry struct {
 	bw     float64
 }
 
-// slowCommCountFloor is the absolute lower bound on a group's representative
-// count: below this the count is treated as noise even within the -50% window.
-const slowCommCountFloor = 10240
+// The representative-count floor (config.SlowCommCountFloor, default 10240)
+// treats smaller counts as noise even within the -50% window.
 
 // DetectSlowDomainByBandwidth flags slow communication groups per collective
 // parallel domain using the shared kmeans detector. A group must be anomalous
@@ -106,7 +105,7 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 
 			var kept []rep
 			for _, r := range reps {
-				if float64(r.count) >= half && r.count > slowCommCountFloor {
+				if float64(r.count) >= half && r.count > config.SlowCommCountFloor {
 					kept = append(kept, r)
 				}
 			}

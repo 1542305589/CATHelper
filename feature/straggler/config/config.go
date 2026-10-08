@@ -8,16 +8,83 @@ import (
 	"strings"
 )
 
-// Global configuration variables – set once from CLI before detection runs.
+// Global configuration variables – the ACTIVE thresholds read by the detector
+// and report. They are set per scope via Apply: once at startup in one-shot
+// mode, per cycle in daemon mode, per business in center mode.
 var (
-	FilePath         string  // Data directory containing ascend_pytorch_profiler_*.db files.
-	CalThreshold     float64 // Threshold for compute detection (= 1 + degradation).
-	CPUThreshold     float64 // Threshold for CPU detection (= 1 + degradation * 5).
-	CommThreshold    float64 // Threshold for communication detection (= 1 + degradation * 5).
-	SlowCommRatio    float64 // Bandwidth degradation threshold for slow-domain detection (default 1.3).
-	SlowCommMinCount int     // Minimum op count included in bandwidth stats (default 1000); smaller counts are latency-dominated.
-	SlowCommFlat     bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment); when false (default) align per occurrence and use the group's shortest rank duration.
+	FilePath           string  // Data directory containing ascend_pytorch_profiler_*.db files.
+	CalThreshold       float64 // Slow-compute ratio threshold (default 1.3).
+	CPUThreshold       float64 // Slow-CPU ratio threshold (default 2.5).
+	BubbleThresholdNs  float64 // NPU bubble absolute threshold in ns (default 5000).
+	SlowCommRatio      float64 // Slow-comm bandwidth kmeans ratio threshold (default 1.3).
+	SlowCommMinCount   int     // Minimum op count included in bandwidth stats (default 1000).
+	SlowCommCountFloor int     // Absolute lower bound on a group's representative count (default 10240).
+	SlowCommFlat       bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment).
 )
+
+// Thresholds is the full set of independent detection thresholds. It is
+// persisted per business (center), held per daemon (daemon), or applied once
+// (one-shot). Zero values fall back to DefaultThresholds.
+type Thresholds struct {
+	Cal            float64 `json:"cal"`
+	CPU            float64 `json:"cpu"`
+	BubbleNs       float64 `json:"bubble_ns"`
+	CommRatio      float64 `json:"comm_ratio"`
+	CommMinCount   int     `json:"comm_min_count"`
+	CommCountFloor int     `json:"comm_count_floor"`
+}
+
+// DefaultThresholds returns the defaults used for any unset threshold.
+func DefaultThresholds() Thresholds {
+	return Thresholds{Cal: 1.3, CPU: 2.5, BubbleNs: 5000, CommRatio: 1.3, CommMinCount: 1000, CommCountFloor: 10240}
+}
+
+// Normalized fills any non-positive threshold with its default.
+func (t Thresholds) Normalized() Thresholds {
+	d := DefaultThresholds()
+	if t.Cal <= 0 {
+		t.Cal = d.Cal
+	}
+	if t.CPU <= 0 {
+		t.CPU = d.CPU
+	}
+	if t.BubbleNs <= 0 {
+		t.BubbleNs = d.BubbleNs
+	}
+	if t.CommRatio <= 0 {
+		t.CommRatio = d.CommRatio
+	}
+	if t.CommMinCount <= 0 {
+		t.CommMinCount = d.CommMinCount
+	}
+	if t.CommCountFloor <= 0 {
+		t.CommCountFloor = d.CommCountFloor
+	}
+	return t
+}
+
+// Apply sets the active global thresholds (normalizing unset values first).
+func Apply(t Thresholds) {
+	t = t.Normalized()
+	CalThreshold = t.Cal
+	CPUThreshold = t.CPU
+	BubbleThresholdNs = t.BubbleNs
+	SlowCommRatio = t.CommRatio
+	SlowCommMinCount = t.CommMinCount
+	SlowCommCountFloor = t.CommCountFloor
+}
+
+// Current returns the active global thresholds.
+func Current() Thresholds {
+	return Thresholds{
+		Cal:            CalThreshold,
+		CPU:            CPUThreshold,
+		BubbleNs:       BubbleThresholdNs,
+		CommRatio:      SlowCommRatio,
+		CommMinCount:   SlowCommMinCount,
+		CommCountFloor: SlowCommCountFloor,
+	}
+}
 
 // DegradationData is the aggregated result of all four detection categories.
 //

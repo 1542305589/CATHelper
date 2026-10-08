@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 )
 
 // httpServer builds the net/http mux (standard library only). Paths carry no
@@ -37,8 +39,8 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("POST /daemon/pause", d.handleDaemonPause)
 	mux.HandleFunc("POST /daemon/stop", d.handleDaemonStop)
 	mux.HandleFunc("POST /daemon/interval", d.handleDaemonInterval)
-	mux.HandleFunc("GET /daemon/degradation", d.handleDaemonGetDegradation)
-	mux.HandleFunc("POST /daemon/degradation", d.handleDaemonSetDegradation)
+	mux.HandleFunc("GET /daemon/thresholds", d.handleDaemonGetThresholds)
+	mux.HandleFunc("POST /daemon/thresholds", d.handleDaemonSetThresholds)
 	mux.HandleFunc("POST /daemon/trigger", d.handleDaemonTrigger)
 	mux.HandleFunc("POST /daemon/match", d.handleDaemonMatch)
 	mux.HandleFunc("POST /daemon/unmatch", d.handleDaemonUnmatch)
@@ -93,7 +95,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		State:        state,
 		IntervalSec:  int64(interval.Seconds()),
 		CollectWait:  int64(d.cfg.CollectWait.Seconds()),
-		Degradation:  d.Degradation(),
+		Thresholds:   d.Thresholds(),
 		Managed:      managed,
 		CenterAddr:   centerAddr,
 		ProfilerDir:  d.cfg.ProfilerDir,
@@ -414,32 +416,24 @@ func (d *Daemon) handleDaemonInterval(w http.ResponseWriter, r *http.Request) {
 	}{req.IntervalSec})
 }
 
-// handleDaemonGetDegradation returns the current sensitivity.
-func (d *Daemon) handleDaemonGetDegradation(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, struct {
-		Degradation float64 `json:"degradation"`
-	}{d.Degradation()})
+// handleDaemonGetThresholds returns the current detection thresholds.
+func (d *Daemon) handleDaemonGetThresholds(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, d.Thresholds())
 }
 
-// handleDaemonSetDegradation updates the sensitivity for subsequent cycles.
-func (d *Daemon) handleDaemonSetDegradation(w http.ResponseWriter, r *http.Request) {
+// handleDaemonSetThresholds updates the detection thresholds for subsequent
+// cycles.
+func (d *Daemon) handleDaemonSetThresholds(w http.ResponseWriter, r *http.Request) {
 	if !d.requireManagedKey(w, r) {
 		return
 	}
-	var req struct {
-		Degradation float64 `json:"degradation"`
-	}
+	var req config.Thresholds
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "无效请求体: {\"degradation\": 0.3}", http.StatusBadRequest)
+		http.Error(w, "无效请求体: {\"cal\",\"cpu\",\"bubble_ns\",\"comm_ratio\",\"comm_min_count\",\"comm_count_floor\"}", http.StatusBadRequest)
 		return
 	}
-	if err := d.SetDegradation(req.Degradation); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, struct {
-		Degradation float64 `json:"degradation"`
-	}{req.Degradation})
+	d.SetThresholds(req)
+	writeJSON(w, d.Thresholds())
 }
 
 func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {

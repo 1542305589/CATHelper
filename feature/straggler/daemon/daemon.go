@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/dataparse"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/resource"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
@@ -30,11 +31,11 @@ type Daemon struct {
 	logf   func(format string, args ...any)
 
 	mu            sync.Mutex
-	state         string        // "running" | "paused" | "managed"
-	interval      time.Duration // current cycle period (POST /daemon/interval updates it)
-	degradation   float64       // current sensitivity (CLI initial, POST /daemon/degradation updates it)
-	nextRun       time.Time     // when the next cycle starts (zero when paused)
-	cycleID       int           // per-process id, starting from 1
+	state         string            // "running" | "paused" | "managed"
+	interval      time.Duration     // current cycle period (POST /daemon/interval updates it)
+	thresholds    config.Thresholds // current detection thresholds (CLI initial, POST /daemon/thresholds updates them)
+	nextRun       time.Time         // when the next cycle starts (zero when paused)
+	cycleID       int               // per-process id, starting from 1
 	cycleInFlight bool
 	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
 	dynolog       *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
@@ -67,15 +68,15 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		cfg.Port = 8080
 	}
 	return &Daemon{
-		cfg:         cfg,
-		detect:      detect,
-		st:          newStore(),
-		logf:        func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
-		state:       "running",
-		interval:    cfg.Interval,
-		degradation: cfg.Degradation,
-		stopCh:      make(chan struct{}),
-		progress:    newProgressLog(),
+		cfg:        cfg,
+		detect:     detect,
+		st:         newStore(),
+		logf:       func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
+		state:      "running",
+		interval:   cfg.Interval,
+		thresholds: cfg.Thresholds,
+		stopCh:     make(chan struct{}),
+		progress:   newProgressLog(),
 	}
 }
 
@@ -263,13 +264,14 @@ func (d *Daemon) runCycle(id int) {
 	d.progress.step("KPI 检测完成 (%s)", cr.KPIStatus)
 
 	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
-	// degradation is runtime-adjustable via POST /daemon/degradation; snapshot it
-	// under the lock so a concurrent update cannot race the cycle.
+	// Thresholds are runtime-adjustable via POST /daemon/thresholds; snapshot
+	// them under the lock and apply to the global config before detecting.
 	d.mu.Lock()
-	deg := d.degradation
+	th := d.thresholds
 	d.mu.Unlock()
-	d.progress.step("Profiler 检测 (阈值基数 %.2f)", deg)
-	res, derr := d.detect(root, deg, d.cfg.DebugOutput)
+	config.Apply(th)
+	d.progress.step("Profiler 检测 (阈值 cal=%.2f cpu=%.2f)", th.Cal, th.CPU)
+	res, derr := d.detect(root, d.cfg.DebugOutput)
 	if derr != nil {
 		cr.Error = fmt.Sprintf("profiler detection: %v", derr)
 		return
@@ -506,23 +508,19 @@ func (d *Daemon) Start() {
 	}
 }
 
-// Degradation returns the current sensitivity (CalThreshold = 1 + degradation).
-func (d *Daemon) Degradation() float64 {
+// Thresholds returns the current detection thresholds.
+func (d *Daemon) Thresholds() config.Thresholds {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.degradation
+	return d.thresholds
 }
 
-// SetDegradation updates the sensitivity for subsequent cycles, validating
-// [0, 1). It does not touch already-completed results.
-func (d *Daemon) SetDegradation(v float64) error {
-	if v < 0 || v >= 1 {
-		return fmt.Errorf("degradation out of range [0, 1)")
-	}
+// SetThresholds updates the detection thresholds for subsequent cycles
+// (normalizing unset values). It does not touch already-completed results.
+func (d *Daemon) SetThresholds(t config.Thresholds) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.degradation = v
-	return nil
+	d.thresholds = t.Normalized()
 }
 
 // SetInterval updates the cycle period, validating [60, 86400] seconds. The
