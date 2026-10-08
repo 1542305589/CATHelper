@@ -559,6 +559,7 @@ Bubble (npu_bubble): 无异常
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮） |
 | `--comm-slow-ratio` | float64 | 否 | 1.3 | 慢通信带宽劣化阈值（max/min ≥ 该值判劣化，须 >1） |
 | `--comm-min-count` | int | 否 | 1000 | 参与带宽统计的最小 op 计数（更小视为延迟主导，不计入） |
+| `--comm-flat` | bool | 否 | 假 | 带宽改按「全体 rank 的算子时长扁平池」取前10%均值（不跨 rank 匹配）；缺省保持按组内对齐+组内最短时长 |
 | `--debug-output` | bool | 否 | 假 | 结果含全部正常/异常数据便于排查（见 6.1） |
 
 \* `path` 与 KPI 输入至少提供一个；都没有则打印用法并退出。
@@ -597,6 +598,7 @@ Profiler 模式:
   CPUThreshold  = 1 + degradation × 5                # 慢CPU 阈值（默认 2.5）
   SlowCommRatio = --comm-slow-ratio                  # 慢通信带宽劣化阈值（默认 1.3，独立旋钮）
   SlowCommMinCount = --comm-min-count                # 带宽统计最小 op 计数（默认 1000）
+  SlowCommFlat = --comm-flat                          # 带宽分母改用全体 rank 扁平池前10%均值（默认关）
 ```
 
 > `degradation`（阈值基数）除了启动时用 CLI 设置初始值外，运行期还可通过守护进程/业务控制台或 API 动态调整（见[四、HTTP 接口（守护进程）](#四http-接口守护进程)与[五、中心节点模式](#五中心节点模式)），只影响后续检测，不改写历史结果。

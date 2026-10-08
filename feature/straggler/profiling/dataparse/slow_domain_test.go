@@ -98,6 +98,40 @@ func TestComputeBandwidthFromOpsNoOverlapSkipped(t *testing.T) {
 	}
 }
 
+// TestComputeBandwidthFromOpsFlat verifies the flat-pool mode: no cross-rank
+// alignment; every rank's op durations are pooled per (opType,count), and the
+// fastest 10% mean is the denominator. Non-overlapping clocks still produce a
+// bandwidth (unlike the aligned mode).
+func TestComputeBandwidthFromOpsFlat(t *testing.T) {
+	members := map[int][]bwOp{
+		0: {
+			{opType: "allGather", count: 2048, start: 0, end: 100},
+			{opType: "allGather", count: 2048, start: 1000, end: 1200},
+		},
+		1: {
+			{opType: "allGather", count: 2048, start: 10000000000, end: 10000000300},
+			{opType: "allGather", count: 2048, start: 10000001000, end: 10000001500},
+		},
+	}
+	ranks := []int{0, 1}
+
+	res := computeBandwidthFromOpsFlat(members, ranks)
+	if len(res) != 1 {
+		t.Fatalf("expected 1 combo, got %v", res)
+	}
+	// Pooled durations [100,200,300,500]; fastest 10% = [100] -> bw = 2048/100.
+	got := res[bucketKey{"allGather", 2048}]
+	want := float64(2048) / 100.0
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("flat bandwidth = %v, want %v", got, want)
+	}
+
+	// Sanity: the aligned variant yields nothing for non-overlapping clocks.
+	if aligned := computeBandwidthFromOps(members, ranks); len(aligned) != 0 {
+		t.Errorf("aligned mode should yield nothing for non-overlapping clocks, got %v", aligned)
+	}
+}
+
 // TestBandwidthFor checks the G-elements/s formula.
 func TestBandwidthFor(t *testing.T) {
 	// 1000 elements / 100 ns = 10 G elements/s.

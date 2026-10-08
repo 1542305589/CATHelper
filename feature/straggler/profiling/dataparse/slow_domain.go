@@ -215,6 +215,29 @@ func computeBandwidthFromOps(members map[int][]bwOp, ranks []int) map[bucketKey]
 		combos[k] = append(combos[k], minIntSlice(dur))
 	}
 
+	return fastest10MeanBandwidth(combos)
+}
+
+// computeBandwidthFromOpsFlat pools every rank's qualifying op durations per
+// (opType,count) — with NO cross-rank alignment — and uses the mean of the
+// fastest 10% of that flat pool as the denominator.
+func computeBandwidthFromOpsFlat(members map[int][]bwOp, ranks []int) map[bucketKey]float64 {
+	combos := make(map[bucketKey][]int)
+	for _, r := range ranks {
+		for _, op := range members[r] {
+			d := op.end - op.start
+			if d > 0 {
+				k := bucketKey{op.opType, op.count}
+				combos[k] = append(combos[k], d)
+			}
+		}
+	}
+	return fastest10MeanBandwidth(combos)
+}
+
+// fastest10MeanBandwidth turns per-(opType,count) duration slices into
+// bandwidths: count / (mean of the fastest 10% of positive durations).
+func fastest10MeanBandwidth(combos map[bucketKey][]int) map[bucketKey]float64 {
 	res := make(map[bucketKey]float64)
 	for k, durs := range combos {
 		// Keep positive durations, sort ascending (fastest first), and take the
@@ -479,7 +502,13 @@ func BackfillSlowDomainBandwidth(inputPath string) error {
 			continue
 		}
 
-		res := computeBandwidthFromOps(members, g.ranks)
+		var res map[bucketKey]float64
+		if config.SlowCommFlat {
+			// Flat pool: every rank's qualifying op durations, no alignment.
+			res = computeBandwidthFromOpsFlat(members, g.ranks)
+		} else {
+			res = computeBandwidthFromOps(members, g.ranks)
+		}
 		if len(res) == 0 {
 			continue
 		}

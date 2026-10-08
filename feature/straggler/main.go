@@ -51,6 +51,7 @@ func main() {
 	debugOutput := false       // --debug-output: include all normal+abnormal data (kpi.debug / profiler.debug) in straggler_output.json
 	commSlowRatio := 1.3       // --comm-slow-ratio: bandwidth degradation threshold for slow-domain detection
 	commMinCount := 1000       // --comm-min-count: minimum op count included in bandwidth stats
+	commFlat := false          // --comm-flat: compute bandwidth from all ranks' op durations (no cross-rank alignment)
 
 	// Daemon-mode flags.
 	daemonMode := false
@@ -71,6 +72,10 @@ func main() {
 		// Bare boolean flag (no "=value").
 		if arg == "--debug-output" {
 			debugOutput = true
+			continue
+		}
+		if arg == "--comm-flat" {
+			commFlat = true
 			continue
 		}
 		if arg == "--daemon" {
@@ -175,6 +180,7 @@ func main() {
 	// dataparse backfill pass); set once before one-shot / daemon branching.
 	config.SlowCommRatio = commSlowRatio
 	config.SlowCommMinCount = commMinCount
+	config.SlowCommFlat = commFlat
 
 	// ─────────────────────────────────────────────────────────────────
 	// Daemon mode: resident service (dynolog/dyno collection + HTTP).

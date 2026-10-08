@@ -16,6 +16,7 @@ var (
 	CommThreshold    float64 // Threshold for communication detection (= 1 + degradation * 5).
 	SlowCommRatio    float64 // Bandwidth degradation threshold for slow-domain detection (default 1.3).
 	SlowCommMinCount int     // Minimum op count included in bandwidth stats (default 1000); smaller counts are latency-dominated.
+	SlowCommFlat     bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment); when false (default) align per occurrence and use the group's shortest rank duration.
 )
 
 // DegradationData is the aggregated result of all four detection categories.
