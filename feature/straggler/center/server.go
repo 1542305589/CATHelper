@@ -68,16 +68,17 @@ type daemonStatus struct {
 
 // businessStatus is the web-visible view of one business.
 type businessStatus struct {
-	Name         string            `json:"name"`
-	IntervalSec  int64             `json:"interval_sec"`
-	Paused       bool              `json:"paused"`
-	CyclesTotal  int               `json:"cycles_total"`
-	CyclesFailed int               `json:"cycles_failed"`
-	NextTrigger  string            `json:"next_trigger,omitempty"`
-	CollectWait  int64             `json:"collect_wait"`           // max across the business's daemons
-	VLLMMetrics  string            `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL
-	Thresholds   config.Thresholds `json:"thresholds"`             // merged-detection thresholds
-	Daemons      []daemonStatus    `json:"daemons"`
+	Name              string            `json:"name"`
+	IntervalSec       int64             `json:"interval_sec"`
+	Paused            bool              `json:"paused"`
+	CyclesTotal       int               `json:"cycles_total"`
+	CyclesFailed      int               `json:"cycles_failed"`
+	NextTrigger       string            `json:"next_trigger,omitempty"`
+	CollectWait       int64             `json:"collect_wait"`           // max across the business's daemons
+	VLLMMetrics       string            `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL
+	Thresholds        config.Thresholds `json:"thresholds"`             // merged-detection thresholds
+	DefaultThresholds config.Thresholds `json:"default_thresholds"`     // factory defaults, for "restore defaults"
+	Daemons           []daemonStatus    `json:"daemons"`
 }
 
 func daemonState(d *Daemon) string {
@@ -110,14 +111,15 @@ func (c *Center) statusViewLocked() []businessStatus {
 // (never exposing the daemons' match keys).
 func businessStatusOfLocked(b *Business) businessStatus {
 	bs := businessStatus{
-		Name:         b.Name,
-		IntervalSec:  b.IntervalSec,
-		Paused:       b.Paused,
-		CyclesTotal:  b.CyclesTotal,
-		CyclesFailed: b.CyclesFailed,
-		VLLMMetrics:  b.VLLMMetrics,
-		Thresholds:   b.Thresholds,
-		Daemons:      make([]daemonStatus, 0, len(b.Daemons)),
+		Name:              b.Name,
+		IntervalSec:       b.IntervalSec,
+		Paused:            b.Paused,
+		CyclesTotal:       b.CyclesTotal,
+		CyclesFailed:      b.CyclesFailed,
+		VLLMMetrics:       b.VLLMMetrics,
+		Thresholds:        b.Thresholds,
+		DefaultThresholds: config.DefaultThresholds(),
+		Daemons:           make([]daemonStatus, 0, len(b.Daemons)),
 	}
 	if !b.nextTrigger.IsZero() {
 		bs.NextTrigger = b.nextTrigger.Format(time.RFC3339)

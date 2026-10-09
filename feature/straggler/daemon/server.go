@@ -92,16 +92,17 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	total, failed := d.st.counts()
 
 	resp := statusResponse{
-		State:        state,
-		IntervalSec:  int64(interval.Seconds()),
-		CollectWait:  int64(d.cfg.CollectWait.Seconds()),
-		Thresholds:   d.Thresholds(),
-		Managed:      managed,
-		CenterAddr:   centerAddr,
-		ProfilerDir:  d.cfg.ProfilerDir,
-		KpiDir:       d.cfg.KpiDir,
-		CyclesTotal:  total,
-		CyclesFailed: failed,
+		State:             state,
+		IntervalSec:       int64(interval.Seconds()),
+		CollectWait:       int64(d.cfg.CollectWait.Seconds()),
+		Thresholds:        d.Thresholds(),
+		DefaultThresholds: config.DefaultThresholds(),
+		Managed:           managed,
+		CenterAddr:        centerAddr,
+		ProfilerDir:       d.cfg.ProfilerDir,
+		KpiDir:            d.cfg.KpiDir,
+		CyclesTotal:       total,
+		CyclesFailed:      failed,
 	}
 	if c := d.st.latest(); c != nil {
 		resp.LastCycle = toCycleSummary(c)

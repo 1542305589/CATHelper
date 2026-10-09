@@ -93,18 +93,19 @@ type CombinedOutput struct {
 
 // statusResponse is the GET /status payload.
 type statusResponse struct {
-	State        string            `json:"state"`
-	IntervalSec  int64             `json:"interval_sec"`
-	CollectWait  int64             `json:"collect_wait"`
-	Thresholds   config.Thresholds `json:"thresholds"`
-	Managed      bool              `json:"managed"`
-	CenterAddr   string            `json:"center_addr,omitempty"`
-	ProfilerDir  string            `json:"profiler_dir"`
-	KpiDir       string            `json:"kpi_dir"`
-	CyclesTotal  int               `json:"cycles_total"`
-	CyclesFailed int               `json:"cycles_failed"`
-	LastCycle    *cycleSummary     `json:"last_cycle,omitempty"`
-	NextRunAt    *time.Time        `json:"next_run_at,omitempty"`
+	State             string            `json:"state"`
+	IntervalSec       int64             `json:"interval_sec"`
+	CollectWait       int64             `json:"collect_wait"`
+	Thresholds        config.Thresholds `json:"thresholds"`
+	DefaultThresholds config.Thresholds `json:"default_thresholds"`
+	Managed           bool              `json:"managed"`
+	CenterAddr        string            `json:"center_addr,omitempty"`
+	ProfilerDir       string            `json:"profiler_dir"`
+	KpiDir            string            `json:"kpi_dir"`
+	CyclesTotal       int               `json:"cycles_total"`
+	CyclesFailed      int               `json:"cycles_failed"`
+	LastCycle         *cycleSummary     `json:"last_cycle,omitempty"`
+	NextRunAt         *time.Time        `json:"next_run_at,omitempty"`
 }
 
 // cycleSummary is the compact per-cycle entry served by /status and /history

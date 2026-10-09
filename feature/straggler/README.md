@@ -313,7 +313,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 |-------------|------|--------|
 | `GET /` | Web 控制台页面（HTML，纯前端） | — |
 | `GET /healthz` | 存活探针 | — |
-| `GET /status` | 状态总览（state / interval_sec / thresholds / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
+| `GET /status` | 状态总览（state / interval_sec / thresholds / default_thresholds / 数据目录 / cycles_total / cycles_failed / last_cycle / next_run_at） | — |
 | `GET /straggler/results/latest` | 最近一轮合并结果 JSON | — |
 | `GET /straggler/results/history?limit=N` | 本次会话全部周期摘要（倒序；`?limit=N` 可选限制条数） | — |
 | `GET /straggler/results/{id}` | 指定周期 id 的合并结果 JSON | — |

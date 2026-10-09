@@ -157,7 +157,7 @@
         </div>
         <div class="controls" style="margin-top:12px;">
           <button class="primary" id="btnThresholds">保存阈值</button>
-          <button id="btnThresholdsReset">恢复当前值</button>
+          <button id="btnThresholdsDefault">恢复默认值</button>
         </div>
         <div class="muted" style="margin-top:8px;font-size:11px;">阈值只影响后续检测，不改写历史结果。</div>
       </div>
@@ -207,6 +207,7 @@ const BIZ = decodeURIComponent(parts[3] || '');
 let selectedTs = null;
 let selectedRunning = false;
 let latestThresholds = {};
+let latestDefaults = {};
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function stateLabel(s) {
@@ -272,6 +273,7 @@ function renderStatus(b) {
     ? `cal=${th.cal} cpu=${th.cpu} bubble=${th.bubble_ns}ns comm=${th.comm_threshold}`
     : '—';
   latestThresholds = th;
+  latestDefaults = b.default_thresholds || {};
   fillThresholdInputs(th);
   $('vTotal').textContent = b.cycles_total != null ? b.cycles_total : '—';
   $('vFailed').textContent = b.cycles_failed != null ? b.cycles_failed : '—';
@@ -528,8 +530,14 @@ function fillThresholdInputs(th, force) {
   set('thCal', th.cal); set('thCpu', th.cpu); set('thBubble', th.bubble_ns);
   set('thCommThreshold', th.comm_threshold); set('thCommMinCount', th.comm_min_count); set('thCommCountFloor', th.comm_count_floor);
 }
-$('btnThresholdsReset').onclick = () => fillThresholdInputs(latestThresholds, true);
-$('btnThresholds').onclick = async () => {
+async function saveThresholds(body, okMsg) {
+  try {
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/thresholds', body);
+    toast(okMsg, true);
+    setTimeout(refresh, 400);
+  } catch(e) { toast('操作失败：' + e.message, false); }
+}
+$('btnThresholds').onclick = () => {
   const num = id => parseFloat($(id).value);
   const body = {
     cal: num('thCal'), cpu: num('thCpu'), bubble_ns: num('thBubble'),
@@ -541,11 +549,16 @@ $('btnThresholds').onclick = async () => {
     toast('阈值非法：cal/cpu/bubble/min-count/floor 须 >0，comm 须 >1', false);
     return;
   }
-  try {
-    await post('/center/business/' + encodeURIComponent(BIZ) + '/thresholds', body);
-    toast('阈值已更新', true);
-    setTimeout(refresh, 400);
-  } catch(e) { toast('操作失败：' + e.message, false); }
+  saveThresholds(body, '阈值已更新');
+};
+$('btnThresholdsDefault').onclick = () => {
+  const d = latestDefaults;
+  if (d.cal == null) { toast('默认值尚未加载，请稍后重试', false); return; }
+  fillThresholdInputs(d, true);
+  saveThresholds({
+    cal: d.cal, cpu: d.cpu, bubble_ns: d.bubble_ns,
+    comm_threshold: d.comm_threshold, comm_min_count: d.comm_min_count, comm_count_floor: d.comm_count_floor,
+  }, '已恢复默认值');
 };
 
 ['tabProgress','tabReport','tabResult','tabOpMetric'].forEach(id => {
