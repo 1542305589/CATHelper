@@ -67,6 +67,15 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 	if cfg.Port <= 0 {
 		cfg.Port = 8080
 	}
+	// Resolve --profiler-dir to an absolute path so the daemon's analyse/scan
+	// (its own cwd) and the profiler writer (the training process / dynolog,
+	// which resolves ACTIVITIES_LOG_FILE against ITS cwd) always refer to the
+	// same directory. A relative path otherwise reads a different (empty) dir.
+	if cfg.ProfilerDir != "" {
+		if abs, err := filepath.Abs(cfg.ProfilerDir); err == nil {
+			cfg.ProfilerDir = abs
+		}
+	}
 	return &Daemon{
 		cfg:        cfg,
 		detect:     detect,
@@ -201,8 +210,11 @@ func (d *Daemon) runCycle(id int) {
 		}
 		d.progress.finish()
 		_ = d.progress.save(filepath.Join(archive, "progress.json"))
-		d.cleanupDump(cr)
+		// Log the cycle outcome BEFORE cleanup so the detected error (if any) is
+		// printed ahead of the "cleaned" line — otherwise it looks like the dump
+		// was removed before it was scanned.
 		d.finishCycle(cr)
+		d.cleanupDump(cr)
 	}()
 
 	// 1. Collect: dyno trigger -> verify commandStatus -> wait for the dump.
@@ -826,6 +838,9 @@ func copyDir(src, dst string) error {
 // untouched; RemoveAll on a missing root is a no-op, so this is safe even when
 // the trigger never created a dump. Failures are logged, never fatal.
 func (d *Daemon) cleanupDump(cr *CycleResult) {
+	if _, err := os.Stat(d.cfg.ProfilerDir); err != nil {
+		return // nothing was written this cycle; nothing to clean
+	}
 	if err := os.RemoveAll(d.cfg.ProfilerDir); err != nil {
 		d.logf("cycle %d cleanup failed: %v", cr.ID, err)
 		return
