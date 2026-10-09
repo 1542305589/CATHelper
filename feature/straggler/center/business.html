@@ -30,6 +30,10 @@
   button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
   input { border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:13px; width:96px; }
   .interval-form { display:flex; align-items:center; gap:8px; font-size:13px; margin-top:12px; }
+  .th-grid { display:grid; grid-template-columns:128px 110px 1fr; gap:8px 10px; align-items:center; font-size:13px; }
+  .th-grid label { color:var(--muted); }
+  .th-grid input { width:100%; }
+  .th-grid .unit { color:var(--muted); font-size:11px; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
   th { color:var(--muted); font-weight:600; }
@@ -125,18 +129,37 @@
           <input id="intervalInput" type="number" min="60">
           <button id="btnInterval">设置</button>
         </div>
-        <div class="interval-form" style="flex-wrap:wrap;">
-          阈值:
-          cal <input id="thCal" type="number" step="0.05" min="0" style="width:64px;">
-          cpu <input id="thCpu" type="number" step="0.05" min="0" style="width:64px;">
-          bubble(ns) <input id="thBubble" type="number" min="0" style="width:76px;">
-          comm比 <input id="thCommRatio" type="number" step="0.05" min="0" style="width:64px;">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>阈值设置</h2>
+      <div class="body">
+        <div class="th-grid">
+          <label for="thCal">慢计算 cal</label>
+          <input id="thCal" type="number" step="0.05" min="0">
+          <span class="unit">kmeans 比例，默认 1.3</span>
+          <label for="thCpu">慢CPU cpu</label>
+          <input id="thCpu" type="number" step="0.05" min="0">
+          <span class="unit">kmeans 比例，默认 2.5</span>
+          <label for="thBubble">NPU Bubble</label>
+          <input id="thBubble" type="number" min="0">
+          <span class="unit">纳秒 ns，默认 5000</span>
+          <label for="thCommThreshold">慢通信 comm</label>
+          <input id="thCommThreshold" type="number" step="0.05" min="1">
+          <span class="unit">带宽比，默认 1.3</span>
+          <label for="thCommMinCount">通信 min-count</label>
+          <input id="thCommMinCount" type="number" min="0">
+          <span class="unit">采集门槛，默认 1000</span>
+          <label for="thCommCountFloor">通信 count-floor</label>
+          <input id="thCommCountFloor" type="number" min="0">
+          <span class="unit">参与检测下限，默认 10240</span>
         </div>
-        <div class="interval-form" style="flex-wrap:wrap;">
-          min-count <input id="thCommMinCount" type="number" min="0" style="width:80px;">
-          count-floor <input id="thCommCountFloor" type="number" min="0" style="width:90px;">
-          <button id="btnThresholds">设置</button>
+        <div class="controls" style="margin-top:12px;">
+          <button class="primary" id="btnThresholds">保存阈值</button>
+          <button id="btnThresholdsReset">恢复当前值</button>
         </div>
+        <div class="muted" style="margin-top:8px;font-size:11px;">阈值只影响后续检测，不改写历史结果。</div>
       </div>
     </div>
 
@@ -183,6 +206,7 @@ const parts = location.pathname.split('/');
 const BIZ = decodeURIComponent(parts[3] || '');
 let selectedTs = null;
 let selectedRunning = false;
+let latestThresholds = {};
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function stateLabel(s) {
@@ -245,8 +269,9 @@ function renderStatus(b) {
   $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
   const th = b.thresholds || {};
   $('vThresholds').textContent = th.cal != null
-    ? `cal=${th.cal} cpu=${th.cpu} bubble=${th.bubble_ns}ns comm=${th.comm_ratio}`
+    ? `cal=${th.cal} cpu=${th.cpu} bubble=${th.bubble_ns}ns comm=${th.comm_threshold}`
     : '—';
+  latestThresholds = th;
   fillThresholdInputs(th);
   $('vTotal').textContent = b.cycles_total != null ? b.cycles_total : '—';
   $('vFailed').textContent = b.cycles_failed != null ? b.cycles_failed : '—';
@@ -498,18 +523,24 @@ $('btnInterval').onclick = () => {
   if (!v || v < 60 || v > 86400) { toast('周期需在 [60, 86400] 秒之间', false); return; }
   control('interval');
 };
-function fillThresholdInputs(th) {
-  const set = (id, val) => { if (val != null && !$(id).value) $(id).value = val; };
+function fillThresholdInputs(th, force) {
+  const set = (id, val) => { if (val != null && (force || !$(id).value)) $(id).value = val; };
   set('thCal', th.cal); set('thCpu', th.cpu); set('thBubble', th.bubble_ns);
-  set('thCommRatio', th.comm_ratio); set('thCommMinCount', th.comm_min_count); set('thCommCountFloor', th.comm_count_floor);
+  set('thCommThreshold', th.comm_threshold); set('thCommMinCount', th.comm_min_count); set('thCommCountFloor', th.comm_count_floor);
 }
+$('btnThresholdsReset').onclick = () => fillThresholdInputs(latestThresholds, true);
 $('btnThresholds').onclick = async () => {
   const num = id => parseFloat($(id).value);
   const body = {
     cal: num('thCal'), cpu: num('thCpu'), bubble_ns: num('thBubble'),
-    comm_ratio: num('thCommRatio'), comm_min_count: parseInt($('thCommMinCount').value, 10),
+    comm_threshold: num('thCommThreshold'), comm_min_count: parseInt($('thCommMinCount').value, 10),
     comm_count_floor: parseInt($('thCommCountFloor').value, 10),
   };
+  if (!(body.cal > 0) || !(body.cpu > 0) || !(body.bubble_ns > 0) || !(body.comm_threshold > 1) ||
+      !(body.comm_min_count > 0) || !(body.comm_count_floor > 0)) {
+    toast('阈值非法：cal/cpu/bubble/min-count/floor 须 >0，comm 须 >1', false);
+    return;
+  }
   try {
     await post('/center/business/' + encodeURIComponent(BIZ) + '/thresholds', body);
     toast('阈值已更新', true);

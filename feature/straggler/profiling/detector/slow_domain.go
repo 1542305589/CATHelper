@@ -20,7 +20,7 @@ import (
 //     whose count is within -50% of that max (count >= max*0.5);
 //  3. cluster the remaining representative bandwidths with the shared kmeans
 //     recursive detector (min direction: lower bandwidth is slower), using
-//     SlowCommRatio as the threshold (default 1.3);
+//     CommThreshold as the threshold (default 1.3);
 //  4. a group is reported only when it is anomalous on EVERY opType of the
 //     domain; its reported degradation is the largest across those opTypes.
 // ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ type bwEntry struct {
 // parallel domain using the shared kmeans detector. A group must be anomalous
 // on every opType to be reported (reusing comm_domain_result).
 func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[string]map[int]float64, localResult config.DegradationData) {
-	ratio := config.SlowCommRatio
+	ratio := config.CommThreshold
 	if ratio <= 0 {
 		ratio = 1.3
 	}

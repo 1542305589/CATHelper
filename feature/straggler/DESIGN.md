@@ -8,12 +8,12 @@ var FilePath string                                  // CLI path= 设置
 var CalThreshold float64                             // 慢计算阈值（--cal-threshold，默认 1.3）
 var CPUThreshold float64                             // 慢CPU 阈值（--cpu-threshold，默认 2.5）
 var BubbleThresholdNs float64                        // NPU Bubble 绝对阈值（--bubble-threshold-ns，默认 5000）
-var SlowCommRatio float64                            // 慢通信带宽劣化阈值（--comm-slow-ratio，默认 1.3）
+var CommThreshold float64                            // 慢通信带宽劣化阈值（--comm-threshold，默认 1.3）
 var SlowCommMinCount int                             // 带宽统计最小 op 计数（--comm-min-count，默认 1000）
 var SlowCommCountFloor int                           // 代表 count 下限（--comm-count-floor，默认 10240）
 var SlowCommFlat bool                                // 带宽分母改用全体 rank 扁平池前10%均值（--comm-flat，默认 false）
 
-type Thresholds struct { Cal, CPU, BubbleNs, CommRatio float64; CommMinCount, CommCountFloor int }
+type Thresholds struct { Cal, CPU, BubbleNs, CommThreshold float64; CommMinCount, CommCountFloor int }
 func DefaultThresholds() Thresholds
 func (t Thresholds) Normalized() Thresholds
 func Apply(t Thresholds)     // 设置上面这些全局「生效阈值」
@@ -143,7 +143,7 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
   先按算子类型 opType 分类；对每个 opType：
     每组取该 opType 下 count 最大的带宽作代表（大数据量更能体现真实带宽）
     所有组代表 count 取最大值，仅保留 count ≥ 最大值 ×50% 且 count > 10240 的组
-    剩余组代表带宽 → clustering.Detect(bws, SlowCommRatio, min) 递归聚类
+    剩余组代表带宽 → clustering.Detect(bws, CommThreshold, min) 递归聚类
       → 劣化组 + Ratio；劣化程度 = 1/Ratio（= 基线带宽/该组带宽，>1 越大越慢）
   一个组须在该域**所有 opType 都异常**才上报；劣化数值 = 该组各 opType 劣化指数中的最大值
     → AddGroup("comm", group, maxDeg)
@@ -151,7 +151,7 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
 - 带宽采用**方向 min**（带宽越小越慢）；匹配按算子类型分类后，组内取 count 最大代表，无 count 严格匹配。
 - **筛选**：count ≥ 最大 count×50% 且 count > 10240（`slowCommCountFloor`）。
 - **上报条件**：一个组必须在所有算子类型都异常（降低误报）；可同时上报多个满足条件的组。
-- 比较粒度仍是卡组；`SlowCommRatio` 默认 1.3、`SlowCommMinCount` 默认 1000、`SlowCommFlat` 默认 false（均 CLI 可调）。
+- 比较粒度仍是卡组；`CommThreshold` 默认 1.3、`SlowCommMinCount` 默认 1000、`SlowCommFlat` 默认 false（均 CLI 可调）。
 
 #### 慢CPU（getSlowHostRanksByHomogenize）
 ```

@@ -526,7 +526,7 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 func (c *Center) handleBusinessThresholds(w http.ResponseWriter, r *http.Request) {
 	var req config.Thresholds
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `invalid body: {"cal","cpu","bubble_ns","comm_ratio","comm_min_count","comm_count_floor"}`, http.StatusBadRequest)
+		http.Error(w, `invalid body: {"cal","cpu","bubble_ns","comm_threshold","comm_min_count","comm_count_floor"}`, http.StatusBadRequest)
 		return
 	}
 	c.mu.Lock()

@@ -164,11 +164,11 @@ func main() {
 			} else {
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --space-ratio-threshold value, using default\n")
 			}
-		case "--comm-slow-ratio":
+		case "--comm-threshold":
 			if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 1 {
-				thresholds.CommRatio = parsed
+				thresholds.CommThreshold = parsed
 			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --comm-slow-ratio value (must be > 1), using default 1.3\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --comm-threshold value (must be > 1), using default 1.3\n")
 			}
 		case "--comm-min-count":
 			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
@@ -276,7 +276,7 @@ func main() {
 
 	// No input at all → usage error before anything runs.
 	if inputPath == "" && kpiInput == "" {
-		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--bubble-threshold-ns=5000] [--space-ratio-threshold=2.0] [--comm-slow-ratio=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat]\n")
+		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--bubble-threshold-ns=5000] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat]\n")
 		fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
 		os.Exit(1)
 	}
@@ -342,7 +342,7 @@ func main() {
 
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Input path: %s\n", inputPath)
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f bubble=%.0fns commRatio=%.2f commMinCount=%d commCountFloor=%d flat=%v\n",
-			thresholds.Cal, thresholds.CPU, thresholds.BubbleNs, thresholds.CommRatio, thresholds.CommMinCount, thresholds.CommCountFloor, commFlat)
+			thresholds.Cal, thresholds.CPU, thresholds.BubbleNs, thresholds.CommThreshold, thresholds.CommMinCount, thresholds.CommCountFloor, commFlat)
 
 		// Data parsing: SQLite → CSV + JSON intermediates.
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Starting data parsing...\n")
@@ -405,7 +405,7 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 	config.FilePath = inputPath
 	th := config.Current()
 	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f bubble=%.0fns commRatio=%.2f commMinCount=%d commCountFloor=%d\n",
-		th.Cal, th.CPU, th.BubbleNs, th.CommRatio, th.CommMinCount, th.CommCountFloor)
+		th.Cal, th.CPU, th.BubbleNs, th.CommThreshold, th.CommMinCount, th.CommCountFloor)
 
 	// 4. Get parallel topology from group_info JSON files.
 	parallels, validRanks := detector.GetCurDetectionInfo(inputPath)

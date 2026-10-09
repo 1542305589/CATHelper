@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Global configuration variables – the ACTIVE thresholds read by the detector
+// Global configuration variables 鈥?the ACTIVE thresholds read by the detector
 // and report. They are set per scope via Apply: once at startup in one-shot
 // mode, per cycle in daemon mode, per business in center mode.
 var (
@@ -16,7 +16,7 @@ var (
 	CalThreshold       float64 // Slow-compute ratio threshold (default 1.3).
 	CPUThreshold       float64 // Slow-CPU ratio threshold (default 2.5).
 	BubbleThresholdNs  float64 // NPU bubble absolute threshold in ns (default 5000).
-	SlowCommRatio      float64 // Slow-comm bandwidth kmeans ratio threshold (default 1.3).
+	CommThreshold      float64 // Slow-comm bandwidth kmeans ratio threshold (default 1.3).
 	SlowCommMinCount   int     // Minimum op count included in bandwidth stats (default 1000).
 	SlowCommCountFloor int     // Absolute lower bound on a group's representative count (default 10240).
 	SlowCommFlat       bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment).
@@ -29,14 +29,14 @@ type Thresholds struct {
 	Cal            float64 `json:"cal"`
 	CPU            float64 `json:"cpu"`
 	BubbleNs       float64 `json:"bubble_ns"`
-	CommRatio      float64 `json:"comm_ratio"`
+	CommThreshold  float64 `json:"comm_threshold"`
 	CommMinCount   int     `json:"comm_min_count"`
 	CommCountFloor int     `json:"comm_count_floor"`
 }
 
 // DefaultThresholds returns the defaults used for any unset threshold.
 func DefaultThresholds() Thresholds {
-	return Thresholds{Cal: 1.3, CPU: 2.5, BubbleNs: 5000, CommRatio: 1.3, CommMinCount: 1000, CommCountFloor: 10240}
+	return Thresholds{Cal: 1.3, CPU: 2.5, BubbleNs: 5000, CommThreshold: 1.3, CommMinCount: 1000, CommCountFloor: 10240}
 }
 
 // Normalized fills any non-positive threshold with its default.
@@ -51,8 +51,8 @@ func (t Thresholds) Normalized() Thresholds {
 	if t.BubbleNs <= 0 {
 		t.BubbleNs = d.BubbleNs
 	}
-	if t.CommRatio <= 0 {
-		t.CommRatio = d.CommRatio
+	if t.CommThreshold <= 0 {
+		t.CommThreshold = d.CommThreshold
 	}
 	if t.CommMinCount <= 0 {
 		t.CommMinCount = d.CommMinCount
@@ -69,7 +69,7 @@ func Apply(t Thresholds) {
 	CalThreshold = t.Cal
 	CPUThreshold = t.CPU
 	BubbleThresholdNs = t.BubbleNs
-	SlowCommRatio = t.CommRatio
+	CommThreshold = t.CommThreshold
 	SlowCommMinCount = t.CommMinCount
 	SlowCommCountFloor = t.CommCountFloor
 }
@@ -80,7 +80,7 @@ func Current() Thresholds {
 		Cal:            CalThreshold,
 		CPU:            CPUThreshold,
 		BubbleNs:       BubbleThresholdNs,
-		CommRatio:      SlowCommRatio,
+		CommThreshold:  CommThreshold,
 		CommMinCount:   SlowCommMinCount,
 		CommCountFloor: SlowCommCountFloor,
 	}

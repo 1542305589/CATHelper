@@ -429,7 +429,7 @@ func (d *Daemon) handleDaemonSetThresholds(w http.ResponseWriter, r *http.Reques
 	}
 	var req config.Thresholds
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "无效请求体: {\"cal\",\"cpu\",\"bubble_ns\",\"comm_ratio\",\"comm_min_count\",\"comm_count_floor\"}", http.StatusBadRequest)
+		http.Error(w, "无效请求体: {\"cal\",\"cpu\",\"bubble_ns\",\"comm_threshold\",\"comm_min_count\",\"comm_count_floor\"}", http.StatusBadRequest)
 		return
 	}
 	d.SetThresholds(req)
