@@ -301,7 +301,7 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 	jsonPath := filepath.Join(archive, "straggler_output.json")
-	if err := WriteCombinedJSON(cr.KPI, cr.Result, jsonPath); err != nil {
+	if err := WriteCombinedJSON(cr.ID, cr.KPI, cr.Result, jsonPath); err != nil {
 		cr.Error = fmt.Sprintf("write result JSON: %v", err)
 		return
 	}
@@ -757,9 +757,11 @@ func (d *Daemon) resetTimer() {
 // ---------------------------------------------------------------------------
 
 // WriteCombinedJSON marshals the KPI + profiler result into one JSON file at
-// path — the shared straggler_output.json shape ({"kpi": ..., "profiler": ...}).
-func WriteCombinedJSON(kpi *resource.DetectionResult, profiler *utils.NodeOutput, path string) error {
-	out := CombinedOutput{KPI: kpi, Profiler: profiler}
+// path — the shared straggler_output.json shape
+// ({"id": ..., "kpi": ..., "profiler": ...}). id is the cycle id in daemon
+// mode; pass 0 in one-shot mode to omit it.
+func WriteCombinedJSON(id int, kpi *resource.DetectionResult, profiler *utils.NodeOutput, path string) error {
+	out := CombinedOutput{ID: id, KPI: kpi, Profiler: profiler}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal combined output: %w", err)

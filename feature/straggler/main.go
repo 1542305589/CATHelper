@@ -375,7 +375,7 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────
 	if kpiResult != nil || profilerOut != nil {
 		const combinedPath = "straggler_output.json"
-		if err := daemon.WriteCombinedJSON(kpiResult, profilerOut, combinedPath); err != nil {
+		if err := daemon.WriteCombinedJSON(0, kpiResult, profilerOut, combinedPath); err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write combined output: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Result written to %s\n", combinedPath)
