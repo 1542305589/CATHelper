@@ -85,9 +85,10 @@ type DetectResult struct {
 // CombinedOutput is the merged KPI + profiler result written as one JSON file
 // (the "straggler_output.json" shape shared with one-shot mode).
 type CombinedOutput struct {
-	ID       int                       `json:"id,omitempty"` // cycle id (daemon mode; omitted in one-shot)
-	KPI      *resource.DetectionResult `json:"kpi,omitempty"`
-	Profiler *utils.NodeOutput         `json:"profiler,omitempty"`
+	ID        int                       `json:"id,omitempty"`         // cycle id (daemon mode; omitted in one-shot)
+	StartedAt string                    `json:"started_at,omitempty"` // cycle start time RFC3339 (daemon mode; omitted in one-shot)
+	KPI       *resource.DetectionResult `json:"kpi,omitempty"`
+	Profiler  *utils.NodeOutput         `json:"profiler,omitempty"`
 }
 
 // statusResponse is the GET /status payload.
