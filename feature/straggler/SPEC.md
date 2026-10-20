@@ -527,7 +527,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 ### 3.2 HTTP 接口契约
 
-路由用 Go 1.22+ ServeMux method patterns，**无 `/api/v1` 前缀**。
+路由用 Go 1.22+ ServeMux method patterns。
 
 | 方法 & 路径 | 作用 | 成功 | 失败 |
 |-------------|------|------|------|

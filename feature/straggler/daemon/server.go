@@ -17,8 +17,8 @@ import (
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 )
 
-// httpServer builds the net/http mux (standard library only). Paths carry no
-// /api/v1 prefix: /status + /straggler/* for queries, /daemon/* for control.
+// httpServer builds the net/http mux (standard library only). Routes:
+// /status + /straggler/* for queries, /daemon/* for control.
 func (d *Daemon) httpServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
