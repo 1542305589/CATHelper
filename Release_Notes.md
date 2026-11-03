@@ -4,6 +4,177 @@
 
 ---
 
+## v0.2.4
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.4 |
+| 发布时间 | 2026-09-08 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器（daemon 模式需 aarch64 + Ascend NPU + CANN） |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**）+ 上层特性 Elastic EP v0.1.0（**版本号不变**）+ Straggler 慢节点检测 v0.2.3 + Accuracy-Monitoring 推理精度异常检测 v0.2.0 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.3 基础上，合入 `straggler-detection` 与 `feature/accuracy-monitoring` 分支更新（约 29 个提交）：Straggler 守护进程运维能力增强（优雅关闭、采集步数参数、op_metric 归档与聚合查询）并修复慢通信检测链路多处缺陷；Accuracy-Monitoring 新增**运行时动态配置端点**、异常落盘增强（输出 token id + 思维链）与 WebUI 优化。**底座 CATMonitor 与 EEP 版本号不变**，Straggler 由 v0.2.2 升至 v0.2.3，Accuracy-Monitoring 由 v0.1.0 升至 v0.2.0。
+
+### 主要变更
+
+#### 上层特性 — Straggler 慢节点检测 v0.2.3
+
+- **新增 `POST /daemon/stop`**：优雅关闭守护进程（幂等，重复调用为 no-op）；关闭时删除全部 `daemon_results/` 归档落盘结果（`dump_dir`），HTTP server 关闭、在跑周期等待结束、dynolog 子进程清理。
+- **新增 `--profiler-iterations` 参数**：透传 dyno `nputrace` 采集迭代数，默认 **1**（较 v0.2.3 初版的 5 调低，缩短单周期采集耗时）。
+- **op_metric 归档与聚合查询**：每周期结束时将 `op_metric/` 中间产物复制归档至 `daemon_results/<start>/`（周期结束 `--profiler-dir` 整目录删除后仍可查），并新增聚合视图接口 `GET /straggler/op_metric/latest`、`GET /straggler/op_metric/{id}`、`GET /straggler/op_metric/{id}/{file}`。
+- **检测算法重构**：`clustering` score 统一为**簇均值/基线均值**（双方向各检一次取标记少的簇，min 侧阈值取倒数），KPI 空间检测与 Profiler 均质化聚类语义一致。
+- **移除 faultsub 回注（代码落地）**：正式移除 `--faultsub-url` 参数及向 faultsub 回注 `straggler_detected` 事件的逻辑（v0.2.3 已文档化预告，本次代码移除）。命中慢卡由 daemon HTTP 接口或结果文件消费。
+- **Bug 修复**：修复并行拓扑去重失效（tp 重复组）、`idToXp` 键空间错误致慢通信不可检测、dataparse 通信组 Duration 反向映射键空间错位、daemon `fileWriteOnce` 未按周期重置致后续周期拓扑丢失、Summary 扁平化残留旧结构体引用与降频检测断言、`build.sh` `ver_ge` 版本比较死循环（并禁用 GOTOOLCHAIN 自动下载、为 Go 下载加超时）。
+- **文档同步**：`feature/straggler/README.md` 按用户执行顺序重写（安装构建前置 + 最新接口与默认值），补充 C++/Rust 依赖与 `mindstudio_monitor` 手动编译说明。
+
+#### 上层特性 — Accuracy-Monitoring 推理精度异常检测 v0.2.0
+
+- **新增运行时动态配置端点**：`GET/POST <VLLM_ANOMALY_CONFIG_PATH>`（默认 `/anomaly/config`，路径可配）内联响应——GET 返回当前 `{"monitor_rate": <float>}`；POST 校验 ∈ [0.0, 1.0] 后即时更新请求监控概率（下一请求生效），校验失败 400 且当前值不变；不持久化（重启回退 env 初始值），无认证（同 metrics 端点），`enabled=False` 时端点仍可达。
+- **新增 Prometheus 指标**：`vllm_anomaly_monitor_rate` Gauge（当前监控概率，运行时可更新）。
+- **异常落盘增强**：落盘异常记录新增 `text_tokenid`（per-choice 实际生成 token_id 序列，非流式与流式 SSE 累积均可）与 `reasoning_content`（chat 思维链文本）字段。
+- **WebUI 优化**：多实例聚合页面与 store/前端增强；`webui.yaml` 默认容量调整（异常事件环形缓冲 10000→1000、告警 500→200、趋势保留 24h→30 天）。
+- **测试补充**：新增异常落盘、动态配置、e2e 采样指标降级等用例；测试用例修复。
+
+#### 底座 — CATMonitor / 上层特性 — EEP
+
+- **无变更**：底座 CATMonitor（v0.3.3）与 EEP（v0.1.0）代码与版本号均不变。
+
+### 测试
+
+- **CATMonitor（Go 1.23.4）**：`go test ./...` 全部通过（collectors/source/features 约 30 个包全绿）。
+- **Straggler（独立 Go module，Go 1.23.4）**：`go test ./...` 全绿（`clustering`/`resource` 包通过，其余包无测试文件）。
+- **Accuracy-Monitoring（Python 3.12，pytest）**：单元 + 集成 **374 passed / 12 skipped**；e2e 42 例标记 `nightly`/`full`，需真实 vLLM 服务与模型文件（本机未装 vllm、无模型路径），未能执行——失败/报错均为 `FileNotFoundError: 'vllm'` 环境缺失所致，非代码缺陷，待带 vLLM 环境的机器完整验证。
+- **构建注意**：两个 go.mod 均声明 `go 1.23.4`，需 Go ≥ 1.21 工具链（Go 1.20 报 "invalid go version" 无法解析，实测复现）；本机默认 `go` 为 1.20.10 时需改用 1.23.4。
+
+### 已知限制
+
+1. **daemon 模式需 aarch64 真机**（继承 v0.2.3）：依赖 Ascend NPU + CANN + `torch_npu` + `mindstudio_monitor` wheel，dyno/dynolog 须由 `build.sh` 装到系统 PATH；跨平台编译产物仅支持一次性模式。
+2. **`POST /daemon/stop` 会删除全部归档结果**：优雅关闭时清空 `daemon_results/`，需保留历史请先自行备份或另行消费。
+3. **monitor_rate 动态配置不持久化**：经 `/anomaly/config` 更新的监控概率重启后回退 env 初始值。
+4. **e2e 测试需 vLLM 环境**：42 个 e2e 用例（`nightly`/`full` 标记）依赖真实 vLLM 服务与本地模型文件，CI/本机需预装后执行。
+5. **Go 工具链要求 ≥1.21**：`go 1.23.4` 格式的 go.mod 无法被 Go 1.20 及更早版本解析。
+
+---
+
+## v0.2.3
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.3 |
+| 发布时间 | 2026-08-26 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器（daemon 模式需 aarch64 + Ascend NPU + CANN） |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**）+ 上层特性 Elastic EP v0.1.0（**版本号不变**）+ Straggler 慢节点检测 v0.2.2 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.2 基础上，合入 `straggler-detection` 分支（30+ 提交）对 Straggler 特性做重大升级：新增**常驻守护进程模式（daemon）**、KPI 检测算法重构为纯空间维度、新增 `build.sh` 一键构建、引入 msmonitor 子模块。**底座 CATMonitor 与 EEP 版本号不变**，仅 Straggler 由 v0.2.1 升至 v0.2.2。
+
+### 主要变更
+
+#### 上层特性 — Straggler 慢节点检测 v0.2.2
+
+- **常驻守护进程模式（`--daemon`）**：新增 `daemon/` 包（`daemon.go`/`dyno.go`/`server.go`/`store.go`/`types.go`），周期性自动完成「触发采集（dynolog/dyno）→ 转 .db（python analyse）→ 解析 → KPI+Profiler 检测」全链路，结果通过 HTTP 查询与运维控制，适合接入手管/调度系统持续巡检。HTTP 接口：`GET /healthz`/`/status`/`/straggler/results/{latest,history,{id}}`/`/straggler/report/{latest,{id}}`、`POST /daemon/{start,pause,interval,trigger}`（默认端口 `:8080`）。每周期结果落盘 `daemon_results/<start>/`，周期结束删除整个 `--profiler-dir` 防堆积；查询只看本次会话内存 store（重启归零）。
+- **KPI 检测算法重构（resource 模块）**：移除时间维度、历史基线、检测窗口、根因定界（删除 `emit.go`/`fusion.go`/`rootcause.go`/`time_detector.go`/`baseline.go`），异常**完全由空间维度 peer 对比**（取最后一个聚合点，同节点卡互比）判定；空间检测统一走共享 `clustering` 包的 kmeans 比例检测（双方向各检一次，标记数少的为异常簇）；新增 `utils/node_result.go` 节点级结果聚合。
+- **共享聚类包 `clustering/kmeans.go`**：KPI 空间检测与 Profiler 均质化聚类共用同一 kmeans 比例算法（z-score 标准化 + 肘部法选 k + kmeans++ Lloyd 迭代，固定种子结果确定）。
+- **移除 faultsub 回注**：移除 `--faultsub-url` 参数及向 faultsub 回注 `straggler_detected` 事件的逻辑（与守护进程结果上报重复）。命中慢卡不再回注 faultsub，改由 daemon 的 HTTP 接口或结果文件消费。
+- **CLI 参数变更（破坏性）**：移除 `--faultsub-url`/`--baseline-hours`/`--detection-hours`/`--space-method`/`--space-z-threshold`/`--time-z-threshold`/`--time-weight`/`--no-trend`/`--no-fallback`/`--always-profiling` 等旧 flag；新增 `--space-ratio-threshold`（空间簇比例阈值，默认 2.0，独立旋钮）、`--debug-output`（全量数据诊断）、守护进程参数 `--profiler-dir`/`--kpi-dir`/`--daemon-port`/`--interval`/`--collect-wait`。
+- **一键构建 `build.sh`**（aarch64 必需）：架构检查 → 安装 dyno/dynolog（`.deb`，系统包管理器）→ Python 版本检查（3.9–3.12）→ 安装 `mindstudio_monitor` wheel → Go 工具链（缺失/过旧从阿里云镜像安装）→ `CGO_ENABLED=0 go build`。Go 编译不再依赖 dyno/dynolog 二进制（已无 embed），任何平台可出包；daemon 模式运行时才要求 aarch64 主机装好 dyno/dynolog。
+- **msmonitor 子模块**：新增 `feature/straggler/3rdparty/msmonitor`（Ascend/msmonitor，`build.sh` 安装流程引用）。
+- **Bug 修复与测试修正**：修复并行拓扑去重失效（tp 重复组）、`idToXp` 键空间错误导致慢通信不可检测、dataparse 通信组 Duration 反向映射键空间错位、node_result 为空与报告排序重复、dyno 采集判定与 dump 目录定位、守护进程暂停期间定时器继续走导致恢复后提前触发（`f0d456e`）；修正 `TestSpaceFreqSingleDownclock` 期望为原始比 0.444（`0169472`）。
+- **文档同步**：`feature/straggler/` 下 README/DESIGN/DESIGN_NPU_RESOURCE/SPEC/straggler_combination_DESIGN 全面重写；根目录 `README.md`/`SPEC.md`/`User_Manual.md` 同步新算法、daemon 模式、新 CLI 与构建流程。
+
+#### 底座 — CATMonitor / 上层特性 — EEP
+
+- **无变更**：底座 CATMonitor（v0.3.3）与 EEP（v0.1.0）代码与版本号均不变，仅根目录文档同步 Straggler 新特性描述。
+
+### 测试
+
+- **Straggler（独立 Go module，Go 1.23.4）**：`go build`（CGO_ENABLED=0，产物 14.9MB）/`go vet ./...`/`go test ./...` 全绿，clustering + resource 包测试通过（含此前失败的 `TestSpaceFreqSingleDownclock`，已随 `0169472` 修正）。
+- **合并验证**：本地 `main` ← `origin/straggler-detection` 试合并，16 处冲突全部位于 `feature/straggler/`（10 内容冲突 + 6 modify/delete），按"以 straggler-detection 为准"对齐解决；elastic-ep 与 accuracy-monitoring 零冲突。验证未推送至远端前已完成。
+
+### 已知限制
+
+1. **daemon 模式需 aarch64 真机**：依赖 Ascend NPU + CANN + `torch_npu` + `mindstudio_monitor` wheel，dyno/dynolog 须由 `build.sh` 装到系统 PATH；跨平台（amd64/windows）编译产物仅支持一次性模式。
+2. **KPI 时间维度已移除**：仅靠空间 peer 对比判定异常，无历史基线兜底；单节点在场卡 < 2 时该节点 score=0；`aicore_freq` 轻度降频（< 空间簇比例阈值 2.0×）不被标记。
+3. **回注 faultsub 已移除**：命中慢卡不再经 faultsub 闭环，需通过 daemon HTTP 接口或 `straggler_output.json` 自行消费。
+4. **msmonitor 子模块需初始化**：克隆仓库后需 `git submodule update --init feature/straggler/3rdparty/msmonitor`（`build.sh` 引用），Go 编译本身不依赖。
+5. **未推送到远端**：本次发布暂在本地完成。
+
+---
+
+## v0.2.2
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.2 |
+| 发布时间 | 2026-07-31 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器 |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**）+ 上层特性 Elastic EP v0.1.0 + Straggler 慢节点检测 v0.2.1 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.1 基础上，合入 `straggler-detection` 分支，修复 Straggler 第二道（Profiler）慢 CPU 检测的节点分组逻辑：由硬编码"每 4 张连续 rank 卡为一台机器"改为从 Profiler `.db` 的 `HOST_INFO` 表读取 `hostUid` 进行动态分组。**底座 CATMonitor 与 EEP 版本号不变**，仅 Straggler 由 v0.2.0 升至 v0.2.1。
+
+### 主要变更
+
+- **慢 CPU 检测动态分组**：`profiling/dataparse` 新增 `queryHostUid`（`SELECT hostUid FROM HOST_INFO LIMIT 1`）识别每张卡所属物理节点，新增 `writeHostInfo` 写入 `op_metric/host_info_{N}.json`（rank→hostUid 映射），`PerformanceMetrics` 增加 `HostUid` 字段；`profiling/detector` 新增 `GetHostUidMapping` 读取映射，`getSlowHostRanksByHomogenize` 用 `smoothByHostUid` 替换 `processCPUData`——相同 hostUid 的卡归为同节点，节点内去 min/max 截尾均值预处理后均质化聚类（方向 max），无 hostUid 的卡保持原值不变。
+- **消除硬编码假设**：旧版假定每 4 张连续 rank 卡属同一物理机，在非 4 卡/节点拓扑下误分组；新版按真实 hostUid 分组，适配任意节点卡数。
+- **文档同步**：`feature/straggler/DESIGN.md`、`SPEC.md` 更新数据解析流程、慢 CPU 算法说明与关键 SQL；根目录 `README.md`/`SPEC.md`/`User_Manual.md` 同步慢 CPU 分组描述。
+
+### 测试
+
+- `go build`/`go vet`/`go test` 全绿；二进制构建通过；gofmt 无问题（合并提交已验证）。
+
+### 已知限制
+
+1. `HOST_INFO` 表或 `hostUid` 列缺失的 `.db`，对应卡跳过节点预处理，保持原始 ZP_Host 值参与聚类（降级兼容）。
+2. 未推送到远端：本次发布暂在本地完成。
+
+---
+
+## v0.2.1
+
+| 项目 | 说明 |
+|------|------|
+| 版本号 | v0.2.1 |
+| 发布时间 | 2026-07-31 |
+| 发布人 | sunnytao |
+| 平台支持 | Linux (x86_64)；NPU 容错/检测特性需华为昇腾 A3 服务器 |
+| 组成 | 底座 CATMonitor v0.3.3（**版本号不变**，合入 snapshot 统一生产重构）+ 上层特性 Elastic EP v0.1.0 + Straggler 慢节点检测 v0.2.0 |
+| 许可证 | Apache-2.0 |
+
+### 版本定位
+
+在 v0.2.0 基础上，合入 `feature/catmonitor` 分支，对底座 CATMonitor 进行 snapshot 统一生产重构 + feature-scoped 采集增强。**底座 CATMonitor 版本号维持 v0.3.3 不变**，仅刷新底座文档内容以反映重构。
+
+### 主要变更
+
+- **Snapshot 统一生产**：新增 `features/snapshot` 包，daemon 作为唯一 snapshot 生产者，产出 per-component `snapshot_<comp>.json` + 全局 `snapshot.json`（health/collectors/intervals/system_specs）；web/dfee 转为**只读消费者**，不再各自采集，避免重复跑硬件。
+- **Feature-scoped 采集**：`features` 配置 + `internal/metrics` 的 `SetFeatureScope` 白名单机制；非空时只采各 feature `metrics.yaml` 并集内且 `priority ≥ min_priority` 的指标，`AnyWanted` 跳过全 out-of-scope 子方法；并派生 per-component cadence `C_comp = min(feature interval)`、`C_global = min(C_comp)`。
+- **dfee 独立二进制化**：`features/dfee` 转为 `package main`（`catmonitor-dfee`，:9528），补全 69 项 `metrics.yaml`，只读消费 snapshot。
+- **web 瘦身**：删除 `DataCollector`/`config.go`/`config.yaml`，改 `-addr`/`-snapshot-dir` flag，REST API 只读化（删 `/api/refresh`、`POST /api/config`），`/dfee/` 路由转独立二进制。
+- **Makefile**：`make all/web/dfee` + CANN DCMI 头自动探测（`-tags dcmi`）。
+
+### 测试
+
+- `go vet`/`go build`/`go test` 全绿；三二进制（daemon/web/dfee）独立构建通过。
+- 系统测试（无 NPU/GPU 环境）：version/list/collect/health + daemon:9100/metrics（Prometheus 格式）+ web:9527（/api/snapshot 等）+ dfee:9528（/dfee/ + /api/dfee）+ 无硬件采集器优雅降级，全部通过。详见 `CATMonitor/docs/test_report.md`。
+- 已知限制：5 个新增文件存在 gofmt 格式瑕疵（struct 字段对齐，非阻塞）；`-race` 需 cgo 未覆盖。
+
+### 文档
+
+刷新底座 5 个文档反映重构：`CATMonitor/README.md`、`SPEC.md`、`DESIGN.md`、`docs/User_Manual.md`、`docs/CATMonitor_indi_list.md`（底座版本号维持 v0.3.3，indi_list 更新日期 2026-07-31）。
+
+---
+
 ## v0.2.0
 
 | 项目 | 说明 |

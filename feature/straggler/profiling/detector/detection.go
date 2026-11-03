@@ -15,14 +15,17 @@ import (
 //  1. Select primary detection group.
 //  2. Detect NPU Bubble (fixed threshold).
 //  3. Detect slow compute (homogeneous clustering on primary group).
-//  4. Detect slow communication (homogeneous clustering per parallel domain).
+//  4. Detect slow communication (per-domain group bandwidth comparison).
 //  5. Detect slow CPU (homogeneous clustering with hostUid-based trim preprocessing).
 func DelimitDetection(
 	stepData map[string]map[int]float64,
 	parallels map[string][][]int,
 	validRanks []int,
 ) config.DegradationData {
-	if len(stepData) == 0 || len(parallels) == 0 || len(validRanks) == 0 {
+	// Parallels may be empty when the profiler data has no registered group
+	// names; GetCalDetectionGroup degrades to a single all-ranks group so
+	// cal-only detection can still run.
+	if len(stepData) == 0 || len(validRanks) == 0 {
 		return nil
 	}
 
@@ -42,8 +45,8 @@ func DelimitDetection(
 	// 3. Slow compute detection.
 	_ = getSlowCalculateRanks(calGroups, stepData, calGroupName, localResult)
 
-	// 4. Slow communication detection.
-	_ = detectionAllCommunicationParallel(parallels, calGroups, validRanks, stepData, localResult)
+	// 4. Slow communication detection (bandwidth comparison per domain group).
+	DetectSlowDomainByBandwidth(parallels, stepData, localResult)
 
 	// 5. Slow CPU detection.
 	if hostData, ok := stepData[zpHostDataColumn]; ok {
@@ -79,6 +82,13 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
 		if len(filtered) > 0 {
 			return domain, filtered
 		}
+	}
+	// No recognized parallel domain (e.g. group names not registered in the
+	// profiler data, or only unknown domains like "mc2" present): degrade to
+	// a single group of all ranks so cal-only detection can still run. Slow
+	// comm/CPU/bubble have no data without group names and stay silent.
+	if len(curNpus) >= minRanksInGroup {
+		return defaultGroupParallelDomainName, [][]int{curNpus}
 	}
 	return "", nil
 }

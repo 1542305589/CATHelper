@@ -1,0 +1,3 @@
+[submodule "feature/straggler/3rdparty/msmonitor"]
+	path = feature/straggler/3rdparty/msmonitor
+	url = https://github.com/Ascend/msmonitor.git

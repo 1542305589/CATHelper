@@ -1,0 +1,22 @@
+auth:
+  username: admin
+  password: admin@123
+  token_ttl_hours: 24
+
+poll:
+  interval_seconds: 3
+  http_timeout_seconds: 1
+
+instances: []
+
+store:
+  event_capacity: 1000
+  alert_capacity: 200
+  raw_trend_window_seconds: 3600
+  trend_bucket_seconds: 60
+  trend_horizon_seconds: 2592000
+
+webhooks:
+  default: ""
+
+alerts: []

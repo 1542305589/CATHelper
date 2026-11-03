@@ -8,17 +8,18 @@ import (
 )
 
 // =============================================================================
-// 1-Minute Trimmed-Mean Aggregation
+// Aggregation-Window Trimmed-Mean Aggregation
 // =============================================================================
 
-// AggregateByMinute groups raw rows into 1-minute buckets and computes a single
-// aggregated row per minute.
+// AggregateByMinute groups raw rows into AggregationWindowSec (default 10s)
+// buckets and computes a single aggregated row per window. (The function name
+// is a legacy "ByMinute"; the actual window comes from cfg.)
 //
 // Continuous metrics (TEMP, POWER, FREQ, UTIL, BANDWIDTH, NIC_RX):
 //   sort → trim top/bottom 25% → mean of middle 50% (midmean)
 //
 // Counter metrics (ERR_PKT, RETRY, OUT_OF_ORDER, PFC_PKT):
-//   per-card increment within the 1-minute bucket (handles counter wrap)
+//   per-card increment within the aggregation-window bucket (handles counter wrap)
 func AggregateByMinute(rawRows []CSVRow, cardIDs []int, cfg DetectionConfig) ([]CSVRow, error) {
 	if len(rawRows) == 0 {
 		return nil, fmt.Errorf("no rows to aggregate")
@@ -29,7 +30,7 @@ func AggregateByMinute(rawRows []CSVRow, cardIDs []int, cfg DetectionConfig) ([]
 		windowSec = 60
 	}
 
-	// Group rows by minute bucket.
+	// Group rows by aggregation-window bucket.
 	buckets := make(map[int64][]CSVRow)
 	for _, row := range rawRows {
 		bucketTS := (row.Timestamp / windowSec) * windowSec
@@ -62,7 +63,8 @@ func AggregateByMinute(rawRows []CSVRow, cardIDs []int, cfg DetectionConfig) ([]
 	return aggregated, nil
 }
 
-// aggregateBucket computes one aggregated row from all samples in a 1-minute bucket.
+// aggregateBucket computes one aggregated row from all samples in an
+// aggregation-window bucket.
 func aggregateBucket(bucket []CSVRow, bucketTS int64, cardIDs []int, cfg DetectionConfig) (CSVRow, error) {
 	row := CSVRow{
 		Timestamp: bucketTS,
@@ -178,37 +180,4 @@ func counterDelta(vals []float64) float64 {
 		}
 	}
 	return delta
-}
-
-// =============================================================================
-// Window Split
-// =============================================================================
-
-// SplitWindows divides aggregated rows into baseline and detection windows.
-//
-// Returns (baselineRows, detectionRows).
-// Detection window = last DetectionHours of data.
-// Baseline window = everything before that.
-func SplitWindows(rows []CSVRow, cfg DetectionConfig) (baseline, detection []CSVRow) {
-	if len(rows) == 0 {
-		return nil, nil
-	}
-
-	detectionSec := int64(cfg.DetectionHours * 3600)
-	if detectionSec <= 0 {
-		detectionSec = 3600 // default 1 hour
-	}
-
-	lastTS := rows[len(rows)-1].Timestamp
-	cutoffTS := lastTS - detectionSec
-
-	for _, row := range rows {
-		if row.Timestamp >= cutoffTS {
-			detection = append(detection, row)
-		} else {
-			baseline = append(baseline, row)
-		}
-	}
-
-	return baseline, detection
 }
