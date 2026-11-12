@@ -1,6 +1,5 @@
 components:
   - component: cpu
-    interval: 3s
     metrics:
       - name: usage
         cn_name: "CPU使用率"
@@ -203,7 +202,6 @@ components:
         unit: "order"
         static: false
   - component: memory
-    interval: 3s
     metrics:
       - name: usage
         cn_name: "内存使用率"
@@ -306,7 +304,6 @@ components:
         unit: ""
         static: false
   - component: disk
-    interval: 5s
     metrics:
       - name: space_usage
         cn_name: "磁盘空间使用率"
@@ -349,7 +346,6 @@ components:
         unit: ""
         static: false
   - component: gpu
-    interval: 3s
     metrics:
       - name: utilization
         cn_name: "GPU使用率"
@@ -387,7 +383,6 @@ components:
         unit: "MHz"
         static: false
   - component: npu
-    interval: 3s
     metrics:
       - name: utilization
         cn_name: "NPU使用率(AICore)"
@@ -996,7 +991,6 @@ components:
         unit: "bytes"
         static: false
   - component: network
-    interval: 3s
     metrics:
       - name: throughput
         cn_name: "网络吞吐量"

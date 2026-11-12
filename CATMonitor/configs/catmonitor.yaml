@@ -35,12 +35,19 @@ storage:
 
 health:
   enabled: true
-  interval: 5s
   weight_scheme: auto
 
 collection:
   # Minimum priority to collect: low (all) | medium (skip Low) | high (only High)
   min_priority: low
+
+# Enabled features. For each name the daemon loads features/<name>/metrics.yaml
+# (priority overrides — unions the metrics each feature needs so they survive
+# metrics.Filter) and derives the per-component collection cadence C_comp as the
+# min across the listed features' declared intervals (falling back to
+# collectors.<name>.interval for components no feature declares). Empty = use the
+# default catalog (configs/metrics.yaml) + collectors.interval only.
+features: [dfee]
 
 # Fault subscription & push mechanism (features/faultsub). Default off; enable
 # to let external fault managers (e.g. EEP) subscribe to NPU fault events via
@@ -71,3 +78,12 @@ straggler_output:
   data_dir: /var/lib/catmonitor/straggler   # KPI file directory
   retention: 360h            # file retention (default 15 days, matches baseline window)
   flush_interval: 60s        # in-memory buffer flush cadence
+
+# Snapshot production (per-component snapshot_<comp>.json + global
+# snapshot.json), consumed by read-only features (web/dfee). Default off — when
+# off the daemon writes no snapshot files and behaves as before. When on, the
+# daemon is the sole snapshot producer; web must run as a read-only consumer
+# (no self-collection). See features/snapshot/.
+snapshot:
+  enabled: false
+  dir: /var/lib/catmonitor/snapshot   # directory for snapshot_<comp>.json + snapshot.json

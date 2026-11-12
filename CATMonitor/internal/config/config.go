@@ -16,8 +16,10 @@ type Config struct {
 	Storage         StorageConfig           `yaml:"storage"`
 	Health          HealthConfig            `yaml:"health"`
 	Collection      CollectionConfig        `yaml:"collection"`
+	Features        []string                `yaml:"features"`        // enabled features; daemon loads features/<name>/metrics.yaml overrides + derives C_comp from their intervals
 	FaultSub        FaultSubConfig          `yaml:"faultsub"`
 	StragglerOutput StragglerOutputConfig   `yaml:"straggler_output"`
+	Snapshot        SnapshotConfig          `yaml:"snapshot"`
 }
 
 // ServerConfig holds server-level configuration.
@@ -38,10 +40,12 @@ type StorageConfig struct {
 	Rotation   string        `yaml:"rotation"`
 }
 
-// HealthConfig holds health evaluation configuration.
+// HealthConfig holds health evaluation configuration. (Health is evaluated by
+// the snapshot global writer at C_global; no separate health interval — removed
+// dead config.) WeightScheme selects the scoring weights ("auto" detects
+// gpu/npu).
 type HealthConfig struct {
 	Enabled      bool          `yaml:"enabled"`
-	Interval     time.Duration `yaml:"interval"`
 	WeightScheme string        `yaml:"weight_scheme"` // auto | cpu_only | accelerated_8card | accelerated_4card
 }
 
@@ -81,6 +85,18 @@ type StragglerOutputConfig struct {
 	Metrics       []string      `yaml:"metrics"`         // which straggler fields to emit (empty=all)
 }
 
+// SnapshotConfig controls daemon-side snapshot production (per-component
+// files snapshot_<comp>.json + one global snapshot.json), consumed by read-only
+// features (web/dfee). When Enabled is false (the default) the daemon writes
+// no snapshot files and behaves exactly as before — this is the migration
+// switch. When enabled, the daemon is the sole snapshot producer and web must
+// run as a read-only consumer (no self-collection). The per-component history
+// ring depth is fixed at 60 (not configurable).
+type SnapshotConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Dir     string `yaml:"dir"` // directory for snapshot_<comp>.json + snapshot.json
+}
+
 // Default returns the default configuration.
 func Default() *Config {
 	return &Config{
@@ -103,7 +119,6 @@ func Default() *Config {
 		},
 		Health: HealthConfig{
 			Enabled:      true,
-			Interval:     5 * time.Second,
 			WeightScheme: "auto",
 		},
 		FaultSub: FaultSubConfig{
@@ -122,6 +137,10 @@ func Default() *Config {
 			DataDir:       platform.DataDir() + "/straggler",
 			Retention:     15 * 24 * time.Hour,
 			FlushInterval: 60 * time.Second,
+		},
+		Snapshot: SnapshotConfig{
+			Enabled: false, // opt-in; daemon unchanged when off
+			Dir:     platform.DataDir() + "/snapshot",
 		},
 	}
 }

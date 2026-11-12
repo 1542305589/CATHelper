@@ -1,0 +1,70 @@
+package daemon
+
+import "sync"
+
+// store is a mutex-protected slice of recent CycleResults. It is the sole data
+// source for /status (counters + last_cycle) and /straggler/results/*: only
+// cycles from THIS daemon session are visible, so a restart starts with no
+// history. The slice is unbounded — every finished cycle of the session is
+// kept, so history can list all of this session's collection/analysis runs.
+type store struct {
+	mu     sync.Mutex
+	cycles []*CycleResult
+	total  int // cycles started this session (failed included)
+	failed int // cycles that errored this session
+}
+
+func newStore() *store {
+	return &store{}
+}
+
+// add appends a finished cycle. History is unbounded: no trimming.
+func (s *store) add(c *CycleResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.total++
+	if c.Error != "" {
+		s.failed++
+	}
+	s.cycles = append(s.cycles, c)
+}
+
+// latest returns the most recent finished cycle, or nil when none.
+func (s *store) latest() *CycleResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.cycles) == 0 {
+		return nil
+	}
+	return s.cycles[len(s.cycles)-1]
+}
+
+// get returns the cycle with the given id from this session, or nil.
+func (s *store) get(id int) *CycleResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.cycles) - 1; i >= 0; i-- {
+		if s.cycles[i].ID == id {
+			return s.cycles[i]
+		}
+	}
+	return nil
+}
+
+// list returns this session's cycles, newest first (a snapshot copy).
+func (s *store) list() []*CycleResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*CycleResult, 0, len(s.cycles))
+	for i := len(s.cycles) - 1; i >= 0; i-- {
+		out = append(out, s.cycles[i])
+	}
+	return out
+}
+
+// counts returns (total, failed) cycles for this session.
+func (s *store) counts() (total, failed int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.total, s.failed
+}

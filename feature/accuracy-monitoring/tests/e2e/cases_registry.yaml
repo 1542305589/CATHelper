@@ -1,0 +1,283 @@
+# E2E Test Cases Registry
+# Maps functional test names to TC IDs, priorities, tiers, and execution order.
+# Tiers: lightweight (P0, PR), full (P0+P1+P2 except nightly), nightly (all)
+# TC 编号与 E2E测试用例.xlsx 保持一致（连续 TC-001~TC-042）
+# order 按服务签名分组连片排布（vllm_service_factory 单活跃实例）：
+#   10        no-mw 服务（采集基线）
+#   20~45     默认服务组 {middleware: on, env: {}, injector: on}
+#   60~66     自定义 env 组（各独立签名）
+#   70~72     DETECTOR_WORKERS=4 组（nightly）
+#   80        latency（函数内串行换出 no-mw -> mw）
+#   90~92     fail-fast 组（expect_fail，不占活跃槽位）
+
+# === P0 (lightweight + full + nightly) ===
+test_baseline_collection:
+  order: 10
+  tc_id: TC-001
+  priority: P0
+  tiers: [lightweight, full, nightly]
+
+test_transparency_chat_nonstream:
+  order: 20
+  tc_id: TC-002
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  depends_on: [test_baseline_collection]
+
+test_transparency_chat_stream:
+  order: 21
+  tc_id: TC-003
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  depends_on: [test_baseline_collection]
+
+test_transparency_completions_nonstream:
+  order: 22
+  tc_id: TC-004
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  depends_on: [test_baseline_collection]
+
+test_transparency_completions_stream:
+  order: 23
+  tc_id: TC-005
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  depends_on: [test_baseline_collection]
+
+test_inject_rare_character:
+  order: 24
+  tc_id: TC-006
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  requires_inject: true
+
+test_inject_garbled:
+  order: 25
+  tc_id: TC-007
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  requires_inject: true
+
+test_inject_repetition:
+  order: 26
+  tc_id: TC-008
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  requires_inject: true
+
+test_inject_nan:
+  order: 27
+  tc_id: TC-009
+  priority: P0
+  tiers: [lightweight, full, nightly]
+  requires_inject: true
+
+test_normal_no_false_positive:
+  order: 28
+  tc_id: TC-010
+  priority: P0
+  tiers: [lightweight, full, nightly]
+
+test_metrics_endpoint_check:
+  order: 29
+  tc_id: TC-011
+  priority: P0
+  tiers: [lightweight, full, nightly]
+
+# === P1 (full + nightly) ===
+test_monitor_rate_passthrough:
+  order: 60
+  tc_id: TC-012
+  priority: P1
+  tiers: [full, nightly]
+
+test_monitor_rate_full_inject:
+  order: 61
+  tc_id: TC-013
+  priority: P1
+  tiers: [full, nightly]
+  requires_inject: true
+
+test_top_logprobs_max_rule:
+  order: 62
+  tc_id: TC-014
+  priority: P1
+  tiers: [full, nightly]
+
+test_enabled_off_passthrough:
+  order: 63
+  tc_id: TC-015
+  priority: P1
+  tiers: [full, nightly]
+
+test_custom_metrics_path:
+  order: 64
+  tc_id: TC-016
+  priority: P1
+  tiers: [full, nightly]
+
+test_explicit_tokenizer:
+  order: 65
+  tc_id: TC-017
+  priority: P1
+  tiers: [full, nightly]
+
+test_non_json_body:
+  order: 30
+  tc_id: TC-018
+  priority: P2
+  tiers: [full, nightly]
+
+test_non_dict_json:
+  order: 31
+  tc_id: TC-019
+  priority: P2
+  tiers: [full, nightly]
+
+test_empty_response_max0:
+  order: 32
+  tc_id: TC-020
+  priority: P2
+  tiers: [full, nightly]
+
+test_invalid_model:
+  order: 33
+  tc_id: TC-021
+  priority: P2
+  tiers: [full, nightly]
+
+test_detector_yaml_missing:
+  order: 90
+  tc_id: TC-022
+  priority: P2
+  tiers: [full, nightly]
+  fail_fast: true
+
+# === P2 (full + nightly) ===
+test_stream_no_done:
+  order: 34
+  tc_id: TC-023
+  priority: P2
+  tiers: [full, nightly]
+
+test_keep_alive_passthrough:
+  order: 35
+  tc_id: TC-024
+  priority: P2
+  tiers: [full, nightly]
+
+test_client_disconnect:
+  order: 36
+  tc_id: TC-025
+  priority: P2
+  tiers: [full, nightly]
+
+test_top_logprobs_invalid:
+  order: 93
+  tc_id: TC-026
+  priority: P2
+  tiers: [full, nightly]
+  fail_fast: true
+
+test_monitor_rate_invalid:
+  order: 92
+  tc_id: TC-027
+  priority: P2
+  tiers: [full, nightly]
+  fail_fast: true
+
+test_malicious_prompt:
+  order: 38
+  tc_id: TC-030
+  priority: P2
+  tiers: [full, nightly]
+
+test_metrics_no_leak:
+  order: 39
+  tc_id: TC-031
+  priority: P2
+  tiers: [full, nightly]
+
+test_openai_sdk_compat:
+  order: 40
+  tc_id: TC-032
+  priority: P2
+  tiers: [full, nightly]
+
+test_repeat_request:
+  order: 41
+  tc_id: TC-033
+  priority: P2
+  tiers: [full, nightly]
+
+test_multi_choice_n3:
+  order: 42
+  tc_id: TC-034
+  priority: P2
+  tiers: [full, nightly]
+
+test_empty_data_boundary:
+  order: 43
+  tc_id: TC-035
+  priority: P1
+  tiers: [full, nightly]
+
+test_single_token_boundary:
+  order: 44
+  tc_id: TC-036
+  priority: P1
+  tiers: [full, nightly]
+
+test_topk_minimal:
+  order: 66
+  tc_id: TC-037
+  priority: P1
+  tiers: [full, nightly]
+
+test_inf_logprob_boundary:
+  order: 45
+  tc_id: TC-038
+  priority: P1
+  tiers: [full, nightly]
+
+test_detector_workers_invalid:
+  order: 91
+  tc_id: TC-039
+  priority: P1
+  tiers: [full, nightly]
+  fail_fast: true
+
+# === Nightly only ===
+test_latency_overhead:
+  order: 80
+  tc_id: TC-028
+  priority: P2
+  tiers: [nightly]
+
+test_long_stability:
+  order: 46
+  tc_id: TC-029
+  priority: P2
+  tiers: [nightly]
+
+test_concurrent_10_parallel:
+  order: 70
+  tc_id: TC-040
+  priority: P2
+  tiers: [nightly]
+
+# TC-042 进程池部分检测错误（detector_workers=4，单 worker 注入检测错误，其余 3 个正常检测）。
+test_process_pool_partial_detection_error:
+  order: 72
+  tc_id: TC-042
+  priority: P2
+  tiers: [nightly]
+  requires_inject: true
+
+test_process_pool_crash_recovery_optional:
+  order: 71
+  tc_id: TC-041
+  priority: P2
+  tiers: [nightly]
+  optional: true
