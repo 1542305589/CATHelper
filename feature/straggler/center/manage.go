@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
@@ -26,18 +29,70 @@ const (
 	reportBufferSec = 60 // fixed buffer added to max collect-wait
 )
 
-// heartbeatLoop probes every daemon (healthz + match_status) forever.
+// daemonProbe is one daemon's probe target and result. The center lock is only
+// held while snapshotting targets and applying results, never during HTTP I/O.
+type daemonProbe struct {
+	b        *Business
+	d        *Daemon
+	key      string
+	healthOK bool
+	st       *matchStatusResp
+	stErr    error
+}
+
+// heartbeatLoop probes every daemon (healthz + match_status) forever. Probes run
+// concurrently outside c.mu so one slow/hung daemon cannot block the web UI or
+// KPI queries.
 func (c *Center) heartbeatLoop() {
 	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
+	const probeConcurrency = 8
 	for range ticker.C {
 		c.mu.Lock()
+		probes := make([]daemonProbe, 0)
 		for _, b := range c.biz {
 			for _, d := range b.Daemons {
-				c.probeDaemonLocked(d)
+				probes = append(probes, daemonProbe{b: b, d: d, key: d.Key})
 			}
 		}
 		c.mu.Unlock()
+
+		sem := make(chan struct{}, probeConcurrency)
+		var wg sync.WaitGroup
+		for i := range probes {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				p := &probes[i]
+				if !daemonHealth(p.d) {
+					return
+				}
+				p.healthOK = true
+				if p.key == "" {
+					return
+				}
+				p.st, p.stErr = daemonMatchStatus(p.d, p.key)
+			}(i)
+		}
+		wg.Wait()
+
+		c.mu.Lock()
+		rematch := make([]daemonProbe, 0)
+		for i := range probes {
+			p := &probes[i]
+			if !c.daemonPresentLocked(p.b, p.d) || p.key != p.d.Key {
+				continue
+			}
+			if c.applyProbeLocked(*p) {
+				rematch = append(rematch, *p)
+			}
+		}
+		c.mu.Unlock()
+		for _, p := range rematch {
+			go c.tryMatch(p.b, p.d)
+		}
 	}
 }
 
@@ -146,37 +201,61 @@ func (c *Center) unmatchDaemonLocked(d *Daemon) {
 // Probing (healthz + match_status → 4-state classification)
 // ---------------------------------------------------------------------------
 
-func (c *Center) probeDaemonLocked(d *Daemon) {
-	if !daemonHealth(d) {
+// daemonPresentLocked reports whether b still owns d after an unlocked probe.
+func (c *Center) daemonPresentLocked(b *Business, d *Daemon) bool {
+	if c.biz[b.Name] != b {
+		return false
+	}
+	for _, cur := range b.Daemons {
+		if cur == d {
+			return true
+		}
+	}
+	return false
+}
+
+// applyProbeLocked applies one probe result under c.mu. It returns true when the
+// daemon should be auto-rematched; the caller must launch that outside the lock.
+func (c *Center) applyProbeLocked(p daemonProbe) bool {
+	d := p.d
+	if !p.healthOK {
 		d.failCount++
 		if d.failCount >= probeFailLimit {
 			d.healthy = false
 			d.matchState = "" // 断连
 		}
-		return
+		return false
 	}
 	d.failCount = 0
 	d.healthy = true
 
-	// healthz OK — distinguish "matched to us" vs "unmatched" vs "other center".
-	st, err := daemonMatchStatus(d, d.Key)
-	if err != nil {
+	if p.key == "" {
+		d.matchState = "unmatched"
+		return false
+	}
+	if p.stErr != nil {
 		d.matchState = ""
-		return
+		return false
 	}
 	switch {
-	case st.Matched:
+	case p.st.Matched:
 		d.matchState = "healthy"
 		// collect_wait is runtime-only; recover it on every probe so a center
 		// restart (which drops it) re-learns it without a full re-match.
-		if st.CollectWait > 0 {
-			d.collectWait = st.CollectWait
+		if p.st.CollectWait > 0 {
+			d.collectWait = p.st.CollectWait
 		}
-	case st.Other:
+	case p.st.Other:
 		d.matchState = "other"
+		return samePort(p.st.Center, c.cfg.Port)
 	default:
 		d.matchState = "unmatched"
+		// A center restart makes the daemon drop its match while the center
+		// still has the old key. Re-match only in that case: d.Key == "" means
+		// the user intentionally unmatched it, so leave it alone.
+		return d.Key != "" && p.st != nil && p.st.State == "running"
 	}
+	return false
 }
 
 func daemonHealth(d *Daemon) bool {
@@ -193,7 +272,16 @@ type matchStatusResp struct {
 	State       string `json:"state"`
 	Matched     bool   `json:"matched"`
 	Other       bool   `json:"other"`
+	Center      string `json:"center"`
 	CollectWait int64  `json:"collect_wait"`
+}
+
+func samePort(raw string, port int) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Port() == "" {
+		return false
+	}
+	return u.Port() == strconv.Itoa(port)
 }
 
 func daemonMatchStatus(d *Daemon, key string) (*matchStatusResp, error) {
@@ -211,6 +299,16 @@ func daemonMatchStatus(d *Daemon, key string) (*matchStatusResp, error) {
 // business's cycle counters and next trigger, and re-anchors the schedule.
 // Single-flight: a concurrent trigger for the same business is a no-op.
 func (c *Center) triggerBusiness(b *Business) {
+	c.triggerBusinessMode(b, true, "timer")
+}
+
+// triggerBusinessFromKPI runs a KPI-triggered profiler round and refreshes the
+// business's normal profiler schedule so the timer does not fire immediately after.
+func (c *Center) triggerBusinessFromKPI(b *Business) {
+	c.triggerBusinessMode(b, true, "kpi")
+}
+
+func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string) {
 	triggerAt := time.Now()
 
 	c.mu.Lock()
@@ -219,6 +317,7 @@ func (c *Center) triggerBusiness(b *Business) {
 		return
 	}
 	b.triggering = true
+	b.lastTriggerReason = reason
 	if b.progress == nil {
 		b.progress = newProgressLog()
 	}
@@ -303,12 +402,16 @@ func (c *Center) triggerBusiness(b *Business) {
 	c.mu.Lock()
 	if failed {
 		b.CyclesFailed++
+		c.writeFailedCycle(b, triggerAt, durationMs, reason)
 	} else {
 		b.CyclesTotal++
 	}
-	// Anchor the next trigger to THIS round's start (not its end), so the cadence
-	// stays a fixed interval and does not drift by the detection duration.
-	b.nextTrigger = triggerAt.Add(c.businessInterval(b))
+	// Anchor the next scheduled trigger to THIS round's start (not its end), so the
+	// cadence stays a fixed interval and does not drift by the detection duration.
+	// KPI-triggered rounds must not shift the normal profiler schedule.
+	if reschedule {
+		b.nextTrigger = triggerAt.Add(c.businessInterval(b))
+	}
 	b.triggering = false
 	c.save()
 	c.mu.Unlock()
@@ -518,13 +621,33 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		return err
 	}
 	meta, _ := json.MarshalIndent(map[string]any{
-		"ts":          dirRel,
-		"started_at":  startedAt.Format(time.RFC3339),
-		"duration_ms": durationMs,
-		"world_size":  worldSize,
-		"summary":     summary,
+		"ts":             dirRel,
+		"started_at":     startedAt.Format(time.RFC3339),
+		"duration_ms":    durationMs,
+		"world_size":     worldSize,
+		"summary":        summary,
+		"trigger_reason": b.lastTriggerReason,
+		"failed":         false,
 	}, "", "  ")
 	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
+}
+
+func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs int64, reason string) {
+	dirRel := startedAt.Format("20060102-150405")
+	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return
+	}
+	meta, _ := json.MarshalIndent(map[string]any{
+		"ts":             dirRel,
+		"started_at":     startedAt.Format(time.RFC3339),
+		"duration_ms":    durationMs,
+		"world_size":     0,
+		"summary":        nil,
+		"trigger_reason": reason,
+		"failed":         true,
+	}, "", "  ")
+	_ = os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
 }
 
 // ---------------------------------------------------------------------------

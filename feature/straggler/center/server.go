@@ -28,6 +28,15 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/business/{name}/daemon/match", c.handleMatchDaemon)
 	mux.HandleFunc("POST /center/business/{name}/daemon/unmatch", c.handleUnmatchDaemon)
 	mux.HandleFunc("POST /center/op_metric/{business}/{daemon}", c.handleOpMetric)
+	mux.HandleFunc("POST /center/kpi/{business}/{daemon}", c.handleKPIIngest)
+	mux.HandleFunc("GET /center/business/{name}/kpi/devices", c.handleBusinessKPIDevices)
+	mux.HandleFunc("GET /center/business/{name}/console/kpi", c.handleBusinessConsoleKPI)
+	mux.HandleFunc("GET /center/business/{name}/console/kpi/series", c.handleBusinessKPISeries)
+	mux.HandleFunc("POST /center/business/{name}/kpi_interval", c.handleBusinessKPIInterval)
+	mux.HandleFunc("POST /center/business/{name}/kpi_nsigma", c.handleBusinessKPINSigma)
+	mux.HandleFunc("POST /center/business/{name}/kpi_reference", c.handleBusinessKPIReference)
+	mux.HandleFunc("GET /center/business/{name}/kpi/filter", c.handleBusinessKPIFilterGet)
+	mux.HandleFunc("POST /center/business/{name}/kpi/filter", c.handleBusinessKPIFilterSet)
 	mux.HandleFunc("GET /center/business/{name}/history", c.handleBusinessHistory)
 	mux.HandleFunc("GET /center/business/{name}/progress", c.handleBusinessProgress)
 	mux.HandleFunc("GET /center/business/{name}/console", c.handleBusinessConsole)
@@ -68,17 +77,20 @@ type daemonStatus struct {
 
 // businessStatus is the web-visible view of one business.
 type businessStatus struct {
-	Name              string            `json:"name"`
-	IntervalSec       int64             `json:"interval_sec"`
-	Paused            bool              `json:"paused"`
-	CyclesTotal       int               `json:"cycles_total"`
-	CyclesFailed      int               `json:"cycles_failed"`
-	NextTrigger       string            `json:"next_trigger,omitempty"`
-	CollectWait       int64             `json:"collect_wait"`           // max across the business's daemons
-	VLLMMetrics       string            `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL
-	Thresholds        config.Thresholds `json:"thresholds"`             // merged-detection thresholds
-	DefaultThresholds config.Thresholds `json:"default_thresholds"`     // factory defaults, for "restore defaults"
-	Daemons           []daemonStatus    `json:"daemons"`
+	Name                   string            `json:"name"`
+	IntervalSec            int64             `json:"interval_sec"`
+	KPIDetectIntervalSec   int64             `json:"kpi_interval_sec"`
+	KPINSigma              KPINSigma         `json:"kpi_nsigma"`
+	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio"`
+	Paused                 bool              `json:"paused"`
+	CyclesTotal            int               `json:"cycles_total"`
+	CyclesFailed           int               `json:"cycles_failed"`
+	NextTrigger            string            `json:"next_trigger,omitempty"`
+	CollectWait            int64             `json:"collect_wait"`           // max across the business's daemons
+	VLLMMetrics            string            `json:"vllm_metrics,omitempty"` // vllm /metrics endpoint URL
+	Thresholds             config.Thresholds `json:"thresholds"`             // merged-detection thresholds
+	DefaultThresholds      config.Thresholds `json:"default_thresholds"`     // factory defaults, for "restore defaults"
+	Daemons                []daemonStatus    `json:"daemons"`
 }
 
 func daemonState(d *Daemon) string {
@@ -111,15 +123,18 @@ func (c *Center) statusViewLocked() []businessStatus {
 // (never exposing the daemons' match keys).
 func businessStatusOfLocked(b *Business) businessStatus {
 	bs := businessStatus{
-		Name:              b.Name,
-		IntervalSec:       b.IntervalSec,
-		Paused:            b.Paused,
-		CyclesTotal:       b.CyclesTotal,
-		CyclesFailed:      b.CyclesFailed,
-		VLLMMetrics:       b.VLLMMetrics,
-		Thresholds:        b.Thresholds,
-		DefaultThresholds: config.DefaultThresholds(),
-		Daemons:           make([]daemonStatus, 0, len(b.Daemons)),
+		Name:                   b.Name,
+		IntervalSec:            b.IntervalSec,
+		KPIDetectIntervalSec:   b.KPIDetectIntervalSec,
+		KPINSigma:              b.KPINSigma.Normalized(),
+		KPIReferenceAdmitRatio: b.NormalizedKPIReferenceAdmitRatio(),
+		Paused:                 b.Paused,
+		CyclesTotal:            b.CyclesTotal,
+		CyclesFailed:           b.CyclesFailed,
+		VLLMMetrics:            b.VLLMMetrics,
+		Thresholds:             b.Thresholds,
+		DefaultThresholds:      config.DefaultThresholds(),
+		Daemons:                make([]daemonStatus, 0, len(b.Daemons)),
 	}
 	if !b.nextTrigger.IsZero() {
 		bs.NextTrigger = b.nextTrigger.Format(time.RFC3339)
@@ -135,16 +150,24 @@ func businessStatusOfLocked(b *Business) businessStatus {
 
 func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name        string    `json:"name"`
-		IntervalSec int64     `json:"interval_sec"`
-		Daemons     []*Daemon `json:"daemons"`
+		Name                 string    `json:"name"`
+		IntervalSec          int64     `json:"interval_sec"`
+		KPIDetectIntervalSec int64     `json:"kpi_interval_sec"`
+		Daemons              []*Daemon `json:"daemons"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		http.Error(w, `invalid body: {"name","interval_sec","daemons":[{"ip","port"}]}`, http.StatusBadRequest)
+		http.Error(w, `invalid body: {"name","interval_sec","kpi_interval_sec","daemons":[{"ip","port"}]}`, http.StatusBadRequest)
 		return
 	}
 	if req.IntervalSec <= 0 {
 		req.IntervalSec = int64(c.cfg.Interval.Seconds())
+	}
+	if req.KPIDetectIntervalSec <= 0 {
+		req.KPIDetectIntervalSec = int64(c.cfg.KPIDetectInterval.Seconds())
+	}
+	if req.KPIDetectIntervalSec < 5 || req.KPIDetectIntervalSec > 86400 {
+		http.Error(w, "kpi_interval_sec must be in [5, 86400]", http.StatusBadRequest)
+		return
 	}
 	c.mu.Lock()
 	if _, exists := c.biz[req.Name]; exists {
@@ -152,7 +175,7 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "business already exists", http.StatusConflict)
 		return
 	}
-	b := &Business{Name: req.Name, IntervalSec: req.IntervalSec, Daemons: req.Daemons}
+	b := &Business{Name: req.Name, IntervalSec: req.IntervalSec, KPIDetectIntervalSec: req.KPIDetectIntervalSec, Daemons: req.Daemons}
 	if b.Daemons == nil {
 		b.Daemons = []*Daemon{}
 	}
@@ -191,6 +214,14 @@ func (c *Center) handleRemoveBusiness(w http.ResponseWriter, r *http.Request) {
 	c.save()
 	c.metrics.clear(name)
 	c.mu.Unlock()
+	if c.kpi != nil {
+		if err := c.kpi.DeleteBusiness(name); err != nil {
+			c.logf("remove business %s kpi data: %v", name, err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(c.cfg.DataDir, name)); err != nil {
+		c.logf("remove business %s result dir: %v", name, err)
+	}
 	writeJSON(w, map[string]string{"status": "removed"})
 }
 
@@ -468,7 +499,7 @@ func (c *Center) handleBusinessTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not all daemons healthy", http.StatusConflict)
 		return
 	}
-	go c.triggerBusiness(b)
+	go c.triggerBusinessMode(b, true, "manual")
 	writeJSON(w, map[string]string{"status": "triggered"})
 }
 
@@ -605,14 +636,43 @@ func (c *Center) handleBusinessMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, c.metrics.snapshot(name))
 }
 
-// tryMatch matches a daemon in a goroutine (best-effort on add).
+// tryMatch matches a daemon in a goroutine (best-effort on add). The HTTP
+// call runs outside c.mu so a slow daemon cannot block the center's web UI.
 func (c *Center) tryMatch(b *Business, d *Daemon) {
 	c.mu.Lock()
-	err := c.matchDaemonLocked(b, d)
-	c.mu.Unlock()
-	if err != nil {
-		c.logf("business %s daemon %s match: %v", b.Name, d.Addr(), err)
+	if !c.daemonPresentLocked(b, d) {
+		c.mu.Unlock()
+		return
 	}
+	key := randomKey()
+	d.Key = key
+	c.save()
+	c.mu.Unlock()
+
+	body := map[string]any{
+		"center_addr": c.selfURL(),
+		"key":         key,
+		"business":    b.Name,
+		"daemon":      d.Addr(),
+	}
+	resp, err := doJSON(http.MethodPost, d.BaseURL()+"/daemon/match", body, "")
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.daemonPresentLocked(b, d) || d.Key != key {
+		return
+	}
+	if err != nil {
+		d.Key = ""
+		c.save()
+		c.logf("business %s daemon %s match: %v", b.Name, d.Addr(), err)
+		return
+	}
+	cw, _ := resp["collect_wait"].(float64)
+	d.collectWait = int64(cw)
+	d.matchState = "healthy"
+	d.healthy = true
+	d.failCount = 0
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

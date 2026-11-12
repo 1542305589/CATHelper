@@ -22,6 +22,8 @@ type Center struct {
 	detectMu sync.Mutex           // serializes detection (process-wide config globals)
 	biz      map[string]*Business // name → business (persisted)
 	metrics  *metricsStore        // vllm TTFT/TPOT time series (in-memory)
+	kpi      *kpiStore            // KPI time series + card allowlists (SQLite)
+	kpiDet   *kpiDetector         // KPI time/space detector (10s loop)
 	logf     func(format string, args ...any)
 }
 
@@ -36,6 +38,9 @@ func New(cfg Config) *Center {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 10 * time.Minute
 	}
+	if cfg.KPIDetectInterval <= 0 {
+		cfg.KPIDetectInterval = 10 * time.Second
+	}
 	c := &Center{
 		cfg:     cfg,
 		biz:     make(map[string]*Business),
@@ -45,12 +50,23 @@ func New(cfg Config) *Center {
 	// Ensure the data dir exists at startup (created lazily if absent), so a
 	// fresh --center-data-dir is ready before the first CRUD / result write.
 	_ = os.MkdirAll(c.cfg.DataDir, 0o755)
+	if ks, err := newKPIStore(filepath.Join(c.cfg.DataDir, "kpi.db"), c.logf); err != nil {
+		c.logf("KPI store disabled: %v", err)
+	} else {
+		c.kpi = ks
+		c.kpiDet = newKPIDetector(ks, c.logf)
+	}
 	c.load()
 	return c
 }
 
 // Run starts the HTTP server and the heartbeat/schedule loops until ctx is done.
 func (c *Center) Run(ctx context.Context) error {
+	defer func() {
+		if c.kpi != nil {
+			_ = c.kpi.Close()
+		}
+	}()
 	srv := c.httpServer()
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", c.cfg.Port))
 	if err != nil {
@@ -67,6 +83,8 @@ func (c *Center) Run(ctx context.Context) error {
 	go c.heartbeatLoop()
 	go c.scheduleLoop()
 	go c.metricsLoop()
+	go c.kpiDetectLoop(ctx)
+	go c.kpiRetentionLoop(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -96,6 +114,11 @@ func (c *Center) load() {
 	}
 	for _, b := range st.Businesses {
 		if b.Name != "" {
+			if b.KPIDetectIntervalSec <= 0 {
+				b.KPIDetectIntervalSec = int64(c.cfg.KPIDetectInterval.Seconds())
+			}
+			b.KPINSigma = b.KPINSigma.Normalized()
+			b.KPIReferenceAdmitRatio = b.NormalizedKPIReferenceAdmitRatio()
 			if b.Thresholds == (config.Thresholds{}) {
 				b.Thresholds = c.cfg.Thresholds
 			} else {
