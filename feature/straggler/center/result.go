@@ -11,12 +11,14 @@ import (
 // history endpoint (ts + trigger time + duration + total rank count +
 // per-category anomaly counts).
 type cycleInfo struct {
-	Ts         string         `json:"ts"`
-	StartedAt  string         `json:"started_at"`
-	DurationMs int64          `json:"duration_ms"`
-	WorldSize  int            `json:"world_size"`
-	Summary    map[string]int `json:"summary"`
-	Running    bool           `json:"running,omitempty"` // in-flight round, prepended to history
+	Ts            string         `json:"ts"`
+	StartedAt     string         `json:"started_at"`
+	DurationMs    int64          `json:"duration_ms"`
+	WorldSize     int            `json:"world_size"`
+	Summary       map[string]int `json:"summary"`
+	TriggerReason string         `json:"trigger_reason,omitempty"`
+	Failed        bool           `json:"failed,omitempty"`
+	Running       bool           `json:"running,omitempty"` // in-flight round, prepended to history
 }
 
 // latestResultDir returns the newest per-cycle result dir under a business, or
@@ -57,15 +59,19 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 		ci := cycleInfo{Ts: ts, Summary: map[string]int{}}
 		if raw, err := os.ReadFile(filepath.Join(base, ts, "cycle.json")); err == nil {
 			var m struct {
-				StartedAt  string         `json:"started_at"`
-				DurationMs int64          `json:"duration_ms"`
-				WorldSize  int            `json:"world_size"`
-				Summary    map[string]int `json:"summary"`
+				StartedAt     string         `json:"started_at"`
+				DurationMs    int64          `json:"duration_ms"`
+				WorldSize     int            `json:"world_size"`
+				Summary       map[string]int `json:"summary"`
+				TriggerReason string         `json:"trigger_reason"`
+				Failed        bool           `json:"failed"`
 			}
 			if json.Unmarshal(raw, &m) == nil {
 				ci.StartedAt = m.StartedAt
 				ci.DurationMs = m.DurationMs
 				ci.WorldSize = m.WorldSize
+				ci.TriggerReason = m.TriggerReason
+				ci.Failed = m.Failed
 				if m.Summary != nil {
 					ci.Summary = m.Summary
 				}

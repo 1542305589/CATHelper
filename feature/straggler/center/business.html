@@ -29,6 +29,9 @@
   button:disabled { opacity:.5; cursor:not-allowed; }
   button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
   input { border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:13px; width:96px; }
+  input[type="datetime-local"] { width:190px; min-width:190px; }
+  #kpiRangeWrap label { display:inline-flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap; }
+  select { border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:13px; background:var(--card); color:var(--text); }
   .interval-form { display:flex; align-items:center; gap:8px; font-size:13px; margin-top:12px; }
   .th-grid { display:grid; grid-template-columns:128px 110px 1fr; gap:8px 10px; align-items:center; font-size:13px; }
   .th-grid label { color:var(--muted); }
@@ -40,6 +43,7 @@
   tbody tr { cursor:pointer; }
   tbody tr:hover { background:#eef2ff; }
   tbody tr.selected { background:#dbeafe; }
+  tbody tr.bad-row td { color:var(--red); }
   .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; color:#fff; }
   .badge.healthy { background:var(--green); }
   .badge.unmatched { background:var(--amber); }
@@ -106,7 +110,8 @@
       <h2>运行状态</h2>
       <div class="body">
         <dl class="kv">
-          <dt>检测周期</dt><dd id="vInterval">—</dd>
+          <dt>Profiler 检测周期</dt><dd id="vInterval">—</dd>
+          <dt>KPI 检测周期</dt><dd id="vKPIInterval">—</dd>
           <dt>阈值</dt><dd id="vThresholds">—</dd>
           <dt>已运行周期</dt><dd id="vTotal">—</dd>
           <dt>失败周期</dt><dd id="vFailed">—</dd>
@@ -125,9 +130,14 @@
           <button id="btnStart">启动</button>
         </div>
         <div class="interval-form">
-          周期(秒):
+          Profiler 周期(秒):
           <input id="intervalInput" type="number" min="60">
           <button id="btnInterval">设置</button>
+        </div>
+        <div class="interval-form">
+          KPI 检测周期(秒):
+          <input id="kpiIntervalInput" type="number" min="5" max="86400">
+          <button id="btnKPIInterval">设置</button>
         </div>
       </div>
     </div>
@@ -164,6 +174,44 @@
     </div>
 
     <div class="card">
+      <h2>KPI n-sigma</h2>
+      <div class="body">
+        <div class="th-grid">
+          <label for="nsPowerTime">power 时间 n</label>
+          <input id="nsPowerTime" type="number" step="0.1" min="0.1" max="20">
+          <span class="unit">默认 4</span>
+          <label for="nsPowerSpace">power 空间 n</label>
+          <input id="nsPowerSpace" type="number" step="0.1" min="0.1" max="20">
+          <span class="unit">默认 4</span>
+          <label for="nsUtilTime">util 时间 n</label>
+          <input id="nsUtilTime" type="number" step="0.1" min="0.1" max="20">
+          <span class="unit">默认 4</span>
+          <label for="nsUtilSpace">util 空间 n</label>
+          <input id="nsUtilSpace" type="number" step="0.1" min="0.1" max="20">
+          <span class="unit">默认 4</span>
+          <label for="nsFreqTime">freq 时间 n</label>
+          <input id="nsFreqTime" type="number" step="0.1" min="0.1" max="20">
+          <span class="unit">默认 3</span>
+          <label for="nsFreqSpace">freq 空间 n</label>
+          <input id="nsFreqSpace" type="number" step="0.1" min="0.1" max="20">
+          <span class="unit">默认 3</span>
+        </div>
+        <div class="controls" style="margin-top:12px;">
+          <button class="primary" id="btnKPINSigma">保存 n-sigma</button>
+        </div>
+        <div class="th-grid" style="margin-top:12px;">
+          <label for="nsRefAdmit">异常参考接纳率</label>
+          <input id="nsRefAdmit" type="number" step="0.05" min="0.01" max="1">
+          <span class="unit">默认 0.1</span>
+        </div>
+        <div class="controls" style="margin-top:8px;">
+          <button id="btnKPIReference">保存参考接纳率</button>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:11px;">只影响该业务后续 KPI 检测。</div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>节点列表</h2>
       <div class="body">
         <table>
@@ -177,23 +225,68 @@
   <div class="col">
     <div class="card">
       <h2>检测历史 <span id="histCount" class="muted"></span></h2>
-      <div style="overflow:auto; max-height:36vh;">
+      <div class="body" style="padding-bottom:0;">
+        <div class="tabs" style="padding:0;">
+          <button id="histProfiler" class="active" onclick="setHistoryMode('profiler')">Profiler 检测</button>
+          <button id="histKPI" onclick="setHistoryMode('kpi')">KPI 检测</button>
+        </div>
+      </div>
+      <div id="kpiRangeWrap" style="display:none; padding:8px 10px; gap:8px; align-items:center; flex-wrap:wrap;">
+        <label>开始 <input id="kpiFrom" type="datetime-local"></label>
+        <label>结束 <input id="kpiTo" type="datetime-local"></label>
+        <button id="btnKPIRange" class="primary" onclick="refreshKPIRange()">查询</button>
+        <button id="btnKPI24h" onclick="setKPI24h()">最近24h</button>
+        <span id="kpiRangeHint" class="muted"></span>
+      </div>
+      <div id="profilerHistWrap" style="overflow:auto; max-height:36vh;">
         <table>
-          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>world_size</th><th>异常摘要</th></tr></thead>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>world_size</th><th>触发原因</th><th>异常摘要</th></tr></thead>
           <tbody id="histBody"></tbody>
         </table>
+        <div id="histEmpty" class="empty">加载中…</div>
       </div>
-      <div id="histEmpty" class="empty">加载中…</div>
+      <div id="kpiHistWrap" style="display:none; overflow:auto; max-height:36vh;">
+        <table>
+          <thead><tr><th>检测时间</th><th>node</th><th>devices</th><th>anomalies</th><th>flagged</th><th>reference</th></tr></thead>
+          <tbody id="kpiHistBody"></tbody>
+        </table>
+        <div id="kpiHistEmpty" class="empty">加载中…</div>
+      </div>
+      <div id="kpiHistHint" class="muted" style="display:none; padding:6px 10px;">
+        invalid (time only) = 时间维度参考不足，空间维度仍正常；global_shift = 全局漂移已刷新参考窗口
+      </div>
     </div>
 
     <div class="card">
-      <div class="tabs">
+      <div class="tabs" id="detailTabs">
         <button id="tabProgress" class="active">检测进度</button>
         <button id="tabReport">检测报告</button>
         <button id="tabResult">检测结果（JSON格式）</button>
         <button id="tabOpMetric">算法输入数据</button>
       </div>
-      <div class="tab-body"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
+      <div class="tab-body" id="detailBody"><pre id="detail">请选择上方历史周期查看详情。</pre></div>
+      <div id="kpiDetailWrap" style="display:none;">
+        <div style="overflow:auto; max-height:36vh;">
+          <table>
+            <thead><tr><th>时间</th><th>node</th><th>device</th><th>metric</th><th>维度</th><th>value</th><th>median</th><th>MAD</th><th>z</th></tr></thead>
+            <tbody id="kpiDetailBody"></tbody>
+          </table>
+        </div>
+        <div id="kpiDetailEmpty" class="empty" style="display:none;">该轮 KPI 检测无异常</div>
+      </div>
+    </div>
+
+    <div class="card" id="kpiChartCard" style="display:none;">
+      <h2>最近 24h 曲线 <span id="kpiStepHint" class="muted"></span></h2>
+      <div class="body">
+        <div class="tabs" id="kpiMetricTabs" style="padding:0; margin-bottom:10px;">
+          <button id="kpiMetricPower" onclick="setKPIMetric('power')">power</button>
+          <button id="kpiMetricUtil" class="active" onclick="setKPIMetric('aicore_util')">aicore_util</button>
+          <button id="kpiMetricFreq" onclick="setKPIMetric('aicore_freq')">aicore_freq</button>
+        </div>
+        <div class="chart-box" style="height:320px;"><canvas id="kpiChart"></canvas></div>
+        <div id="kpiChartEmpty" class="empty" style="display:none;">暂无 KPI 历史数据</div>
+      </div>
     </div>
   </div>
 </div>
@@ -208,6 +301,8 @@ let selectedTs = null;
 let selectedRunning = false;
 let latestThresholds = {};
 let latestDefaults = {};
+let latestProfilerCycles = [];
+let latestKPIIntervalSec = 60;
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function stateLabel(s) {
@@ -268,6 +363,9 @@ function toast(msg, ok) {
 function renderStatus(b) {
   $('title').textContent = '业务控制台 · ' + b.name;
   $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
+  $('vKPIInterval').textContent = b.kpi_interval_sec != null ? b.kpi_interval_sec + ' s' : '—';
+  latestKPIIntervalSec = b.kpi_interval_sec || 60;
+  $('kpiStepHint').textContent = '粒度 ' + latestKPIIntervalSec + 's';
   const th = b.thresholds || {};
   $('vThresholds').textContent = th.cal != null
     ? `cal=${th.cal} cpu=${th.cpu} bubble=${th.bubble_ns}ns comm=${th.comm_threshold}`
@@ -275,11 +373,14 @@ function renderStatus(b) {
   latestThresholds = th;
   latestDefaults = b.default_thresholds || {};
   fillThresholdInputs(th);
+  fillKPINSigmaInputs(b.kpi_nsigma || {});
+  fillKPIReferenceInputs(b.kpi_reference_admit_ratio);
   $('vTotal').textContent = b.cycles_total != null ? b.cycles_total : '—';
   $('vFailed').textContent = b.cycles_failed != null ? b.cycles_failed : '—';
   $('vNext').textContent = timeFmt(b.next_trigger);
   $('vCollectWait').textContent = b.collect_wait ? b.collect_wait + ' s' : '—';
   if (!$('intervalInput').value) $('intervalInput').value = b.interval_sec || 600;
+  if (!$('kpiIntervalInput').value) $('kpiIntervalInput').value = b.kpi_interval_sec || 10;
   $('btnPause').disabled = b.paused;
   $('btnStart').disabled = !b.paused;
   $('btnTrigger').disabled = b.paused;
@@ -298,9 +399,10 @@ function renderDaemons(b) {
 }
 
 function renderHistory(cycles) {
+  latestProfilerCycles = cycles || [];
   const tb = $('histBody');
   tb.innerHTML = '';
-  $('histCount').textContent = cycles.length ? `（${cycles.length}）` : '';
+  if (historyMode === 'profiler') $('histCount').textContent = latestProfilerCycles.length ? `（${latestProfilerCycles.length}）` : '';
   $('histEmpty').style.display = cycles.length ? 'none' : 'block';
   $('histEmpty').textContent = cycles.length ? '' : '暂无检测记录';
   cycles.forEach((c, i) => {
@@ -310,13 +412,14 @@ function renderHistory(cycles) {
     const cells = [
       i + 1,
       timeFmt(c.started_at) || fmtTs(c.ts),
-      c.running ? '进行中…' : msFmt(c.duration_ms),
+      c.running ? '进行中…' : (c.failed ? '—' : msFmt(c.duration_ms)),
       c.world_size != null ? c.world_size : '—',
-      c.running ? '<span class="ptag on">运行中</span>' : renderSummary(c.summary),
+      c.trigger_reason || '—',
+      c.running ? '<span class="ptag on">运行中</span>' : (c.failed ? '—' : renderSummary(c.summary)),
     ];
     cells.forEach((h, j) => {
       const td = document.createElement('td');
-      if (j === 4) td.innerHTML = h; else td.textContent = h;
+      if (j === 5) td.innerHTML = h; else td.textContent = h;
       tr.appendChild(td);
     });
     tb.appendChild(tr);
@@ -341,6 +444,7 @@ function activeTab() {
 // Load the content for the active tab at the selected cycle (?ts).
 function loadCurrent() {
   const tab = activeTab();
+  if (historyMode === 'kpi') { loadKPIDetail(selectedKPIts); return; }
   if (tab === 'progress') { loadProgressDetail(selectedTs); return; }
   if (selectedRunning) {
     $('detail').textContent = '（本轮进行中，暂无检测报告 / 检测结果 / 算法输入数据）';
@@ -366,6 +470,386 @@ function renderProgress(p) {
   if (stick) pre.scrollTop = pre.scrollHeight;
 }
 
+let historyMode = 'profiler';
+let selectedKPIts = null;
+let latestKPIRuns = [];
+
+function setHistoryMode(mode) {
+  historyMode = mode;
+  $('histProfiler').classList.toggle('active', mode === 'profiler');
+  $('histKPI').classList.toggle('active', mode === 'kpi');
+  $('profilerHistWrap').style.display = mode === 'profiler' ? '' : 'none';
+  $('kpiHistWrap').style.display = mode === 'kpi' ? '' : 'none';
+  $('kpiRangeWrap').style.display = mode === 'kpi' ? 'flex' : 'none';
+  if (mode === 'kpi') {
+    initKPIRange();
+    refreshKPIRange();
+  }
+  $('kpiHistHint').style.display = mode === 'kpi' ? 'block' : 'none';
+  $('detailTabs').style.display = mode === 'profiler' ? '' : 'none';
+  $('detailBody').style.display = mode === 'profiler' ? '' : 'none';
+  $('kpiDetailWrap').style.display = mode === 'kpi' ? '' : 'none';
+  $('kpiChartCard').style.display = mode === 'kpi' ? '' : 'none';
+  $('histCount').textContent = mode === 'profiler'
+    ? (latestProfilerCycles.length ? `（${latestProfilerCycles.length}）` : '')
+    : (latestKPIRuns.length ? `（${latestKPIRuns.length}）` : '');
+  if (mode === 'kpi' && latestKPIRuns.length && !selectedKPIts) {
+    selectKPI(latestKPIRuns[0].ts, document.querySelector('#kpiHistBody tr'));
+  } else {
+    loadCurrent();
+  }
+}
+
+function toLocalInput(ts) {
+  const d = new Date(ts * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+    'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+function kpiRangeUnix() {
+  const from = $('kpiFrom').value ? Math.floor(new Date($('kpiFrom').value).getTime() / 1000) : 0;
+  const to = $('kpiTo').value ? Math.floor(new Date($('kpiTo').value).getTime() / 1000) : 0;
+  return { from, to };
+}
+
+function initKPIRange() {
+  if ($('kpiFrom').value && $('kpiTo').value) return;
+  const now = Math.floor(Date.now() / 1000);
+  $('kpiFrom').value = toLocalInput(now - 24 * 3600);
+  $('kpiTo').value = toLocalInput(now);
+}
+
+function kpiHistoryURL() {
+  initKPIRange();
+  const r = kpiRangeUnix();
+  return '/center/business/' + encodeURIComponent(BIZ) + '/console/kpi?from=' + r.from + '&to=' + r.to;
+}
+
+function refreshKPIRange() {
+  initKPIRange();
+  const r = kpiRangeUnix();
+  if (!r.from || !r.to || r.to <= r.from) {
+    alert('请选择有效的开始和结束时间');
+    return;
+  }
+  $('kpiRangeHint').textContent = '查询中…';
+  getJSON(kpiHistoryURL()).then(k => {
+    selectedKPIts = null;
+    renderKPIHistory(k.runs || []);
+    $('kpiRangeHint').textContent = '共 ' + ((k.runs || []).length) + ' 条';
+  }).catch(e => {
+    $('kpiRangeHint').textContent = '加载失败：' + e.message;
+  });
+}
+
+function setKPI24h() {
+  const now = Math.floor(Date.now() / 1000);
+  $('kpiFrom').value = toLocalInput(now - 24 * 3600);
+  $('kpiTo').value = toLocalInput(now);
+  refreshKPIRange();
+}
+
+function renderKPIHistory(runs) {
+  latestKPIRuns = runs || [];
+  if (historyMode === 'kpi') $('histCount').textContent = latestKPIRuns.length ? `（${latestKPIRuns.length}）` : '';
+  const tb = $('kpiHistBody');
+  tb.innerHTML = '';
+  $('kpiHistEmpty').style.display = latestKPIRuns.length ? 'none' : 'block';
+  $('kpiHistEmpty').textContent = latestKPIRuns.length ? '' : '暂无 KPI 检测记录';
+  latestKPIRuns.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.onclick = () => selectKPI(r.ts, tr);
+    if (r.anomalies > 0) tr.classList.add('bad-row');
+    if (r.ts === selectedKPIts) tr.classList.add('selected');
+    const cells = [
+      timeFmt(r.ts * 1000),
+      r.node,
+      String(r.devices),
+      String(r.anomalies),
+      String(r.flagged),
+      r.global_shift ? 'global_shift' : (r.reference_invalid ? 'invalid (time only)' : 'ok'),
+    ];
+    cells.forEach(v => {
+      const td = document.createElement('td');
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  if (historyMode === 'kpi' && !selectedKPIts && latestKPIRuns.length) {
+    selectKPI(latestKPIRuns[0].ts, tb.querySelector('tr'));
+  }
+}
+
+function selectKPI(ts, tr) {
+  selectedKPIts = ts;
+  document.querySelectorAll('#kpiHistBody tr').forEach(x => x.classList.remove('selected'));
+  if (tr) tr.classList.add('selected');
+  loadKPIDetail(ts);
+}
+
+let kpiLoadSeq = 0;
+let kpiSeriesCache = { key: '', at: 0, data: null };
+let kpiSeriesInflight = { key: '', promise: null };
+
+// The 24h KPI series does not depend on which anomaly row is selected, so cache
+// it per business/step and dedupe concurrent selections instead of re-querying the
+// center on every click.
+function getKPISeriesCached() {
+  const key = BIZ + '|' + kpiStepVal();
+  const now = Date.now();
+  if (kpiSeriesCache.key === key && kpiSeriesCache.data && now - kpiSeriesCache.at < 30000) {
+    return Promise.resolve(kpiSeriesCache.data);
+  }
+  if (kpiSeriesInflight.key === key && kpiSeriesInflight.promise) {
+    return kpiSeriesInflight.promise;
+  }
+  const promise = getJSON('/center/business/' + encodeURIComponent(BIZ) + '/console/kpi/series?hours=24&step=' + kpiStepVal()).then(d => {
+    kpiSeriesCache = { key, at: Date.now(), data: d };
+    return d;
+  }).finally(() => {
+    if (kpiSeriesInflight.promise === promise) {
+      kpiSeriesInflight = { key: '', promise: null };
+    }
+  });
+  kpiSeriesInflight = { key, promise };
+  return promise;
+}
+
+async function loadKPIDetail(ts) {
+  const seq = ++kpiLoadSeq;
+  if (!ts) {
+    $('detail').textContent = '请选择上方 KPI 检测记录查看详情。';
+    latestKPISeries = [];
+    renderKPIChart();
+    return;
+  }
+  // Start the slow series query in parallel, but never let it delay the table.
+  const seriesPromise = getKPISeriesCached().catch(e => {
+    console.error('load KPI series:', e);
+    return null;
+  });
+  try {
+    const d = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/console/kpi?ts=' + encodeURIComponent(ts) + '&limit=200');
+    if (seq !== kpiLoadSeq) return;
+    renderKPIDetail(d, ts);
+  } catch(e) {
+    if (seq !== kpiLoadSeq) return;
+    $('kpiDetailBody').innerHTML = '';
+    $('kpiDetailEmpty').style.display = 'block';
+    $('kpiDetailEmpty').textContent = 'KPI 异常明细加载失败：' + e.message;
+  }
+  const s = await seriesPromise;
+  if (seq !== kpiLoadSeq) return;
+  if (s) {
+    try {
+      renderKPISeries(s.series || []);
+    } catch(e) {
+      console.error('render KPI chart:', e);
+      latestKPISeries = [];
+      renderKPIChart();
+    }
+  } else {
+    latestKPISeries = [];
+    renderKPIChart();
+  }
+}
+
+function kpiStepVal() {
+  return latestKPIIntervalSec || 60;
+}
+
+async function setKPIStep() {
+  if (historyMode !== 'kpi' || !selectedKPIts) return;
+  const seq = ++kpiLoadSeq;
+  try {
+    const s = await getKPISeriesCached();
+    if (seq !== kpiLoadSeq) return;
+    renderKPISeries(s.series || []);
+  } catch(e) {
+    if (seq !== kpiLoadSeq) return;
+    latestKPISeries = [];
+    renderKPIChart();
+  }
+}
+
+function kpiNum(v, digits) {
+  return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(digits);
+}
+
+function renderKPIDetail(d, ts) {
+  const anomalies = d.anomalies || [];
+  const tb = $('kpiDetailBody');
+  tb.innerHTML = '';
+  anomalies.forEach(a => {
+    const tr = document.createElement('tr');
+    const cells = [
+      timeFmt(a.ts * 1000),
+      a.node,
+      String(a.device),
+      a.metric,
+      a.kind,
+      kpiNum(a.value, 2),
+      kpiNum(a.median, 2),
+      kpiNum(a.mad, 3),
+      kpiNum(a.z, 2),
+    ];
+    cells.forEach(v => {
+      const td = document.createElement('td');
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  $('kpiDetailEmpty').style.display = anomalies.length ? 'none' : 'block';
+}
+
+let kpiMetricMode = 'aicore_util';
+let latestKPISeries = [];
+let kpiChart = null;
+
+function setKPIMetric(metric) {
+  kpiMetricMode = metric;
+  $('kpiMetricPower').classList.toggle('active', metric === 'power');
+  $('kpiMetricUtil').classList.toggle('active', metric === 'aicore_util');
+  $('kpiMetricFreq').classList.toggle('active', metric === 'aicore_freq');
+  renderKPIChart();
+}
+
+let kpiRenderedSeriesKey = '';
+
+function kpiSeriesKey(series) {
+  return (series || []).map(s => {
+    const pts = s.points || [];
+    const first = pts.length ? pts[0].ts : 0;
+    const last = pts.length ? pts[pts.length - 1].ts : 0;
+    return s.node + '|' + s.device + '|' + pts.length + '|' + first + '|' + last;
+  }).join(';');
+}
+
+function renderKPISeries(series) {
+  const next = series || [];
+  const key = kpiSeriesKey(next);
+  latestKPISeries = next;
+  if (key === kpiRenderedSeriesKey) return;
+  kpiRenderedSeriesKey = key;
+  renderKPIChart();
+}
+
+const KPI_COLORS = ['#2563eb','#dc2626','#16a34a','#d97706','#9333ea','#0891b2','#db2777','#65a30d','#0f766e','#be123c','#4f46e5','#b45309','#15803d','#7e22ce','#0369a1','#a16207'];
+
+// LTTB downsample for chart rendering only. The backend still returns the full
+// 60s-aggregated points; this keeps the canvas responsive with many devices.
+function downsampleLTTB(data, threshold) {
+  const n = data.length;
+  if (!threshold || threshold >= n || threshold <= 2) return data;
+  const sampled = [];
+  const bucketSize = (n - 2) / (threshold - 2);
+  let a = 0;
+  sampled.push(data[0]);
+  for (let i = 0; i < threshold - 2; i++) {
+    const avgStart = Math.floor((i + 1) * bucketSize) + 1;
+    const avgEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, n);
+    let avgX = 0, avgY = 0, count = 0;
+    for (let j = avgStart; j < avgEnd; j++) {
+      avgX += data[j].x; avgY += data[j].y; count++;
+    }
+    if (count) { avgX /= count; avgY /= count; }
+    const rangeStart = Math.floor(i * bucketSize) + 1;
+    const rangeEnd = Math.min(Math.floor((i + 1) * bucketSize) + 1, n);
+    const pointA = data[a];
+    let maxArea = -1, nextA = rangeStart;
+    for (let j = rangeStart; j < rangeEnd; j++) {
+      const area = Math.abs(
+        (pointA.x - avgX) * (data[j].y - pointA.y) -
+        (pointA.x - data[j].x) * (avgY - pointA.y)
+      ) * 0.5;
+      if (area > maxArea) { maxArea = area; nextA = j; }
+    }
+    sampled.push(data[nextA]);
+    a = nextA;
+  }
+  sampled.push(data[n - 1]);
+  return sampled;
+}
+
+function renderKPIChart() {
+  try {
+  if (typeof Chart === 'undefined') {
+    $('kpiChart').style.display = 'none';
+    $('kpiChartEmpty').style.display = 'block';
+    $('kpiChartEmpty').textContent = '图表组件未加载';
+    return;
+  }
+  const series = latestKPISeries || [];
+  const multiNode = new Set(series.map(s => s.node)).size > 1;
+  const datasets = series.map((s, i) => {
+    const color = KPI_COLORS[i % KPI_COLORS.length];
+    return {
+      label: (multiNode ? s.node + ' ' : '') + 'device ' + s.device,
+      data: downsampleLTTB(
+        (s.points || []).filter(p => p[kpiMetricMode] != null).map(p => ({ x: p.ts, y: p[kpiMetricMode] })),
+        600
+      ),
+      borderColor: color,
+      backgroundColor: color,
+      borderWidth: 1.5,
+      pointRadius: 0,
+      pointHitRadius: 4,
+      tension: 0.15,
+      spanGaps: true,
+    };
+  }).filter(d => d.data.length);
+  if (!datasets.length) {
+    if (kpiChart) { kpiChart.destroy(); kpiChart = null; }
+    $('kpiChart').style.display = 'none';
+    $('kpiChartEmpty').style.display = 'block';
+    return;
+  }
+  $('kpiChart').style.display = '';
+  $('kpiChartEmpty').style.display = 'none';
+  if (kpiChart) {
+    kpiChart.data.datasets = datasets;
+    kpiChart.update('none');
+    return;
+  }
+  kpiChart = new Chart($('kpiChart'), {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      normalized: true,
+      interaction: { mode: 'nearest', intersect: false },
+      scales: {
+        x: { type: 'linear', ticks: { callback: v => fmtClock(v), maxTicksLimit: 8 }, grid: { display: false } },
+        y: { beginAtZero: false, ticks: { maxTicksLimit: 6 } },
+      },
+      plugins: {
+        decimation: { enabled: true, algorithm: 'lttb', samples: 800 },
+        legend: { position: 'top', align: 'end', labels: { boxWidth: 10, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? fmtClock(items[0].parsed.x) : '',
+            label: ctx => ctx.dataset.label + ': ' + kpiNum(ctx.parsed.y, 2),
+          },
+        },
+      },
+    },
+  });
+  setTimeout(() => { if (kpiChart) kpiChart.resize(); }, 0);
+  setTimeout(() => { if (kpiChart) kpiChart.resize(); }, 300);
+  } catch(e) {
+    console.error('render KPI chart:', e);
+    $('kpiChart').style.display = 'none';
+    $('kpiChartEmpty').style.display = 'block';
+    $('kpiChartEmpty').textContent = 'KPI 曲线渲染失败：' + e.message;
+  }
+}
+
 async function loadDetail(ts, tab) {
   const base = '/center/business/' + encodeURIComponent(BIZ) + '/' + tab + '?ts=' + encodeURIComponent(ts || '');
   try {
@@ -387,6 +871,12 @@ async function refresh() {
   try {
     const h = await getJSON('/center/business/' + encodeURIComponent(BIZ) + '/history');
     renderHistory(h.cycles || []);
+  } catch(e) {}
+  try {
+    if (historyMode === 'kpi') {
+      const k = await getJSON(kpiHistoryURL());
+      renderKPIHistory(k.runs || []);
+    }
   } catch(e) {}
 }
 
@@ -522,9 +1012,61 @@ $('btnPause').onclick = () => control('pause');
 $('btnStart').onclick = () => control('start');
 $('btnInterval').onclick = () => {
   const v = parseInt($('intervalInput').value, 10);
-  if (!v || v < 60 || v > 86400) { toast('周期需在 [60, 86400] 秒之间', false); return; }
+  if (!v || v < 60 || v > 86400) { toast('Profiler 周期需在 [60, 86400] 秒之间', false); return; }
   control('interval');
 };
+$('btnKPIInterval').onclick = async () => {
+  const v = parseInt($('kpiIntervalInput').value, 10);
+  if (!v || v < 5 || v > 86400) { toast('KPI 周期需在 [5, 86400] 秒之间', false); return; }
+  try {
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/kpi_interval', { interval_sec: v });
+    toast('KPI 检测周期已更新', true);
+    setTimeout(refresh, 400);
+  } catch(e) { toast('操作失败：' + e.message, false); }
+};
+$('btnKPIReference').onclick = async () => {
+  const v = parseFloat($('nsRefAdmit').value);
+  if (!(v > 0) || v > 1) { toast('参考接纳率需在 (0, 1] 之间', false); return; }
+  try {
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/kpi_reference', { admit_ratio: v });
+    toast('异常参考接纳率已更新', true);
+    setTimeout(refresh, 400);
+  } catch(e) { toast('操作失败：' + e.message, false); }
+};
+$('btnKPINSigma').onclick = async () => {
+  const body = {
+    power_time: parseFloat($('nsPowerTime').value),
+    power_space: parseFloat($('nsPowerSpace').value),
+    util_time: parseFloat($('nsUtilTime').value),
+    util_space: parseFloat($('nsUtilSpace').value),
+    freq_time: parseFloat($('nsFreqTime').value),
+    freq_space: parseFloat($('nsFreqSpace').value),
+  };
+  for (const [k, v] of Object.entries(body)) {
+    if (!(v > 0) || v > 20) { toast('n-sigma 需在 (0, 20] 之间', false); return; }
+  }
+  try {
+    await post('/center/business/' + encodeURIComponent(BIZ) + '/kpi_nsigma', body);
+    toast('KPI n-sigma 已更新', true);
+    setTimeout(refresh, 400);
+  } catch(e) { toast('操作失败：' + e.message, false); }
+};
+function fillKPINSigmaInputs(ns, force) {
+  const d = { power_time:4, power_space:4, util_time:4, util_space:4, freq_time:3, freq_space:3 };
+  const set = (id, val) => { if (val != null && (force || !$(id).value)) $(id).value = val; };
+  set('nsPowerTime', ns.power_time ?? d.power_time);
+  set('nsPowerSpace', ns.power_space ?? d.power_space);
+  set('nsUtilTime', ns.util_time ?? d.util_time);
+  set('nsUtilSpace', ns.util_space ?? d.util_space);
+  set('nsFreqTime', ns.freq_time ?? d.freq_time);
+  set('nsFreqSpace', ns.freq_space ?? d.freq_space);
+}
+
+function fillKPIReferenceInputs(v, force) {
+  const set = (id, val) => { if (val != null && (force || !$(id).value)) $(id).value = val; };
+  set('nsRefAdmit', v != null ? v : 0.1);
+}
+
 function fillThresholdInputs(th, force) {
   const set = (id, val) => { if (val != null && (force || !$(id).value)) $(id).value = val; };
   set('thCal', th.cal); set('thCpu', th.cpu); set('thBubble', th.bubble_ns);
@@ -575,7 +1117,7 @@ loadMetrics();
 setInterval(loadMetrics, 20000);
 loadCurrent();
 // Keep the progress view live (1s) while it is the active tab.
-setInterval(() => { if (activeTab() === 'progress') loadProgressDetail(selectedTs); }, 1000);
+setInterval(() => { if (historyMode === 'profiler' && activeTab() === 'progress') loadProgressDetail(selectedTs); }, 1000);
 </script>
 </body>
 </html>

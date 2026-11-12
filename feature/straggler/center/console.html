@@ -40,6 +40,14 @@
   .biz-head { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; }
   .biz-head .name { font-weight:600; }
   .del-row { margin-left:auto; }
+  .modal { position:fixed; inset:0; background:rgba(17,24,39,.45); display:none; align-items:center; justify-content:center; z-index:20; }
+  .modal.open { display:flex; }
+  .modal-card { width:min(760px,94vw); max-height:88vh; overflow:auto; }
+  .kpi-node { border-top:1px solid var(--border); padding:12px 14px; }
+  .kpi-node:first-child { border-top:0; }
+  .dev-grid { display:flex; flex-wrap:wrap; gap:8px 14px; margin:8px 0; }
+  .dev-grid label { font-size:13px; display:flex; align-items:center; gap:4px; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:999px; background:#eef2ff; color:var(--primary); font-size:11px; }
 </style>
 </head>
 <body>
@@ -54,15 +62,28 @@
     <div class="body">
       <div class="row">
         <input id="bizName" placeholder="业务名称">
-        <input id="bizInterval" type="number" min="60" placeholder="周期(秒)" style="width:110px">
+        <input id="bizInterval" type="number" min="60" placeholder="Profiler 周期(秒)" style="width:150px">
+        <input id="bizKPIInterval" type="number" min="5" max="86400" placeholder="KPI 检测周期(秒)" style="width:160px">
         <input id="bizDaemons" placeholder="守护进程 ip:port（逗号分隔多个）" style="width:360px">
         <button class="primary" onclick="addBusiness()">添加</button>
       </div>
+      <div class="muted mt">Profiler 周期和 KPI 检测周期都按业务设置；KPI 检测周期默认 10s。</div>
       <div class="muted mt">守护进程格式：192.168.1.10:8080,192.168.1.11:8080</div>
     </div>
   </div>
 
   <div id="list"></div>
+</div>
+
+<div id="kpiModal" class="modal">
+  <div class="card modal-card">
+    <div class="biz-head" style="cursor:default">
+      <span class="name" id="kpiTitle">KPI device 过滤</span>
+      <span class="muted" id="kpiHint"></span>
+      <span class="del-row"><button onclick="closeKPIFilter()">关闭</button></span>
+    </div>
+    <div class="body" id="kpiBody"></div>
+  </div>
 </div>
 
 <div id="toast" style="position:fixed;bottom:20px;right:20px;background:#111827;color:#fff;padding:10px 16px;border-radius:8px;opacity:0;transition:all .2s;"></div>
@@ -157,6 +178,7 @@ function render(list) {
           <input id="dip-${escAttr(b.name)}" placeholder="ip" value="${escAttr(inputVals['dip-' + b.name] ?? '')}">
           <input id="dport-${escAttr(b.name)}" type="number" placeholder="port" style="width:90px" value="${escAttr(inputVals['dport-' + b.name] ?? '')}">
           <button onclick="addDaemon('${escJS(b.name)}')">添加守护进程</button>
+          <button onclick="openKPIFilter('${escJS(b.name)}')">KPI device 过滤</button>
           <input id="vllm-${escAttr(b.name)}" placeholder="vllm /metrics URL" style="width:280px" value="${escAttr(inputVals['vllm-' + b.name] ?? (b.vllm_metrics || ''))}">
           <button onclick="setVllm('${escJS(b.name)}')">设置 vllm 接口</button>
           ${b.vllm_metrics ? `<button class="danger" onclick="unsetVllm('${escJS(b.name)}')">清除</button>` : ''}
@@ -183,16 +205,19 @@ function toggleDetail(head) {
 async function addBusiness() {
   const name = $('bizName').value.trim();
   const interval = parseInt($('bizInterval').value, 10) || 0;
+  const kpiInterval = parseInt($('bizKPIInterval').value, 10) || 10;
+  if (kpiInterval < 5 || kpiInterval > 86400) return toast('KPI 检测周期需在 [5, 86400] 秒之间', false);
   const daemons = ($('bizDaemons').value || '').split(',').map(s => s.trim()).filter(Boolean).map(s => {
     const [ip, port] = s.split(':');
     return { ip, port: parseInt(port, 10) };
   });
   if (!name) return toast('请填写业务名称', false);
   try {
-    await post('/center/business', { name, interval_sec: interval, daemons });
+    await post('/center/business', { name, interval_sec: interval, kpi_interval_sec: kpiInterval, daemons });
     toast('已添加业务 ' + name, true);
     $('bizName').value = ''; $('bizDaemons').value = '';
     refresh();
+    openKPIFilter(name);
   } catch(e) { toast('添加失败：' + e.message, false); }
 }
 
@@ -237,6 +262,120 @@ async function unsetVllm(biz) {
   $('vllm-' + biz).value = '';
   try { await del('/center/business/' + encodeURIComponent(biz) + '/vllm'); toast('已清除 vllm 接口', true); refresh(); }
   catch(e) { toast('清除失败：' + e.message, false); }
+}
+
+let kpiBiz = null;
+let kpiKnown = [];
+let kpiFilters = [];
+
+function parseDevices(s) {
+  return (s || '').split(',').map(x => parseInt(x.trim(), 10)).filter(n => Number.isInteger(n) && n >= 0);
+}
+
+function openKPIFilter(biz) {
+  kpiBiz = biz;
+  $('kpiTitle').textContent = 'KPI device 过滤 · ' + biz;
+  $('kpiHint').textContent = '';
+  $('kpiBody').innerHTML = '<div class="muted">加载中…</div>';
+  $('kpiModal').classList.add('open');
+  Promise.all([
+    getJSON('/center/business/' + encodeURIComponent(biz) + '/kpi/devices').catch(() => ({ nodes: [] })),
+    getJSON('/center/business/' + encodeURIComponent(biz) + '/kpi/filter').catch(() => ({ filters: [] })),
+  ]).then(([dev, filt]) => {
+    if (kpiBiz !== biz) return;
+    kpiKnown = dev.nodes || [];
+    kpiFilters = filt.filters || [];
+    renderKPIFilterEditor();
+  }).catch(e => {
+    $('kpiBody').innerHTML = '<div class="muted">加载失败：' + escAttr(e.message) + '</div>';
+  });
+}
+
+function closeKPIFilter() {
+  $('kpiModal').classList.remove('open');
+  kpiBiz = null;
+}
+
+function renderKPIFilterEditor() {
+  const known = new Map(kpiKnown.map(n => [n.node, (n.devices || []).slice()]));
+  for (const f of kpiFilters) if (!known.has(f.node)) known.set(f.node, []);
+  const nodes = Array.from(known.keys()).sort();
+
+  let html = '<div class="muted">默认勾选全部 device；全部不勾选=该节点全部 device 被过滤。可手动补充节点和 device。</div>';
+  for (const node of nodes) {
+    const all = known.get(node) || [];
+    const current = kpiFilters.find(f => f.node === node);
+    const selected = new Set(current && !current.filter_all ? current.devices : (current ? [] : all));
+    const extra = current && !current.filter_all ? current.devices.filter(d => !all.includes(d)) : [];
+    html += `<div class="kpi-node" data-node="${escAttr(node)}">
+      <div><b>${escAttr(node)}</b> ${all.length ? `<span class="tag">最新数据 ${all.length} devices</span>` : `<span class="tag">无最新 KPI 数据</span>`}</div>
+      ${all.length ? `<div class="dev-grid">${all.map(d => `<label><input type="checkbox" class="kpi-dev" value="${d}" ${selected.has(d) ? 'checked' : ''}>device ${d}</label>`).join('')}</div>` : ''}
+      <div class="row">
+        ${all.length ? `<button onclick="selectAllKPIDevices(this, true)">全选</button><button onclick="selectAllKPIDevices(this, false)">全不选</button>` : ''}
+        <input class="kpi-manual" placeholder="额外 device，如 3,5" value="${escAttr(extra.join(','))}" style="width:180px">
+        <button onclick="saveKPIFilter('${escJS(node)}', this)">保存该节点过滤</button>
+        <button class="danger" onclick="clearKPIFilter('${escJS(node)}')">清除该节点过滤</button>
+      </div>
+    </div>`;
+  }
+  html += `<div class="kpi-node">
+    <div><b>手动添加节点</b></div>
+    <div class="row mt">
+      <input id="kpiNewNode" placeholder="节点名，如 node-a" style="width:200px">
+      <input id="kpiNewDevices" placeholder="device，如 0,1,2" style="width:200px">
+      <button onclick="saveManualKPIFilter()">保存</button>
+    </div>
+  </div>`;
+  $('kpiBody').innerHTML = html;
+  $('kpiHint').textContent = nodes.length ? '' : '暂无最新 KPI 数据，只能手动输入';
+}
+
+async function postKPIFilter(biz, node, devices, filterAll) {
+  try {
+    await post('/center/business/' + encodeURIComponent(biz) + '/kpi/filter', { node, devices, filter_all: !!filterAll });
+    toast(filterAll ? ('已过滤全部 device：' + node) : ('已保存 KPI 过滤：' + node), true);
+    openKPIFilter(biz);
+  } catch(e) {
+    toast('保存失败：' + e.message, false);
+  }
+}
+
+function selectAllKPIDevices(btn, checked) {
+  const box = btn.closest('.kpi-node');
+  box.querySelectorAll('.kpi-dev').forEach(x => { x.checked = checked; });
+}
+
+async function saveKPIFilter(node, btn) {
+  if (!kpiBiz) return;
+  const box = btn.closest('.kpi-node');
+  const boxes = Array.from(box.querySelectorAll('.kpi-dev'));
+  const checked = boxes.filter(x => x.checked).map(x => parseInt(x.value, 10));
+  const manual = parseDevices(box.querySelector('.kpi-manual')?.value);
+  const devices = checked.slice();
+  for (const d of manual) if (!devices.includes(d)) devices.push(d);
+
+  if (boxes.length > 0 && checked.length === 0 && manual.length === 0) {
+    await postKPIFilter(kpiBiz, node, [], true);
+    return;
+  }
+  if (boxes.length > 0 && checked.length === boxes.length && manual.length === 0) {
+    await postKPIFilter(kpiBiz, node, [], false);
+    return;
+  }
+  await postKPIFilter(kpiBiz, node, devices, false);
+}
+
+async function clearKPIFilter(node) {
+  if (!kpiBiz) return;
+  await postKPIFilter(kpiBiz, node, [], false);
+}
+
+async function saveManualKPIFilter() {
+  if (!kpiBiz) return;
+  const node = $('kpiNewNode').value.trim();
+  if (!node) return toast('请填写节点名', false);
+  const devices = parseDevices($('kpiNewDevices').value);
+  await postKPIFilter(kpiBiz, node, devices, false);
 }
 
 async function refresh() {

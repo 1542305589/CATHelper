@@ -108,6 +108,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.logf("HTTP server listening on :%d", d.cfg.Port)
 
 	d.ensureDynolog()
+	go d.kpiShipLoop(ctx)
 	if d.cfg.KpiDir == "" {
 		d.logf("KPI detection disabled (no --kpi-dir): cycles run profiler-only")
 	} else {
@@ -596,7 +597,16 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "managed" {
-		return fmt.Errorf("already managed by a center")
+		if d.centerAddr != centerAddr {
+			return fmt.Errorf("already managed by a center")
+		}
+		// Same center re-key: the center restarted or the business was
+		// recreated, so accept its new key without restarting heartbeat.
+		d.matchKey = key
+		d.business = business
+		d.daemonID = daemonID
+		d.logf("re-matched by center %s (business=%s daemon=%s)", centerAddr, business, daemonID)
+		return nil
 	}
 	d.centerAddr = centerAddr
 	d.matchKey = key

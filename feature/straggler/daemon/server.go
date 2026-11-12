@@ -524,7 +524,7 @@ func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
-	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true})
+	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center})
 }
 
 // requireManagedKey gates a control endpoint: when NOT managed it passes
