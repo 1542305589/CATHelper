@@ -522,6 +522,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 
 - 首个周期在启动 **`interval` 之后**运行（不等启动即跑）；`POST /daemon/trigger` 手动补跑；已有周期在跑时 tick 跳过（single-flight）。
 - `config.FilePath` 每周期设为 `--profiler-dir` 根目录；KPI 每周期重读 `--kpi-dir` 取最新数据，无跨周期状态。
+- 匹配到中心节点后，守护进程高频检测 `--kpi-dir` 最新文件的追加内容（inode+size+offset，只消费完整行），只把带 `vals` 的 NPU 样本事件驱动上报到 `POST /center/kpi/{business}/{daemon}`；CPU-only 行不上报；未匹配时只推进 offset 并丢弃新增行，匹配后从当前时刻开始上报，不补发历史。center 把上报 hostname 标注为 `hostname(daemon ip:port)` 作为节点名，避免两个守护进程 hostname 相同时冲突。控制台默认全选 device；全部不勾选表示该节点全部 device 被过滤（`filter_all=true`）；全部勾选表示不过滤。KPI 数据查询只保留内部 SQL（store Latest/History），不对外提供 latest/history HTTP 查询 API。
 - 未提供 `--kpi-dir`：步骤 6 跳过，合并 JSON 不含 `kpi` 键，周期仍成功（仅 Profiler）。
 - 退出：SIGINT/SIGTERM → 停 HTTP → 等 in-flight 周期（≤10min）→ 杀掉自己拉起的 dynolog。
 

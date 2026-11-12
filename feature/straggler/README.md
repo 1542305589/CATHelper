@@ -119,6 +119,7 @@ cd feature/straggler
 
 **启动后行为**：
 - 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
+- 匹配到中心节点后，高频检测 `--kpi-dir` 最新文件的追加内容，只把带 `vals` 的 NPU 样本事件驱动上报到 `POST /center/kpi/{business}/{daemon}`（不再暴露 Prometheus `/kpi/metrics`）。未匹配时只推进 offset 并丢弃新增行，不缓存；匹配后从当前时刻开始上报，不会补发历史。
 - 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。
 - `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
 
@@ -471,10 +472,22 @@ curl -s -X POST localhost:8080/daemon/stop
 | `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |
 | `GET /center/business/{name}/metrics` | 业务 TPOT/TTFT 延迟时序（按 engine） |
 | `POST /center/op_metric/{business}/{daemon}` | 守护进程上报 op_metric（`X-Match-Key` 鉴权） |
+| `POST /center/kpi/{business}/{daemon}` | 守护进程上报 NPU KPI 样本（`X-Match-Key` 鉴权；只发带 `vals` 的行） |
+| `POST /center/business/{name}/kpi_interval` | 修改该业务的 KPI 检测周期 `{"interval_sec":10}`（5–86400） |
+| `POST /center/business/{name}/kpi_nsigma` | 修改该业务 KPI n-sigma 阈值 `{"power_time","power_space","util_time","util_space","freq_time","freq_space"}`（0–20） |
+| `POST /center/business/{name}/kpi_reference` | 修改异常点参考接纳率 `{"admit_ratio":0.1}`（0–1） |
+| `GET /center/business/{name}/kpi/devices` | 业务最新 KPI 中出现过的节点/device 列表（忽略 allowlist，供控制台选择） |
+| `GET /center/business/{name}/console/kpi` | 业务控制台 KPI 检测 tab：最近检测运行与异常 |
+
+中心 KPI 检测连续 3 次出现**非全局漂移**的真实异常时，会自动触发一次该业务的 profiler 检测，触发后 10 分钟冷却；冷却期内不重复触发。同一 node/metric 连续 3 轮 `flagged >= 3` 且占比 >= 50% 时判定为全局漂移：回溯豁免这 3 轮异常、标记 `global_shift`、刷新参考窗口，且不触发 profiler。KPI n-sigma 可在业务控制台按 metric 和维度分别设置，默认 power/util 时间/空间 4，freq 时间/空间 3。
+| `GET /center/business/{name}/kpi/filter` | 查看节点 device 过滤（allowlist） |
+| `POST /center/business/{name}/kpi/filter` | 设置节点 device 过滤 `{"node","devices":[...],"filter_all":bool}`；空数组且 `filter_all=false`=不过滤，`filter_all=true`=全部 device 被过滤 |
 | `GET /center/business/{name}/history` | 业务检测历史 |
 | `GET /center/business/{name}/report` | 业务最新合并检测报告（text/plain） |
 | `GET /center/business/{name}/result` | 业务最新合并结果 JSON |
 | `GET /center/business/{name}/op_metric` | 业务最新合并 op_metric JSON |
+
+KPI 历史与节点/device allowlist 存在 `center_data/kpi.db`（SQLite）：原始样本落库，过滤在内部 SQL 查询时应用，所以修改 allowlist 不会破坏历史数据。KPI 数据查询只提供内部 SQL（store 的 Latest/History），不对外暴露 HTTP 查询 API；控制台只保留 devices/filter 配置接口。主控制台添加业务后会自动打开「KPI device 过滤」，已有业务可在详情里打开；有最新 KPI 数据时列出节点/device 复选框，默认全部勾选；全部不勾选=该节点全部 device 被过滤；全部勾选=不过滤；也支持手动输入节点/device。center 会把上报的 hostname 标注为 `hostname(daemon ip:port)`，所以两个守护进程即使 hostname 相同也会成为不同节点。
 
 ### 5.6 Web 控制台 / 业务控制台
 
