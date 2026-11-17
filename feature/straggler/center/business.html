@@ -247,7 +247,7 @@
       </div>
       <div id="kpiHistWrap" style="display:none; overflow:auto; max-height:36vh;">
         <table>
-          <thead><tr><th>检测时间</th><th>node</th><th>devices</th><th>anomalies</th><th>flagged</th><th>reference</th></tr></thead>
+          <thead><tr><th>检测时间</th><th>node</th><th>devices</th><th>anomalies</th><th>flagged</th><th>reference</th><th>load</th></tr></thead>
           <tbody id="kpiHistBody"></tbody>
         </table>
         <div id="kpiHistEmpty" class="empty">加载中…</div>
@@ -569,6 +569,7 @@ function renderKPIHistory(runs) {
       String(r.anomalies),
       String(r.flagged),
       r.global_shift ? 'global_shift' : (r.reference_invalid ? 'invalid (time only)' : 'ok'),
+      r.load_state || 'unknown',
     ];
     cells.forEach(v => {
       const td = document.createElement('td');
