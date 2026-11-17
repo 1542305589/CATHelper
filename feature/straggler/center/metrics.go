@@ -2,7 +2,9 @@ package center
 
 import (
 	"io"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,16 +48,20 @@ func (c *Center) scrapeAll(client *http.Client) {
 
 // metricPoint is one sampled datapoint for one engine.
 type metricPoint struct {
-	Ts   int64   `json:"ts"`   // unix seconds
-	TTFT float64 `json:"ttft"` // seconds, delta-average (carry-forward when idle)
-	TPOT float64 `json:"tpot"` // seconds, delta-average (carry-forward when idle)
-	Reqs float64 `json:"reqs"` // requests completed in this window (0 => idle)
+	Ts      int64   `json:"ts"`      // unix seconds
+	TTFT    float64 `json:"ttft"`    // seconds, delta-average (carry-forward when idle)
+	TPOT    float64 `json:"tpot"`    // seconds, delta-average (carry-forward when idle)
+	Reqs    float64 `json:"reqs"`    // requests completed in this window (0 => idle)
+	Running float64 `json:"running"` // vllm:num_requests_running gauge
+	Waiting float64 `json:"waiting"` // vllm:num_requests_waiting gauge
 }
 
 // metricCum is the cumulative histogram sum/count for one engine, used to
 // compute window deltas between two scrapes.
 type metricCum struct {
 	ttftSum, ttftCount, tpotSum, tpotCount float64
+	running, waiting                       float64
+	hasRunning, hasWaiting                 bool
 }
 
 // engineMetrics is the per-engine series plus the last cumulative sample.
@@ -72,6 +78,8 @@ type metricsStore struct {
 	url    map[string]string                    // business → last seen metrics URL
 	lastAt map[string]int64                     // business → last scrape unix seconds
 	err    map[string]string                    // business → last scrape error
+	store  *kpiStore
+	logf   func(format string, args ...any)
 }
 
 func newMetricsStore() *metricsStore {
@@ -80,6 +88,7 @@ func newMetricsStore() *metricsStore {
 		url:    map[string]string{},
 		lastAt: map[string]int64{},
 		err:    map[string]string{},
+		logf:   func(format string, args ...any) {},
 	}
 }
 
@@ -107,7 +116,6 @@ func (m *metricsStore) scrape(client *http.Client, business, url string) {
 
 func (m *metricsStore) record(business, url string, sums map[string]metricCum, now int64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.url[business] = url
 	m.lastAt[business] = now
 	delete(m.err, business)
@@ -117,6 +125,7 @@ func (m *metricsStore) record(business, url string, sums map[string]metricCum, n
 		eng = map[string]*engineMetrics{}
 		m.series[business] = eng
 	}
+	persist := map[string]metricPoint{}
 	for name, c := range sums {
 		e := eng[name]
 		if e == nil {
@@ -128,8 +137,11 @@ func (m *metricsStore) record(business, url string, sums map[string]metricCum, n
 			e.have = true
 			continue
 		}
-		p := metricPoint{Ts: now}
+		p := metricPoint{Ts: now, Running: c.running, Waiting: c.waiting}
 		valid := false
+		if c.hasRunning || c.hasWaiting {
+			valid = true
+		}
 
 		dCount := c.ttftCount - e.last.ttftCount
 		if dCount > 0 {
@@ -137,7 +149,7 @@ func (m *metricsStore) record(business, url string, sums map[string]metricCum, n
 			p.Reqs = dCount
 			valid = true
 		} else if n := len(e.points); n > 0 {
-			p.TTFT = e.points[n-1].TTFT // carry-forward when idle
+			p.TTFT = e.points[n-1].TTFT
 			valid = true
 		}
 
@@ -155,6 +167,14 @@ func (m *metricsStore) record(business, url string, sums map[string]metricCum, n
 			if len(e.points) > metricsMaxPoints {
 				e.points = e.points[len(e.points)-metricsMaxPoints:]
 			}
+			persist[name] = p
+		}
+	}
+	m.mu.Unlock()
+
+	if m.store != nil && len(persist) > 0 {
+		if err := m.store.InsertVLLMMetrics(business, persist); err != nil {
+			m.logf("vllm metrics persist: %v", err)
 		}
 	}
 }
@@ -198,6 +218,114 @@ func (m *metricsStore) snapshot(business string) map[string]any {
 	}
 }
 
+// loadSnapshot is the /metrics-derived load state used by KPI detection.
+// It is observe-only for now: it is stored with each detection run but does not
+// change global_shift, profiler triggering, or reference-window behavior.
+type loadSnapshot struct {
+	Reqs5m         float64
+	RunningP90     float64
+	RunningMax     float64
+	BaselineReqs5m float64
+	LoadRatio      float64
+	Points         int
+	BaselinePoints int
+	Fresh          bool
+}
+
+// LoadSnapshot aggregates the current 5-minute request window and a 5-hour
+// baseline from the in-memory /metrics series.
+func (m *metricsStore) LoadSnapshot(business string, now int64) loadSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	eng, ok := m.series[business]
+	if !ok {
+		return loadSnapshot{}
+	}
+	const curWindow = int64(5 * 60)
+	const baseWindow = int64(5 * 3600)
+	since := now - curWindow
+	baseSince := now - baseWindow
+	var reqs float64
+	var running []float64
+	baseBuckets := make(map[int64]float64)
+	points := 0
+	basePoints := 0
+	for _, e := range eng {
+		for _, p := range e.points {
+			if p.Ts < baseSince || p.Ts > now {
+				continue
+			}
+			if p.Ts >= since {
+				reqs += p.Reqs
+				running = append(running, p.Running)
+				points++
+			} else {
+				baseBuckets[p.Ts/300] += p.Reqs
+				basePoints++
+			}
+		}
+	}
+	if points == 0 {
+		return loadSnapshot{}
+	}
+	sort.Float64s(running)
+	p90 := 0.0
+	if len(running) > 0 {
+		idx := int(math.Ceil(0.9*float64(len(running)))) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(running) {
+			idx = len(running) - 1
+		}
+		p90 = running[idx]
+	}
+	baseVals := make([]float64, 0, len(baseBuckets))
+	for _, v := range baseBuckets {
+		baseVals = append(baseVals, v)
+	}
+	sort.Float64s(baseVals)
+	baseline := 0.0
+	if len(baseVals) > 0 {
+		baseline = baseVals[len(baseVals)/2]
+	}
+	ratio := 0.0
+	if baseline > 0 {
+		ratio = reqs / baseline
+	}
+	fresh := m.lastAt[business] > 0 && now-m.lastAt[business] <= 60
+	return loadSnapshot{
+		Reqs5m: reqs, RunningP90: p90, RunningMax: maxFloat(running),
+		BaselineReqs5m: baseline, LoadRatio: ratio,
+		Points: points, BaselinePoints: basePoints, Fresh: fresh,
+	}
+}
+
+func maxFloat(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	return v[len(v)-1]
+}
+
+// classifyLoad maps /metrics load signals to idle/low/active/transition/unknown.
+func classifyLoad(s loadSnapshot) string {
+	if !s.Fresh || s.Points == 0 {
+		return "unknown"
+	}
+	reqs, base, running := s.Reqs5m, s.BaselineReqs5m, s.RunningP90
+	if running == 0 && (base <= 0 || reqs < math.Max(1, 0.05*base)) {
+		return "idle"
+	}
+	if (base > 0 && reqs >= math.Max(3, 0.30*base)) || running >= 2 {
+		return "active"
+	}
+	if running <= 1 || (base > 0 && reqs < math.Max(2, 0.10*base)) {
+		return "low"
+	}
+	return "transition"
+}
+
 // parseVLLMMetrics extracts cumulative sum/count for TTFT and TPOT per engine
 // from a Prometheus text-format body. Engines without an `engine` label are
 // grouped under "default".
@@ -229,6 +357,12 @@ func parseVLLMMetrics(text string) map[string]metricCum {
 			c.tpotSum = value
 		case "vllm:inter_token_latency_seconds_count", "vllm:time_per_output_token_seconds_count":
 			c.tpotCount = value
+		case "vllm:num_requests_running":
+			c.running = value
+			c.hasRunning = true
+		case "vllm:num_requests_waiting":
+			c.waiting = value
+			c.hasWaiting = true
 		default:
 			continue
 		}

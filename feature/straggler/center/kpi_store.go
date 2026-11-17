@@ -131,6 +131,20 @@ func newKPIStore(path string, logf func(format string, args ...any)) (*kpiStore,
 			PRIMARY KEY (business, node, device, ts, metric, kind)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_kpi_anomaly_lookup ON kpi_anomaly(business, node, device, ts)`,
+		`CREATE TABLE IF NOT EXISTS vllm_metrics_samples (
+			business TEXT NOT NULL,
+			engine TEXT NOT NULL,
+			ts INTEGER NOT NULL,
+			ttft REAL NOT NULL,
+			tpot REAL NOT NULL,
+			reqs REAL NOT NULL,
+			running REAL NOT NULL,
+			waiting REAL NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (business, engine, ts)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_vllm_metrics_business_ts
+			ON vllm_metrics_samples(business, ts)`,
 		`CREATE TABLE IF NOT EXISTS kpi_detect_run (
 			business TEXT NOT NULL,
 			node TEXT NOT NULL,
@@ -156,6 +170,10 @@ func newKPIStore(path string, logf func(format string, args ...any)) (*kpiStore,
 		return nil, err
 	}
 	if err := ensureKPIrunGlobalShiftColumn(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := ensureKPILoadColumns(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -234,6 +252,82 @@ func (s *kpiStore) Insert(business, daemon, node string, samples []kpiSample) (i
 	}
 	s.clearSeriesCache()
 	return rows, nil
+}
+
+// InsertVLLMMetrics stores one point per engine for a business. Duplicate
+// (business, engine, ts) rows are idempotent.
+func (s *kpiStore) InsertVLLMMetrics(business string, points map[string]metricPoint) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("kpi store disabled")
+	}
+	if len(points) == 0 {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO vllm_metrics_samples
+		(business, engine, ts, ttft, tpot, reqs, running, waiting, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().Unix()
+	for engine, p := range points {
+		if _, err := stmt.Exec(business, engine, p.Ts, p.TTFT, p.TPOT, p.Reqs, p.Running, p.Waiting, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// VLLMMetricsRange returns raw 20-second TTFT/TPOT points ordered by engine, ts.
+func (s *kpiStore) VLLMMetricsRange(business string, from, to int64) (map[string][]metricPoint, error) {
+	out := map[string][]metricPoint{}
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("kpi store disabled")
+	}
+	rows, err := s.db.Query(`SELECT engine, ts, ttft, tpot, reqs, running, waiting
+		FROM vllm_metrics_samples
+		WHERE business = ? AND ts >= ? AND ts <= ?
+		ORDER BY engine, ts`, business, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var engine string
+		var p metricPoint
+		if err := rows.Scan(&engine, &p.Ts, &p.TTFT, &p.TPOT, &p.Reqs, &p.Running, &p.Waiting); err != nil {
+			return nil, err
+		}
+		out[engine] = append(out[engine], p)
+	}
+	return out, rows.Err()
+}
+
+// PruneVLLMMetrics deletes raw TTFT/TPOT points older than retention.
+func (s *kpiStore) PruneVLLMMetrics(retention time.Duration) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	if retention <= 0 {
+		retention = 7 * 24 * time.Hour
+	}
+	cutoff := time.Now().Add(-retention).Unix()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.Exec(`DELETE FROM vllm_metrics_samples WHERE ts < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // Latest returns the newest sample per (daemon, node, device) for a business,
@@ -610,6 +704,47 @@ func ensureKPIrunGlobalShiftColumn(db *sql.DB) error {
 	return err
 }
 
+// ensureKPILoadColumns adds the observe-only /metrics load-state columns to an
+// existing kpi_detect_run table. Historical rows default to unknown/0.
+func ensureKPILoadColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(kpi_detect_run)`)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	rows.Close()
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{"load_state", "load_state TEXT NOT NULL DEFAULT 'unknown'"},
+		{"reqs_5m", "reqs_5m REAL NOT NULL DEFAULT 0"},
+		{"running_p90", "running_p90 REAL NOT NULL DEFAULT 0"},
+		{"load_ratio", "load_ratio REAL NOT NULL DEFAULT 0"},
+		{"metrics_fresh", "metrics_fresh INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, col := range cols {
+		if existing[col.name] {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE kpi_detect_run ADD COLUMN ` + col.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type kpiAnomaly struct {
 	Business          string  `json:"business"`
 	Node              string  `json:"node"`
@@ -859,14 +994,19 @@ func (s *kpiStore) insertAnomaliesOnce(items []kpiAnomaly) error {
 
 // kpiDetectRun is one node's detection-cycle summary.
 type kpiDetectRun struct {
-	Business         string `json:"business"`
-	Node             string `json:"node"`
-	Ts               int64  `json:"ts"`
-	Devices          int    `json:"devices"`
-	Anomalies        int    `json:"anomalies"`
-	Flagged          int    `json:"flagged"`
-	ReferenceInvalid bool   `json:"reference_invalid"`
-	GlobalShift      bool   `json:"global_shift"`
+	Business         string  `json:"business"`
+	Node             string  `json:"node"`
+	Ts               int64   `json:"ts"`
+	Devices          int     `json:"devices"`
+	Anomalies        int     `json:"anomalies"`
+	Flagged          int     `json:"flagged"`
+	ReferenceInvalid bool    `json:"reference_invalid"`
+	GlobalShift      bool    `json:"global_shift"`
+	LoadState        string  `json:"load_state"`
+	Reqs5m           float64 `json:"reqs_5m"`
+	RunningP90       float64 `json:"running_p90"`
+	LoadRatio        float64 `json:"load_ratio"`
+	MetricsFresh     bool    `json:"metrics_fresh"`
 }
 
 // InsertDetectRun records one detection cycle for a node.
@@ -877,10 +1017,13 @@ func (s *kpiStore) InsertDetectRun(run kpiDetectRun) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO kpi_detect_run
-		(business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift,
+		 load_state, reqs_5m, running_p90, load_ratio, metrics_fresh, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.Business, run.Node, run.Ts, run.Devices, run.Anomalies, run.Flagged,
-		boolInt(run.ReferenceInvalid), boolInt(run.GlobalShift), time.Now().Unix())
+		boolInt(run.ReferenceInvalid), boolInt(run.GlobalShift),
+		run.LoadState, run.Reqs5m, run.RunningP90, run.LoadRatio, boolInt(run.MetricsFresh),
+		time.Now().Unix())
 	return err
 }
 
@@ -892,7 +1035,8 @@ func (s *kpiStore) DetectRuns(business string, limit int) ([]kpiDetectRun, error
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift
+	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift,
+			load_state, reqs_5m, running_p90, load_ratio, metrics_fresh
 		FROM kpi_detect_run WHERE business = ? ORDER BY ts DESC LIMIT ?`, business, limit)
 	if err != nil {
 		return nil, err
@@ -901,12 +1045,14 @@ func (s *kpiStore) DetectRuns(business string, limit int) ([]kpiDetectRun, error
 	out := make([]kpiDetectRun, 0)
 	for rows.Next() {
 		var run kpiDetectRun
-		var invalid, shift int
-		if err := rows.Scan(&run.Business, &run.Node, &run.Ts, &run.Devices, &run.Anomalies, &run.Flagged, &invalid, &shift); err != nil {
+		var invalid, shift, fresh int
+		if err := rows.Scan(&run.Business, &run.Node, &run.Ts, &run.Devices, &run.Anomalies, &run.Flagged,
+			&invalid, &shift, &run.LoadState, &run.Reqs5m, &run.RunningP90, &run.LoadRatio, &fresh); err != nil {
 			return nil, err
 		}
 		run.ReferenceInvalid = invalid != 0
 		run.GlobalShift = shift != 0
+		run.MetricsFresh = fresh != 0
 		out = append(out, run)
 	}
 	return out, rows.Err()
@@ -923,7 +1069,8 @@ func (s *kpiStore) DetectRunsRange(business string, from, to int64, limit int) (
 	if limit > 20000 {
 		limit = 20000
 	}
-	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift
+	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift,
+			load_state, reqs_5m, running_p90, load_ratio, metrics_fresh
 		FROM kpi_detect_run WHERE business = ? AND ts >= ? AND ts <= ?
 		ORDER BY ts DESC LIMIT ?`, business, from, to, limit)
 	if err != nil {
@@ -933,12 +1080,14 @@ func (s *kpiStore) DetectRunsRange(business string, from, to int64, limit int) (
 	out := make([]kpiDetectRun, 0)
 	for rows.Next() {
 		var run kpiDetectRun
-		var invalid, shift int
-		if err := rows.Scan(&run.Business, &run.Node, &run.Ts, &run.Devices, &run.Anomalies, &run.Flagged, &invalid, &shift); err != nil {
+		var invalid, shift, fresh int
+		if err := rows.Scan(&run.Business, &run.Node, &run.Ts, &run.Devices, &run.Anomalies, &run.Flagged,
+			&invalid, &shift, &run.LoadState, &run.Reqs5m, &run.RunningP90, &run.LoadRatio, &fresh); err != nil {
 			return nil, err
 		}
 		run.ReferenceInvalid = invalid != 0
 		run.GlobalShift = shift != 0
+		run.MetricsFresh = fresh != 0
 		out = append(out, run)
 	}
 	return out, rows.Err()
@@ -992,15 +1141,22 @@ func (s *kpiStore) DeleteAnomaliesForMetric(business, node, metric string, tsLis
 	return tx.Commit()
 }
 
-// PruneKPI deletes samples/anomalies/runs older than retention and reclaims space.
-func (s *kpiStore) PruneKPI(retention time.Duration) (int64, error) {
+// PruneKPI deletes raw samples and anomaly details on their own retention
+// schedules. kpi_detect_run is intentionally kept: it is tiny and is the audit
+// trail for what the detector did on each cycle.
+func (s *kpiStore) PruneKPI(sampleRetention, anomalyRetention time.Duration) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
-	if retention <= 0 {
-		retention = 48 * time.Hour
+	if sampleRetention <= 0 {
+		sampleRetention = 48 * time.Hour
 	}
-	cutoff := time.Now().Add(-retention).Unix()
+	if anomalyRetention <= 0 {
+		anomalyRetention = 30 * 24 * time.Hour
+	}
+	now := time.Now()
+	sampleCutoff := now.Add(-sampleRetention).Unix()
+	anomalyCutoff := now.Add(-anomalyRetention).Unix()
 	s.writeMu.Lock()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1008,7 +1164,10 @@ func (s *kpiStore) PruneKPI(retention time.Duration) (int64, error) {
 		return 0, err
 	}
 	var deleted int64
-	for _, table := range []string{"kpi_samples", "kpi_anomaly", "kpi_detect_run"} {
+	for table, cutoff := range map[string]int64{
+		"kpi_samples": sampleCutoff,
+		"kpi_anomaly": anomalyCutoff,
+	} {
 		res, err := tx.Exec(`DELETE FROM `+table+` WHERE ts < ?`, cutoff)
 		if err != nil {
 			_ = tx.Rollback()

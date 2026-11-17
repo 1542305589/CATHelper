@@ -54,7 +54,9 @@ func New(cfg Config) *Center {
 		c.logf("KPI store disabled: %v", err)
 	} else {
 		c.kpi = ks
-		c.kpiDet = newKPIDetector(ks, c.logf)
+		c.kpiDet = newKPIDetector(ks, c.metrics, c.logf)
+		c.metrics.store = ks
+		c.metrics.logf = c.logf
 	}
 	c.load()
 	return c

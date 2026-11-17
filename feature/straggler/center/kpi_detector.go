@@ -11,13 +11,20 @@ import (
 )
 
 const (
-	defaultKPIDetectInterval = 10 * time.Second
-	kpiDetectTick            = time.Second
-	kpiAggregationWindowSec  = 30
-	kpiReferenceLimit        = 10000
-	kpiMinReferencePoints    = 100
-	kpiSpaceMinDevices       = 3
-	kpiFreqTolerance         = 0.01
+	defaultKPIDetectInterval    = 10 * time.Second
+	kpiDetectTick               = time.Second
+	kpiAggregationWindowSec     = 30
+	kpiReferenceLimit           = 10000
+	kpiMinReferencePoints       = 100
+	kpiSpaceMinDevices          = 3
+	kpiFreqTolerance            = 0.01
+	kpiGlobalShiftCandidateRuns = 3
+	kpiGlobalShiftConfirmRuns   = 10
+	kpiGlobalShiftMinRatio      = 0.8
+	kpiGlobalShiftCooldown      = 30 * time.Minute
+	kpiSampleRetention          = 48 * time.Hour
+	kpiAnomalyRetention         = 30 * 24 * time.Hour
+	vllmMetricsRetention        = 7 * 24 * time.Hour
 )
 
 // kpiMetricSpec defines one detected metric. absolute=true means |z| > n is
@@ -44,8 +51,9 @@ type kpiStats struct {
 // kpiDetector owns the in-memory reference-invalid guard. Reference data itself is
 // always queried from kpi_samples; there is no separate baseline database.
 type kpiDetector struct {
-	store *kpiStore
-	logf  func(format string, args ...any)
+	store   *kpiStore
+	metrics *metricsStore
+	logf    func(format string, args ...any)
 
 	mu            sync.Mutex
 	lastDetected  map[string]int64   // business|node -> last detection ts
@@ -53,9 +61,10 @@ type kpiDetector struct {
 	shiftCooldown map[string]int64   // business|node -> global-shift cooldown until
 }
 
-func newKPIDetector(store *kpiStore, logf func(format string, args ...any)) *kpiDetector {
+func newKPIDetector(store *kpiStore, metrics *metricsStore, logf func(format string, args ...any)) *kpiDetector {
 	return &kpiDetector{
 		store:         store,
+		metrics:       metrics,
 		logf:          logf,
 		lastDetected:  make(map[string]int64),
 		shiftCounts:   make(map[string][]int64),
@@ -67,6 +76,8 @@ func newKPIDetector(store *kpiStore, logf func(format string, args ...any)) *kpi
 type kpiCycleResult struct {
 	Detected             bool
 	RealAnomaly          bool
+	LoadState            string
+	GlobalShiftCandidate bool
 	GlobalShiftConfirmed bool
 	GlobalShiftEvents    []kpiGlobalShiftEvent
 }
@@ -94,10 +105,15 @@ func (c *Center) kpiRetentionLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
-		if n, err := c.kpi.PruneKPI(48 * time.Hour); err != nil {
+		if n, err := c.kpi.PruneVLLMMetrics(vllmMetricsRetention); err != nil {
+			c.logf("vLLM metrics retention: %v", err)
+		} else if n > 0 {
+			c.logf("vLLM metrics retention: deleted %d rows (>=7d)", n)
+		}
+		if n, err := c.kpi.PruneKPI(kpiSampleRetention, kpiAnomalyRetention); err != nil {
 			c.logf("KPI retention: %v", err)
 		} else if n > 0 {
-			c.logf("KPI retention: deleted %d rows older than 48h", n)
+			c.logf("KPI retention: deleted %d rows (samples>=48h, anomalies>=30d; runs kept)", n)
 		}
 		select {
 		case <-ctx.Done():
@@ -136,9 +152,9 @@ func (c *Center) kpiDetectLoop(ctx context.Context) {
 						c.resetKPIAnomalyStreak(due.name)
 					}
 					if res.RealAnomaly {
-						c.recordKPIAnomaly(due.name, true)
+						c.recordKPIAnomaly(due.name, true, res.LoadState)
 					} else if !res.GlobalShiftConfirmed {
-						c.recordKPIAnomaly(due.name, false)
+						c.recordKPIAnomaly(due.name, false, res.LoadState)
 					}
 				}(due)
 			}
@@ -185,6 +201,12 @@ func kpiBusinessInterval(b *Business, def time.Duration) time.Duration {
 
 func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns KPINSigma, refAdmitRatio float64, referenceSince map[string]int64) (kpiCycleResult, error) {
 	var res kpiCycleResult
+	load := loadSnapshot{}
+	if d.metrics != nil {
+		load = d.metrics.LoadSnapshot(business, time.Now().Unix())
+	}
+	loadState := classifyLoad(load)
+	res.LoadState = loadState
 	nodes, err := d.store.NodesDevices(business)
 	if err != nil {
 		return res, err
@@ -319,8 +341,9 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 			anomalies = nil
 		}
 
-		// Global-shift detection: a metric flagged on >= half the devices for
-		// 3 consecutive cycles is treated as an environment/workload shift.
+		// Global-shift detection is load-gated: only active workloads can build
+		// or confirm a shift. Idle/low/transition clears any candidate and never
+		// rebuilds the reference window.
 		metricDevices := make(map[string]map[int]bool)
 		for _, a := range anomalies {
 			if metricDevices[a.Metric] == nil {
@@ -332,8 +355,13 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 		d.mu.Lock()
 		shiftCooling := now < d.shiftCooldown[cooldownKey]
 		d.mu.Unlock()
+		eligible := loadState == "active" && !referenceInvalid && !shiftCooling
 		for _, spec := range kpiMetricSpecs {
-			if shiftCooling {
+			key := business + "|" + node + "|" + spec.name
+			if !eligible {
+				d.mu.Lock()
+				delete(d.shiftCounts, key)
+				d.mu.Unlock()
 				continue
 			}
 			fm := metricDevices[spec.name]
@@ -341,18 +369,18 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 			if len(current) > 0 {
 				ratio = float64(len(fm)) / float64(len(current))
 			}
-			key := business + "|" + node + "|" + spec.name
-			if len(fm) >= 3 && ratio >= 0.5 {
+			if len(fm) >= 3 && ratio >= kpiGlobalShiftMinRatio {
 				d.mu.Lock()
 				state := append(d.shiftCounts[key], now)
-				if len(state) > 3 {
-					state = state[len(state)-3:]
+				if len(state) > kpiGlobalShiftConfirmRuns {
+					state = state[len(state)-kpiGlobalShiftConfirmRuns:]
 				}
 				d.shiftCounts[key] = state
-				confirmed := len(state) >= 3
+				candidate := len(state) >= kpiGlobalShiftCandidateRuns
+				confirmed := len(state) >= kpiGlobalShiftConfirmRuns
 				if confirmed {
 					delete(d.shiftCounts, key)
-					d.shiftCooldown[cooldownKey] = now + 600
+					d.shiftCooldown[cooldownKey] = now + int64(kpiGlobalShiftCooldown.Seconds())
 				}
 				d.mu.Unlock()
 				if confirmed {
@@ -361,6 +389,9 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 						Node: node, Metric: spec.name, TsList: state,
 						Since: state[0] - windowSec,
 					})
+				} else if candidate {
+					res.GlobalShiftCandidate = true
+					d.logf("KPI global shift candidate: %s/%s metric=%s runs=%d load=%s", business, node, spec.name, len(state), loadState)
 				}
 			} else {
 				d.mu.Lock()
@@ -379,6 +410,8 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 			Business: business, Node: node, Ts: now, Devices: len(current),
 			Anomalies: len(anomalies), Flagged: len(flagged),
 			ReferenceInvalid: referenceInvalid, GlobalShift: res.GlobalShiftConfirmed,
+			LoadState: loadState, Reqs5m: load.Reqs5m, RunningP90: load.RunningP90,
+			LoadRatio: load.LoadRatio, MetricsFresh: load.Fresh,
 		}); err != nil {
 			d.logf("KPI detection: store run %s/%s: %v", business, node, err)
 		}
@@ -632,14 +665,14 @@ func valuesToSlice(values map[int]float64) []float64 {
 
 // recordKPIAnomaly updates the per-business anomaly streak and triggers a
 // profiler run after three consecutive anomaly runs, with a 10-minute cooldown.
-func (c *Center) recordKPIAnomaly(business string, hadAnomaly bool) {
+func (c *Center) recordKPIAnomaly(business string, hadAnomaly bool, loadState string) {
 	c.mu.Lock()
 	b := c.biz[business]
 	if b == nil {
 		c.mu.Unlock()
 		return
 	}
-	if !hadAnomaly {
+	if !hadAnomaly || loadState != "active" {
 		b.kpiAnomalyStreak = 0
 		c.mu.Unlock()
 		return

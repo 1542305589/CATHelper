@@ -273,3 +273,79 @@ func TestBusinessKPINSigmaAPI(t *testing.T) {
 		t.Errorf("invalid nsigma status = %d, want 400", rr.Code)
 	}
 }
+
+func TestBusinessMetricsRangeAPI(t *testing.T) {
+	c := newKPITestCenter(t)
+	if err := c.kpi.InsertVLLMMetrics("biz", map[string]metricPoint{
+		"0": {Ts: 100, TTFT: 0.3, TPOT: 0.012, Reqs: 10, Running: 1},
+		"1": {Ts: 100, TTFT: 0.4, TPOT: 0.020, Reqs: 5, Waiting: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.kpi.InsertVLLMMetrics("biz", map[string]metricPoint{
+		"0": {Ts: 101, TTFT: 0.35, TPOT: 0.015, Reqs: 12, Running: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := serveCenter(c, http.MethodGet, "/center/business/biz/metrics?from=100&to=101", "", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Business string                   `json:"business"`
+		From     int64                    `json:"from"`
+		To       int64                    `json:"to"`
+		Source   string                   `json:"source"`
+		Engines  map[string][]metricPoint `json:"engines"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Business != "biz" || resp.From != 100 || resp.To != 101 || resp.Source != "sqlite" {
+		t.Errorf("response = %+v", resp)
+	}
+	if len(resp.Engines["0"]) != 2 {
+		t.Fatalf("engines = %+v, want two points", resp.Engines)
+	}
+	if got := resp.Engines["0"][1]; got.Ts != 101 || got.TTFT != 0.35 {
+		t.Errorf("engines[0][1] = %+v, want ts 101 ttft 0.35", got)
+	}
+
+	rr = serveCenter(c, http.MethodGet, "/center/business/biz/metrics?from=100&to=100", "", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("equal range status = %d, want 400", rr.Code)
+	}
+	rr = serveCenter(c, http.MethodGet, "/center/business/biz/metrics?from=100", "", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("one-sided range status = %d, want 400", rr.Code)
+	}
+	rr = serveCenter(c, http.MethodGet, "/center/business/biz/metrics?from=100&to=1000000", "", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("oversized range status = %d, want 400", rr.Code)
+	}
+}
+
+func TestBusinessMetricsNoRangeUsesMemory(t *testing.T) {
+	c := newKPITestCenter(t)
+	c.metrics.record("biz", "http://x/metrics", map[string]metricCum{
+		"0": {ttftSum: 10, ttftCount: 10, tpotSum: 5, tpotCount: 100},
+	}, 1000)
+	c.metrics.record("biz", "http://x/metrics", map[string]metricCum{
+		"0": {ttftSum: 13, ttftCount: 20, tpotSum: 6.2, tpotCount: 200},
+	}, 1020)
+
+	rr := serveCenter(c, http.MethodGet, "/center/business/biz/metrics", "", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Engines map[string][]metricPoint `json:"engines"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Engines["0"]) != 1 {
+		t.Fatalf("memory engines = %+v, want one point", resp.Engines)
+	}
+}

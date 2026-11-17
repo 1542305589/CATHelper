@@ -123,13 +123,18 @@ func TestKPIRecordAnomalyStreak(t *testing.T) {
 	b := &Business{Name: "biz", triggering: true}
 	c.biz["biz"] = b
 
-	c.recordKPIAnomaly("biz", true)
-	c.recordKPIAnomaly("biz", true)
+	c.recordKPIAnomaly("biz", true, "active")
+	c.recordKPIAnomaly("biz", true, "active")
 	if b.kpiAnomalyStreak != 2 {
 		t.Fatalf("streak = %d, want 2", b.kpiAnomalyStreak)
 	}
-	c.recordKPIAnomaly("biz", false)
+	c.recordKPIAnomaly("biz", false, "active")
 	if b.kpiAnomalyStreak != 0 {
 		t.Fatalf("streak after normal = %d, want 0", b.kpiAnomalyStreak)
+	}
+	c.recordKPIAnomaly("biz", true, "active")
+	c.recordKPIAnomaly("biz", true, "low")
+	if b.kpiAnomalyStreak != 0 {
+		t.Fatalf("streak after low load = %d, want 0", b.kpiAnomalyStreak)
 	}
 }

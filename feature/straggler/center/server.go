@@ -633,7 +633,47 @@ func (c *Center) handleBusinessMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "business not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, c.metrics.snapshot(name))
+
+	fromRaw := strings.TrimSpace(r.URL.Query().Get("from"))
+	toRaw := strings.TrimSpace(r.URL.Query().Get("to"))
+	if fromRaw == "" && toRaw == "" {
+		writeJSON(w, c.metrics.snapshot(name))
+		return
+	}
+	if fromRaw == "" || toRaw == "" {
+		http.Error(w, "from and to are required together", http.StatusBadRequest)
+		return
+	}
+	from, err := strconv.ParseInt(fromRaw, 10, 64)
+	if err != nil || from <= 0 {
+		http.Error(w, "invalid from", http.StatusBadRequest)
+		return
+	}
+	to, err := strconv.ParseInt(toRaw, 10, 64)
+	if err != nil || to <= from {
+		http.Error(w, "invalid to", http.StatusBadRequest)
+		return
+	}
+	if to-from > int64((7*24*time.Hour)/time.Second) {
+		http.Error(w, "range must be at most 7 days", http.StatusBadRequest)
+		return
+	}
+	if c.kpi == nil {
+		http.Error(w, "kpi store disabled", http.StatusServiceUnavailable)
+		return
+	}
+	engines, err := c.kpi.VLLMMetricsRange(name, from, to)
+	if err != nil {
+		http.Error(w, "query vllm metrics: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"business": name,
+		"from":     from,
+		"to":       to,
+		"source":   "sqlite",
+		"engines":  engines,
+	})
 }
 
 // tryMatch matches a daemon in a goroutine (best-effort on add). The HTTP

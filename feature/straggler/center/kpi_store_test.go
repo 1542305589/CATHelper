@@ -334,7 +334,7 @@ func TestKPIStorePruneKPI(t *testing.T) {
 	if err := s.InsertDetectRun(kpiDetectRun{Business: "biz", Node: "node-a", Ts: oldTs}); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.PruneKPI(48 * time.Hour)
+	n, err := s.PruneKPI(48*time.Hour, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("PruneKPI: %v", err)
 	}
@@ -347,5 +347,95 @@ func TestKPIStorePruneKPI(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Ts != newTs {
 		t.Errorf("samples after prune = %+v, want only new ts", rows)
+	}
+	runs, err := s.DetectRuns("biz", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Ts != oldTs {
+		t.Errorf("detect runs after prune = %+v, want old run kept", runs)
+	}
+}
+
+func TestKPIStoreVLLMMetricsRange(t *testing.T) {
+	s := testKPIStore(t)
+	points := map[string]metricPoint{
+		"0": {Ts: 100, TTFT: 0.3, TPOT: 0.012, Reqs: 10, Running: 1, Waiting: 0},
+		"1": {Ts: 100, TTFT: 0.4, TPOT: 0.020, Reqs: 5, Running: 0, Waiting: 1},
+	}
+	if err := s.InsertVLLMMetrics("biz", points); err != nil {
+		t.Fatalf("insert vllm metrics: %v", err)
+	}
+	points["0"] = metricPoint{Ts: 120, TTFT: 0.5, TPOT: 0.030, Reqs: 20, Running: 2, Waiting: 0}
+	if err := s.InsertVLLMMetrics("biz", points); err != nil {
+		t.Fatalf("insert second vllm metrics: %v", err)
+	}
+
+	got, err := s.VLLMMetricsRange("biz", 100, 100)
+	if err != nil {
+		t.Fatalf("range: %v", err)
+	}
+	if len(got["0"]) != 1 || len(got["1"]) != 1 {
+		t.Fatalf("range result = %+v, want one point per engine", got)
+	}
+	if got["0"][0].Ts != 100 || got["0"][0].TTFT != 0.3 {
+		t.Errorf("engine 0 point = %+v", got["0"][0])
+	}
+	if got["1"][0].Ts != 100 || got["1"][0].TPOT != 0.020 {
+		t.Errorf("engine 1 point = %+v", got["1"][0])
+	}
+
+	// Duplicate timestamp replaces rather than duplicates.
+	if err := s.InsertVLLMMetrics("biz", map[string]metricPoint{
+		"0": {Ts: 100, TTFT: 0.9, TPOT: 0.090, Reqs: 99, Running: 9, Waiting: 9},
+	}); err != nil {
+		t.Fatalf("duplicate insert: %v", err)
+	}
+	got, err = s.VLLMMetricsRange("biz", 100, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["0"]) != 1 || got["0"][0].TTFT != 0.9 {
+		t.Errorf("duplicate range = %+v", got["0"])
+	}
+
+	got, err = s.VLLMMetricsRange("biz", 101, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["0"]) != 1 || got["0"][0].Ts != 120 {
+		t.Errorf("second range = %+v", got["0"])
+	}
+}
+
+func TestKPIStorePruneVLLMMetrics(t *testing.T) {
+	s := testKPIStore(t)
+	now := time.Now().Unix()
+	oldTs := now - int64(8*24*time.Hour/time.Second)
+	newTs := now - int64(6*24*time.Hour/time.Second)
+	if err := s.InsertVLLMMetrics("biz", map[string]metricPoint{
+		"0": {Ts: oldTs, TTFT: 0.3, TPOT: 0.01, Reqs: 1},
+		"1": {Ts: newTs, TTFT: 0.4, TPOT: 0.02, Reqs: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PruneVLLMMetrics(7 * 24 * time.Hour); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	got, err := s.VLLMMetricsRange("biz", oldTs, newTs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["0"]) != 0 {
+		t.Errorf("old engine 0 point survived: %+v", got["0"])
+	}
+	if len(got["1"]) != 1 || got["1"][0].Ts != newTs {
+		t.Errorf("new engine 1 point = %+v", got["1"])
+	}
+}
+
+func TestPruneVLLMMetricsRetentionConstant(t *testing.T) {
+	if vllmMetricsRetention != 7*24*time.Hour {
+		t.Fatalf("vllmMetricsRetention = %v, want 7 days", vllmMetricsRetention)
 	}
 }

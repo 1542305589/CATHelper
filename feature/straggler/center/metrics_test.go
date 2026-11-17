@@ -2,6 +2,7 @@ package center
 
 import (
 	"math"
+	"path/filepath"
 	"testing"
 )
 
@@ -73,5 +74,54 @@ func TestMetricsRecordDelta(t *testing.T) {
 	// TTFT delta: (13-10)/(20-10) = 0.3; TPOT delta: (6.2-5)/(200-100) = 0.012.
 	if math.Abs(p.TTFT-0.3) > 1e-9 || math.Abs(p.TPOT-0.012) > 1e-9 || p.Reqs != 10 {
 		t.Errorf("point = %+v, want TTFT=0.3 TPOT=0.012 Reqs=10", p)
+	}
+}
+
+func TestMetricsRecordPersistsPoints(t *testing.T) {
+	s := testKPIStore(t)
+	m := newMetricsStore()
+	m.store = s
+
+	m.record("biz", "http://x/metrics", map[string]metricCum{
+		"0": {ttftSum: 10, ttftCount: 10, tpotSum: 5, tpotCount: 100},
+	}, 1000)
+	m.record("biz", "http://x/metrics", map[string]metricCum{
+		"0": {ttftSum: 13, ttftCount: 20, tpotSum: 6.2, tpotCount: 200},
+	}, 1020)
+
+	got, err := s.VLLMMetricsRange("biz", 1020, 1020)
+	if err != nil {
+		t.Fatalf("range: %v", err)
+	}
+	if len(got["0"]) != 1 {
+		t.Fatalf("persisted points = %+v, want 1", got["0"])
+	}
+	p := got["0"][0]
+	if math.Abs(p.TTFT-0.3) > 1e-9 || math.Abs(p.TPOT-0.012) > 1e-9 || p.Reqs != 10 {
+		t.Errorf("persisted point = %+v", p)
+	}
+}
+
+func TestMetricsRecordPersistenceFailureKeepsMemory(t *testing.T) {
+	s, err := newKPIStore(filepath.Join(t.TempDir(), "kpi.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newMetricsStore()
+	m.store = s
+	m.logf = func(format string, args ...any) {}
+
+	m.record("biz", "http://x/metrics", map[string]metricCum{
+		"0": {ttftSum: 10, ttftCount: 10, tpotSum: 5, tpotCount: 100},
+	}, 1000)
+	_ = s.Close()
+	m.record("biz", "http://x/metrics", map[string]metricCum{
+		"0": {ttftSum: 13, ttftCount: 20, tpotSum: 6.2, tpotCount: 200},
+	}, 1020)
+
+	snap := m.snapshot("biz")
+	pts := snap["engines"].(map[string][]metricPoint)["0"]
+	if len(pts) != 1 || math.Abs(pts[0].TTFT-0.3) > 1e-9 {
+		t.Fatalf("memory points = %+v, want persisted memory point", pts)
 	}
 }
