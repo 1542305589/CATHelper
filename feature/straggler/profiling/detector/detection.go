@@ -13,9 +13,9 @@ import (
 //
 // Pipeline:
 //  1. Select primary detection group.
-//  2. Detect NPU Bubble (fixed threshold).
-//  3. Detect slow compute (homogeneous clustering on primary group).
-//  4. Detect slow communication (per-domain group bandwidth comparison).
+//  2. Detect slow compute (homogeneous clustering on primary group).
+//  3. Detect slow communication (per-domain group bandwidth comparison).
+//  4. Detect PP slow communication (PP wait share).
 //  5. Detect slow CPU (homogeneous clustering with hostUid-based trim preprocessing).
 func DelimitDetection(
 	stepData map[string]map[int]float64,
@@ -89,7 +89,7 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
 	// No recognized parallel domain (e.g. group names not registered in the
 	// profiler data, or only unknown domains like "mc2" present): degrade to
 	// a single group of all ranks so cal-only detection can still run. Slow
-	// comm/CPU/bubble have no data without group names and stay silent.
+	// comm/CPU have no data without group names and stay silent.
 	if len(curNpus) >= minRanksInGroup {
 		return defaultGroupParallelDomainName, [][]int{curNpus}
 	}

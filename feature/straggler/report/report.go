@@ -67,7 +67,7 @@ func GenerateReport(
 	var sb strings.Builder
 
 	// Degraded mode: no parallel topology (group names not registered). Only
-	// cal has input data — comm/CPU/bubble are not judged and must not be
+	// cal has input data — comm/CPU are not judged and must not be
 	// reported as "normal" just because their data is absent.
 	calOnly := len(parallels) == 0
 
@@ -366,8 +366,8 @@ func detectionSummary(
 	var sb strings.Builder
 
 	th := config.Current()
-	sb.WriteString(fmt.Sprintf("  慢计算阈值: %.2f, 慢CPU阈值: %.2f, Bubble阈值: %.0fns, 慢通信阈值: %.2f\n\n",
-		th.Cal, th.CPU, th.BubbleNs, th.CommThreshold))
+	sb.WriteString(fmt.Sprintf("  慢计算阈值: %.2f, 慢CPU阈值: %.2f, 慢通信阈值: %.2f\n\n",
+		th.Cal, th.CPU, th.CommThreshold))
 
 	sb.WriteString("  " + padEnd("检测类型", 22) + "  " + padEnd("状态", 10) + "  " + padEnd("异常数", 10) + "  异常详情\n")
 	sb.WriteString("  " + strings.Repeat("-", 22) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 30) + "\n")
@@ -379,9 +379,11 @@ func detectionSummary(
 		key, label string
 	}{
 		{"cal", "慢计算 (cal)"},
+		{"kernel_aivec", "矢量 (kernel_aivec)"},
+		{"memcpy_async", "搬运 (memcpy_async)"},
 		{"comm", "慢通信 (comm)"},
+		{"pp_comm", "PP 通信 (pp_comm)"},
 		{"cpu", "慢CPU (cpu)"},
-		{"npu_bubble", "Bubble (npu_bubble)"},
 	}
 	if calOnly {
 		categories = categories[:1]
@@ -417,7 +419,7 @@ func detectionSummary(
 	}
 
 	if calOnly {
-		sb.WriteString(fmt.Sprintf("  注: 未注册组名,无并行拓扑 — 检测降级为仅慢计算;慢通信/慢CPU/Bubble 无数据,本次不做判定。\n"))
+		sb.WriteString(fmt.Sprintf("  注: 未注册组名,无并行拓扑 — 检测降级为仅慢计算;慢通信/慢CPU 无数据,本次不做判定。\n"))
 	}
 
 	return sb.String()

@@ -32,7 +32,7 @@ var (
 // would otherwise keep stale *sync.Once objects for the same paths: the second
 // and later cycles' once.Do become no-ops, the JSON files stop being written,
 // GetCurDetectionInfo falls back to CSV-only rank collection (no parallel
-// topology), and slow-communication/CPU/bubble detection silently lose input.
+// topology), and slow-communication/CPU detection silently lose input.
 // One-shot mode is unaffected (single pass, first Do always fires).
 // Call this at the start of every daemon cycle, before StartProcess.
 func ResetFileWriteOnce() {
@@ -461,7 +461,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 
 	// Fill host times into device ops and collect metrics.
 	var commHostDurations []int
-	var bubbleDurations []int
 	var intervals []Interval
 	domainOps := make(map[string][]OpStat)
 
@@ -474,10 +473,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		// Host duration.
 		if devOps[i].HStartNs > 0 && devOps[i].HEndNs >= devOps[i].HStartNs {
 			commHostDurations = append(commHostDurations, devOps[i].HEndNs-devOps[i].HStartNs)
-		}
-		// Bubble duration (Go-only metric; removed in a later task).
-		if devOps[i].HEndNs > 0 && devOps[i].StartNs > devOps[i].HEndNs {
-			bubbleDurations = append(bubbleDurations, devOps[i].StartNs-devOps[i].HEndNs)
 		}
 		// Communication intervals.
 		if devOps[i].StartNs > 0 && devOps[i].EndNs >= devOps[i].StartNs {
@@ -513,11 +508,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 	if len(commHostDurations) > 0 {
 		pm.HostDuration, _ = CalculateMean(commHostDurations)
 	}
-	pm.ZPBubble = 0
-	if len(bubbleDurations) > 0 {
-		pm.ZPBubble, _ = CalculateMean(bubbleDurations)
-	}
-
 	pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
 	pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
 	pm.ZPCount = 0

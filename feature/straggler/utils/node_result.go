@@ -23,12 +23,11 @@ type ScoreResult struct {
 	Score float64 `json:"score"`
 }
 
-// NpuResult aggregates per-NPU anomalies (cal, npu_bubble). Only fields with
-// anomalies are populated (omitempty).
+// NpuResult aggregates per-NPU anomalies (cal). Only fields with anomalies are
+// populated (omitempty).
 type NpuResult struct {
-	ID        int          `json:"id"`
-	Cal       *ScoreResult `json:"cal,omitempty"`
-	NPUBubble *ScoreResult `json:"npu_bubble,omitempty"`
+	ID  int          `json:"id"`
+	Cal *ScoreResult `json:"cal,omitempty"`
 }
 
 // NodeResult aggregates anomalies of one physical node. CPU is node-level;
@@ -56,7 +55,7 @@ type NodeOutput struct {
 // include every node/communication group (normal ones too).
 type DebugInfo struct {
 	ValidRanks []int
-	RankScores map[int]map[string]float64 // rank → {cal, cpu, npu_bubble}
+	RankScores map[int]map[string]float64 // rank → {cal, cpu}
 }
 
 // nodeAccumulator builds up one node's entries while scanning results.
@@ -68,14 +67,14 @@ type nodeAccumulator struct {
 }
 
 // BuildNodeResult aggregates the profiler result into the node-based structure:
-// per-NPU anomalies (cal/npu_bubble) and node-level cpu are grouped by physical
+// per-NPU anomalies (cal) and node-level cpu are grouped by physical
 // node (hostname from HOST_INFO.hostName, NPU id from NPU_INFO.id), and
 // communication results are grouped by domain name. It prints the per-category
 // stdout summary and returns the NodeOutput for the caller to embed into the
 // combined output; it does NOT write any file itself.
 //
 // With debug != nil (--debug-output), every valid rank's node is included and
-// each NPU's cal / npu_bubble / cpu scores (plus all comm groups) are filled
+// each NPU's cal / cpu scores (plus all comm groups) are filled
 // from the diagnostic scores even when not flagged — normal data shows its
 // diagnostic scores too.
 func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error) {
@@ -92,7 +91,7 @@ func BuildNodeResultWithMeta(finalResult map[string]map[string]float64, parallel
 func buildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta) (*NodeOutput, error) {
 	includeAll := debug != nil
 	// Degraded mode: no parallel topology (group names not registered) — only
-	// cal has input data; comm/CPU/bubble are not judged and must not be
+	// cal has input data; comm/CPU are not judged and must not be
 	// reported as "normal" just because their data is absent.
 	calOnly := len(parallels) == 0
 	if meta == nil {
@@ -101,7 +100,7 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			metaRanks = debug.ValidRanks
 		} else {
 			seen := make(map[int]bool)
-			for _, cat := range []string{"cal", "cpu", "npu_bubble"} {
+			for _, cat := range []string{"cal", "cpu"} {
 				for rankStr := range finalResult[cat] {
 					if r, err := strconv.Atoi(rankStr); err == nil && !seen[r] {
 						seen[r] = true
@@ -114,8 +113,8 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 	}
 	nodes := make(map[string]*nodeAccumulator)
 
-	// cal / npu_bubble: per rank → node.npu[id].
-	for _, cat := range []string{"cal", "npu_bubble"} {
+	// cal: per rank → node.npu[id].
+	for _, cat := range []string{"cal"} {
 		for rankStr, score := range finalResult[cat] {
 			rank, err := strconv.Atoi(rankStr)
 			if err != nil {
@@ -127,11 +126,7 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			}
 			acc := ensureNodeAcc(nodes, m.Hostname)
 			npu := ensureNpuAcc(acc, m.NpuID)
-			if cat == "cal" {
-				npu.Cal = &ScoreResult{Score: score}
-			} else {
-				npu.NPUBubble = &ScoreResult{Score: score}
-			}
+			npu.Cal = &ScoreResult{Score: score}
 		}
 	}
 
@@ -167,9 +162,6 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			}
 			if npu.Cal == nil && sc["cal"] > 0 {
 				npu.Cal = &ScoreResult{Score: sc["cal"]}
-			}
-			if npu.NPUBubble == nil && sc["npu_bubble"] > 0 {
-				npu.NPUBubble = &ScoreResult{Score: sc["npu_bubble"]}
 			}
 			if !acc.hasCPU && sc["cpu"] > acc.cpu {
 				acc.cpu = sc["cpu"]
@@ -319,7 +311,7 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 	// only report cal — the other categories have no input data, so "无异常"
 	// would be misleading.
 	if calOnly {
-		fmt.Printf("检测已降级为仅慢计算 (cal): 未注册组名,无并行拓扑;慢通信/慢CPU/Bubble 无数据,不做判定\n")
+		fmt.Printf("检测已降级为仅慢计算 (cal): 未注册组名,无并行拓扑;慢通信/慢CPU 无数据,不做判定\n")
 	}
 
 	categories := []struct {
@@ -329,7 +321,6 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 		{"cal", "慢计算 (cal)", false},
 		{"comm", "慢通信 (comm)", calOnly},
 		{"cpu", "慢CPU (cpu)", calOnly || !cpuDetectable},
-		{"npu_bubble", "Bubble (npu_bubble)", calOnly},
 	}
 
 	for _, cat := range categories {

@@ -78,7 +78,7 @@ type DetectFunc func(inputPath string, debugOutput bool) (*DetectResult, error)
 // combined JSON, per-category anomaly counts, and the text report.
 type DetectResult struct {
 	NodeOutput *utils.NodeOutput
-	Summary    map[string]int // cal/comm/cpu/npu_bubble -> anomaly counts
+	Summary    map[string]int // cal/kernel_aivec/memcpy_async/comm/pp_comm/cpu -> anomaly counts
 	Report     string         // report.GenerateReport text
 }
 

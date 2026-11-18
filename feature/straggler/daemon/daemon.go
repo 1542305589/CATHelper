@@ -248,7 +248,7 @@ func (d *Daemon) runCycle(id int) {
 	// keyed by absolute path, and cleanupDump removed --profiler-dir last
 	// cycle, so without a reset the stale Once objects make this cycle's
 	// group_info_/host_info_ JSON writes no-ops → topology lost → slow
-	// comm/CPU/bubble detection silently drops. One-shot mode is unaffected.
+	// comm/CPU detection silently drops. One-shot mode is unaffected.
 	dataparse.ResetFileWriteOnce()
 	d.progress.step("解析 profiler 数据")
 	if err := dataparse.StartProcess(dbFiles, root); err != nil {
@@ -295,12 +295,12 @@ func (d *Daemon) runCycle(id int) {
 	}
 	cr.Result = res.NodeOutput
 	cr.Summary = res.Summary
-	d.progress.step("Profiler 检测完成: cal=%d comm=%d cpu=%d bubble=%d",
-		res.Summary["cal"], res.Summary["comm"], res.Summary["cpu"], res.Summary["npu_bubble"])
+	d.progress.step("Profiler 检测完成: cal=%d comm=%d pp_comm=%d cpu=%d",
+		res.Summary["cal"], res.Summary["comm"], res.Summary["pp_comm"], res.Summary["cpu"])
 	// Merge the KPI anomaly counts (per metric) into the cycle summary so
 	// history shows both dimensions; the kpi segment is absent when KPI
 	// detection produced no result. Summary is a flat map: the profiler
-	// categories (cal/comm/cpu/npu_bubble) and each anomalous KPI metric's
+	// categories (cal/kernel_aivec/memcpy_async/comm/pp_comm/cpu) and each anomalous KPI metric's
 	// count coexist as top-level keys.
 	if cr.KPI != nil {
 		mergeSummary(cr.Summary, kpiMetricCounts(cr.KPI, d.cfg.DebugOutput))

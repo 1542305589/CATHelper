@@ -25,7 +25,6 @@ const (
 	memcpyAsyncColumn    = "MEMCPY_ASYNC"
 	zpHostDataColumn     = "ZP_Host"
 	zpDurationColumn     = "ZP_Duration"
-	zpBubble             = "ZP_Bubble"
 	zpCount              = "ZP_Count"
 	dataLoaderDataColumn = "DataLoader"
 	stepTimeData         = "StepDuration"

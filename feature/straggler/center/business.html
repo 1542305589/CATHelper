@@ -142,9 +142,6 @@
           <label for="thCpu">慢CPU cpu</label>
           <input id="thCpu" type="number" step="0.05" min="0">
           <span class="unit">kmeans 比例，默认 2.5</span>
-          <label for="thBubble">NPU Bubble</label>
-          <input id="thBubble" type="number" min="0">
-          <span class="unit">纳秒 ns，默认 5000</span>
           <label for="thCommThreshold">慢通信 comm</label>
           <input id="thCommThreshold" type="number" step="0.05" min="1">
           <span class="unit">带宽比，默认 1.3</span>
@@ -232,7 +229,7 @@ function fmtTs(ts) {
 }
 function renderSummary(summary) {
   if (!summary || !Object.keys(summary).length) return '正常';
-  const order = ['cal','comm','cpu','npu_bubble'];
+  const order = ['cal','kernel_aivec','memcpy_async','comm','pp_comm','cpu'];
   const parts = [];
   for (const k of order) {
     if (summary[k] != null && summary[k] > 0) parts.push(`<span class="sum bad">${k}:${summary[k]}</span>`);
@@ -270,7 +267,7 @@ function renderStatus(b) {
   $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
   const th = b.thresholds || {};
   $('vThresholds').textContent = th.cal != null
-    ? `cal=${th.cal} cpu=${th.cpu} bubble=${th.bubble_ns}ns comm=${th.comm_threshold}`
+    ? `cal=${th.cal} cpu=${th.cpu} comm=${th.comm_threshold}`
     : '—';
   latestThresholds = th;
   latestDefaults = b.default_thresholds || {};
@@ -527,7 +524,7 @@ $('btnInterval').onclick = () => {
 };
 function fillThresholdInputs(th, force) {
   const set = (id, val) => { if (val != null && (force || !$(id).value)) $(id).value = val; };
-  set('thCal', th.cal); set('thCpu', th.cpu); set('thBubble', th.bubble_ns);
+  set('thCal', th.cal); set('thCpu', th.cpu);
   set('thCommThreshold', th.comm_threshold); set('thCommMinCount', th.comm_min_count); set('thCommCountFloor', th.comm_count_floor);
 }
 async function saveThresholds(body, okMsg) {
@@ -540,13 +537,13 @@ async function saveThresholds(body, okMsg) {
 $('btnThresholds').onclick = () => {
   const num = id => parseFloat($(id).value);
   const body = {
-    cal: num('thCal'), cpu: num('thCpu'), bubble_ns: num('thBubble'),
+    cal: num('thCal'), cpu: num('thCpu'),
     comm_threshold: num('thCommThreshold'), comm_min_count: parseInt($('thCommMinCount').value, 10),
     comm_count_floor: parseInt($('thCommCountFloor').value, 10),
   };
-  if (!(body.cal > 0) || !(body.cpu > 0) || !(body.bubble_ns > 0) || !(body.comm_threshold > 1) ||
+  if (!(body.cal > 0) || !(body.cpu > 0) || !(body.comm_threshold > 1) ||
       !(body.comm_min_count > 0) || !(body.comm_count_floor > 0)) {
-    toast('阈值非法：cal/cpu/bubble/min-count/floor 须 >0，comm 须 >1', false);
+    toast('阈值非法：cal/cpu/min-count/floor 须 >0，comm 须 >1', false);
     return;
   }
   saveThresholds(body, '阈值已更新');
@@ -556,7 +553,7 @@ $('btnThresholdsDefault').onclick = () => {
   if (d.cal == null) { toast('默认值尚未加载，请稍后重试', false); return; }
   fillThresholdInputs(d, true);
   saveThresholds({
-    cal: d.cal, cpu: d.cpu, bubble_ns: d.bubble_ns,
+    cal: d.cal, cpu: d.cpu,
     comm_threshold: d.comm_threshold, comm_min_count: d.comm_min_count, comm_count_floor: d.comm_count_floor,
   }, '已恢复默认值');
 };

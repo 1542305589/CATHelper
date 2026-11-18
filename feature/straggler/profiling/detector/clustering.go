@@ -6,7 +6,8 @@
 // extreme cluster as the baseline and comparing cluster mean ratios.
 //
 // It is the single anomaly-detection primitive used by all four detection
-// categories (slow compute, slow communication, slow CPU, NPU bubble).
+// scores. Detection categories: slow compute, slow communication, slow CPU,
+// PP pipeline communication.
 package detector
 
 import (
