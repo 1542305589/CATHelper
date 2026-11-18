@@ -25,14 +25,13 @@ func TestHostUidFallbackGroups(t *testing.T) {
 	}
 }
 
-// Comm detection runs only when named domains exist.
+// Comm detection runs only when named domains exist (nil parallels = no
+// topology, e.g. data with no group_info).
 func TestCommGatedByHasNamedDomain(t *testing.T) {
 	resetSlowCommConfig()
 	config.CommThreshold = 1.3
-	config.HasNamedDomain = false
 	defer func() {
 		config.CommThreshold = 0
-		config.HasNamedDomain = false
 	}()
 
 	step := map[string]map[int]float64{
@@ -44,7 +43,6 @@ func TestCommGatedByHasNamedDomain(t *testing.T) {
 		t.Fatalf("comm = %v, want none without named domain", res["comm"])
 	}
 
-	config.HasNamedDomain = true
 	res = DelimitDetection(step, map[string][][]int{"tp": {{0, 1}, {2, 3}}}, []int{0, 1, 2, 3})
 	if len(res["comm"]) == 0 {
 		t.Fatalf("comm = %v, want an anomaly with named domain", res["comm"])

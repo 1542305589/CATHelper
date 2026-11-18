@@ -362,6 +362,10 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 	pm := PerformanceMetrics{
 		Durations: make(map[string]int),
 		Counts:    make(map[string]int),
+		// Python's PerformanceMetrics defaults these to -1 ("not available"),
+		// not 0 — a kernel-only rank must not report a zero copy count.
+		MemcpyLinked:   -1,
+		MemcpyExternal: -1,
 	}
 
 	// 1. Query DataLoader ID.
@@ -373,6 +377,13 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 	// No parallel group info → Python returns an all-zero snapshot.
 	if len(xpToGroupName) == 0 {
 		return pm, nil
+	}
+
+	// Python pre-seeds every domain to 0 before any early return below, so the
+	// CSV always carries the {domain}_Duration/_Count columns.
+	for xp := range xpToGroupName {
+		pm.Durations[xp] = 0
+		pm.Counts[xp] = 0
 	}
 
 	// 3. Build groupName → string_id mapping.
@@ -389,7 +400,7 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		if durs := collectKernelHostDurations(db, kernelConnIDs); len(durs) > 0 {
 			pm.ZPHost, _ = CalculateMean(durs)
 		} else {
-			pm.ZPHost = 0
+			pm.ZPHost = invalidData // Python: no host data → INVALID_MARKER
 		}
 		pm.ZPDuration = invalidData
 		pm.ZPDevice = invalidData
@@ -431,7 +442,7 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		if hostDurs := collectKernelHostDurations(db, kernelConnIDs); len(hostDurs) > 0 {
 			pm.ZPHost, _ = CalculateMean(hostDurs)
 		} else {
-			pm.ZPHost = 0
+			pm.ZPHost = invalidData // Python: no host data → INVALID_MARKER
 		}
 		return pm, nil
 	}

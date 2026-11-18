@@ -174,6 +174,8 @@ func loadAllCommOps(db *sql.DB, step StepTime) []ppOp {
 // BackfillPPWait computes the per-rank PP_WaitGap column and stores the PP
 // session length in config.PPSessionNs. Mirrors Python's backfill_pp_wait.
 func BackfillPPWait(inputPath string) error {
+	// A cycle without PP groups must not inherit the previous cycle's session.
+	config.PPSessionNs = 0
 	dbPaths := discoverDBFiles(inputPath)
 	if len(dbPaths) == 0 {
 		return nil

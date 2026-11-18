@@ -324,11 +324,11 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 	// be found. Skip its line entirely in that case.
 	cpuDetectable := PhysicalNodeCount() >= 2
 
-	// Degraded mode (no parallel topology, cal-only): state it explicitly and
-	// only report cal — the other categories have no input data, so "无异常"
-	// would be misleading.
+	// Degraded mode (no parallel topology): state that only communication is not
+	// evaluated. Compute, aivec/memcpy and CPU still have input data, so
+	// suppressing them would contradict the result file.
 	if calOnly {
-		fmt.Printf("检测已降级为仅慢计算 (cal): 未注册组名,无并行拓扑;慢通信/慢CPU 无数据,不做判定\n")
+		fmt.Printf("检测已降级: 未注册组名,无并行拓扑;慢通信/PP通信 不做判定\n")
 	}
 
 	categories := []struct {
@@ -336,11 +336,11 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 		skip       bool
 	}{
 		{"cal", "慢计算 (cal)", false},
-		{"kernel_aivec", "矢量 (kernel_aivec)", calOnly},
-		{"memcpy_async", "搬运 (memcpy_async)", calOnly},
+		{"kernel_aivec", "矢量 (kernel_aivec)", false},
+		{"memcpy_async", "搬运 (memcpy_async)", false},
 		{"comm", "慢通信 (comm)", calOnly},
 		{"pp_comm", "PP通信 (pp_comm)", calOnly},
-		{"cpu", "慢CPU (cpu)", calOnly || !cpuDetectable},
+		{"cpu", "慢CPU (cpu)", !cpuDetectable},
 	}
 
 	for _, cat := range categories {

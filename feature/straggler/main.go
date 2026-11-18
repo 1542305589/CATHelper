@@ -461,7 +461,7 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 	report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath)
 	reportText := report.GenerateReport(stepData, parallels, validRanks, result, inputPath)
 
-	detectionJSON, _ := report.BuildDetectionResultJSON(result, parallels, th)
+	detectionJSON, _ := report.BuildDetectionResultJSON(result, parallels)
 
 	return &daemon.DetectResult{
 		NodeOutput:    profilerOut,
@@ -469,7 +469,7 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 		Report:        reportText,
 		DetectionJSON: detectionJSON,
 		SummaryTable:  report.RenderSummaryTable(result, parallels, th),
-		Conclusion:    report.RenderConclusion(result, th),
+		Conclusion:    report.RenderConclusion(result, parallels, th),
 	}, nil
 }
 

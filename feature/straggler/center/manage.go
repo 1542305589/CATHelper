@@ -411,8 +411,15 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	dir := startedAt.Format("20060102-150405")
 
 	// Python-schema result file (dual write) alongside the Go output.
+	// pp_comm is always empty here: the center never runs BackfillPPWait, so it
+	// has no PP session length and DetectPPSlowDomain early-returns. The file
+	// still carries the key (required schema); the log keeps that false
+	// negative visible until Plan 2 transports the session length.
 	resultDir := filepath.Join(c.cfg.DataDir, b.Name, dir)
-	if err := report.WriteDetectionResult(resultDir, result, parallels, b.Thresholds); err != nil {
+	if len(result["pp_comm"]) == 0 {
+		c.logf("business %s: pp_comm 未评估（中心无 PP session 长度，待 Plan 2 上报）", b.Name)
+	}
+	if err := report.WriteDetectionResult(resultDir, result, parallels); err != nil {
 		c.logf("business %s: write %s: %v", b.Name, report.DetectionResultFile, err)
 	}
 

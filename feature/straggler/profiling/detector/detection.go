@@ -48,8 +48,9 @@ func DelimitDetection(
 	getSlowMetricRanks(calGroups, stepData, memcpyAsyncColumn, "memcpy_async", config.CPUThreshold, localResult)
 
 	// 3. Slow communication detection (bandwidth comparison per domain group).
-	// Only meaningful when the data has named parallel domains.
-	if config.HasNamedDomain {
+	// Only meaningful when the data has named parallel domains; the "" key is
+	// Python's unnamed/node fallback and does not carry a comm topology.
+	if hasNamedDomain(parallels) {
 		DetectSlowDomainByBandwidth(parallels, stepData, localResult)
 
 		// 3b. PP slow communication: skipped when a compute anomaly was found.
@@ -65,6 +66,17 @@ func DelimitDetection(
 	}
 
 	return localResult
+}
+
+// hasNamedDomain reports whether parallels contains at least one named domain.
+// The "" key is Python's unnamed/node fallback and carries no comm topology.
+func hasNamedDomain(parallels map[string][][]int) bool {
+	for domain, groups := range parallels {
+		if domain != "" && len(groups) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

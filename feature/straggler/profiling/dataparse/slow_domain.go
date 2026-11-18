@@ -137,11 +137,9 @@ func newBWIndex(ops []bwOp) *bwIndex {
 
 // wallclock matches a reference op against this rank's ops of the same
 // (opType, count) by their temporal overlap: the candidate with the greatest
-// positive overlap wins. The tolerance widens the candidate window to
-// [op.start-tol, op.end), but an op with no overlap is never matched (two ops
-// that merely start within tol of each other but do not overlap do not look
-// like one collective communication on a Gantt chart). Returns the ops index
-// or -1.
+// positive overlap wins. When no candidate overlaps, Python's fallback accepts
+// the nearest start within tol (covers clock skew / slightly shifted
+// occurrences). Returns the ops index or -1.
 func (b *bwIndex) wallclock(op bwOp, tol int) int {
 	k := bucketKey{op.opType, op.count}
 	bucket := b.buckets[k]

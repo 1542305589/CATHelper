@@ -41,11 +41,9 @@ func TestLevel0ParityEndToEnd(t *testing.T) {
 	config.SlowCommFlat = false
 	config.SlowCommMinCount = 1000
 	config.SlowCommCountFloor = 10240
-	config.HasNamedDomain = true
 	config.PPSessionNs = 0
 	defer func() {
 		config.CalThreshold, config.CPUThreshold, config.CommThreshold = 0, 0, 0
-		config.HasNamedDomain = false
 	}()
 
 	step := map[string]map[int]float64{
@@ -76,8 +74,7 @@ func TestLevel0ParityEndToEnd(t *testing.T) {
 	}
 
 	outDir := filepath.Join(dir, "out")
-	th := config.Thresholds{Cal: 1.3, CPU: 2.5, CommThreshold: 1.3, CommMinCount: 1000, CommCountFloor: 10240}
-	if err := report.WriteDetectionResult(outDir, result, parallels, th); err != nil {
+	if err := report.WriteDetectionResult(outDir, result, parallels); err != nil {
 		t.Fatalf("WriteDetectionResult: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(outDir, report.DetectionResultFile))
@@ -90,7 +87,7 @@ func TestLevel0ParityEndToEnd(t *testing.T) {
 	}
 	wantKeys := map[string]string{
 		"KERNEL_AICORE": "3",
-		"comm":          "tp[2,3]",
+		"comm":          "tp[2, 3]",
 		"cpu":           "nodeB",
 	}
 	for cat, key := range wantKeys {

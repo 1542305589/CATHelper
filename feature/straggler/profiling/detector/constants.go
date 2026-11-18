@@ -41,13 +41,14 @@ const (
 var detectionPriority = []string{
 	tpParallelDomainName,           // tp
 	epParallelDomainName,           // exp
-	"ep",                          // ep
-	tpEpParallelDomainName,        // tp_exp
-	cpParallelDomainName,          // cp
-	"cp2",                         // cp2
-	cpUlyssesParallelDomainName,   // cp_ulysses
-	cpRingParallelDomainName,      // cp_ring
-	dpParallelDomainName,          // dp
-	dpCpParallelDomainName,        // dp_cp
-	"dp_modulo_exp_cp",           // dp_modulo_exp_cp
+	"ep",                           // ep
+	tpEpParallelDomainName,         // tp_exp
+	cpParallelDomainName,           // cp
+	"cp2",                          // cp2
+	cpUlyssesParallelDomainName,    // cp_ulysses
+	cpRingParallelDomainName,       // cp_ring
+	dpParallelDomainName,           // dp
+	dpCpParallelDomainName,         // dp_cp
+	"dp_modulo_exp_cp",             // dp_modulo_exp_cp
+	defaultGroupParallelDomainName, // default_group (Python's last priority)
 }

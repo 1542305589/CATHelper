@@ -263,6 +263,12 @@ func (d *Daemon) runCycle(id int) {
 	// into the CSVs so the bandwidth-based slow-communication detection (and
 	// the op_metric archive/report below) sees them. Best-effort: a failure
 	// only drops the bandwidth dimension, not the whole cycle.
+	//
+	// requireFullGroup=false is a deliberate stopgap: a daemon only holds its
+	// own ranks' .db files, so requiring every group member would suppress all
+	// cross-node groups. Truncated groups are a known deviation from the
+	// one-shot/Python rule; Plan 2 (per-rank comm_ops reporting + center-side
+	// merge) replaces this with full-group data.
 	d.progress.step("回填慢域带宽列")
 	if err := dataparse.BackfillSlowDomainBandwidth(root, false); err != nil {
 		d.logf("cycle %d backfill slow-domain bandwidth: %v", cr.ID, err)

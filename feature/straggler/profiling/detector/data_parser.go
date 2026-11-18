@@ -67,7 +67,6 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 
 	validRanks := sortedKeys(rankSet)
 	parallels := buildParallels(topos)
-	config.HasNamedDomain = len(parallels) > 0
 	return parallels, validRanks
 }
 
