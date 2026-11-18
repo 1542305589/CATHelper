@@ -58,6 +58,7 @@ type CycleResult struct {
 	Result     *utils.NodeOutput         `json:"-"`
 	Summary    map[string]int            `json:"summary"`
 	Report     string                    `json:"-"`
+	DetectionJSON []byte                 `json:"-"` // straggler_detection_result.json bytes
 	Error      string                    `json:"error,omitempty"`
 }
 
@@ -77,9 +78,12 @@ type DetectFunc func(inputPath string, debugOutput bool) (*DetectResult, error)
 // DetectResult is the outcome of the profiler pipeline: the node output for the
 // combined JSON, per-category anomaly counts, and the text report.
 type DetectResult struct {
-	NodeOutput *utils.NodeOutput
-	Summary    map[string]int // cal/kernel_aivec/memcpy_async/comm/pp_comm/cpu -> anomaly counts
-	Report     string         // report.GenerateReport text
+	NodeOutput    *utils.NodeOutput
+	Summary       map[string]int // cal/kernel_aivec/memcpy_async/comm/pp_comm/cpu -> anomaly counts
+	Report        string         // report.GenerateReport text
+	DetectionJSON []byte         // Python flat-schema straggler_detection_result.json
+	SummaryTable  string         // Python-style summary table for stdout
+	Conclusion    string         // natural-language conclusion for stdout
 }
 
 // CombinedOutput is the merged KPI + profiler result written as one JSON file

@@ -327,6 +327,8 @@ func main() {
 	// ─────────────────────────────────────────────────────────────────
 	// One-shot mode: second line of defense is Profiler detection
 	// ─────────────────────────────────────────────────────────────────
+	var detectResult *daemon.DetectResult
+	var derr error
 	if inputPath != "" {
 		// Validate required path.
 		if info, err := os.Stat(inputPath); err != nil || !info.IsDir() {
@@ -358,7 +360,7 @@ func main() {
 		}
 
 		// Shared detection pipeline (steps 4-8); os.Exit on fatal conditions.
-		detectResult, derr := detectFromParsedData(inputPath, debugOutput)
+		detectResult, derr = detectFromParsedData(inputPath, debugOutput)
 		if derr != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] FATAL: %v\n", derr)
 			os.Exit(1)
@@ -384,6 +386,18 @@ func main() {
 
 	if inputPath != "" {
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Detection complete.\n")
+	}
+
+	if detectResult != nil {
+		if len(detectResult.DetectionJSON) > 0 {
+			if err := os.WriteFile(report.DetectionResultFile, detectResult.DetectionJSON, 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Failed to write %s: %v\n", report.DetectionResultFile, err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Result written to %s\n", report.DetectionResultFile)
+			}
+		}
+		fmt.Print(detectResult.SummaryTable)
+		fmt.Print(detectResult.Conclusion)
 	}
 }
 
@@ -447,10 +461,15 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 	report.WriteReport(stepData, parallels, validRanks, inputPath, result, inputPath)
 	reportText := report.GenerateReport(stepData, parallels, validRanks, result, inputPath)
 
+	detectionJSON, _ := report.BuildDetectionResultJSON(result, parallels, th)
+
 	return &daemon.DetectResult{
-		NodeOutput: profilerOut,
-		Summary:    summarizeProfiler(result),
-		Report:     reportText,
+		NodeOutput:    profilerOut,
+		Summary:       summarizeProfiler(result),
+		Report:        reportText,
+		DetectionJSON: detectionJSON,
+		SummaryTable:  report.RenderSummaryTable(result, parallels, th),
+		Conclusion:    report.RenderConclusion(result, th),
 	}, nil
 }
 
@@ -473,14 +492,16 @@ func summarizeProfiler(result config.DegradationData) map[string]int {
 // hostUid comes from host_info_{N}.json; ranks without hostUid (profiler data
 // lacking HOST_INFO) each count as their own node so information is not lost.
 func countCPUNodes(flagged map[string]float64) int {
+	nodes := make(map[string]bool)
 	ranks := make([]int, 0, len(flagged))
 	for k := range flagged {
 		if r, err := strconv.Atoi(k); err == nil {
 			ranks = append(ranks, r)
+		} else {
+			nodes[k] = true // node-name key (new detection semantics)
 		}
 	}
 	hostOf := detector.GetHostUidMapping(config.FilePath, ranks)
-	nodes := make(map[string]bool)
 	for _, r := range ranks {
 		h := hostOf[r]
 		if h == "" {

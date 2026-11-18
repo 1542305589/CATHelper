@@ -18,6 +18,7 @@ import (
 
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/profiling/dataparse"
+	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/report"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/resource"
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/utils"
 )
@@ -294,6 +295,7 @@ func (d *Daemon) runCycle(id int) {
 		return
 	}
 	cr.Result = res.NodeOutput
+	cr.DetectionJSON = res.DetectionJSON
 	cr.Summary = res.Summary
 	d.progress.step("Profiler 检测完成: cal=%d comm=%d pp_comm=%d cpu=%d",
 		res.Summary["cal"], res.Summary["comm"], res.Summary["pp_comm"], res.Summary["cpu"])
@@ -329,6 +331,16 @@ func (d *Daemon) runCycle(id int) {
 	// Running-dir copy of the latest combined result (same shape as one-shot).
 	if err := copyFile(jsonPath, filepath.Join(".", "straggler_output.json")); err != nil {
 		d.logf("copy result to run dir: %v", err)
+	}
+
+	// Python-schema result file (dual write): archive + running dir.
+	if len(cr.DetectionJSON) > 0 {
+		detPath := filepath.Join(archive, report.DetectionResultFile)
+		if err := os.WriteFile(detPath, cr.DetectionJSON, 0o644); err != nil {
+			d.logf("write %s: %v", report.DetectionResultFile, err)
+		} else if err := copyFile(detPath, filepath.Join(".", report.DetectionResultFile)); err != nil {
+			d.logf("copy %s to run dir: %v", report.DetectionResultFile, err)
+		}
 	}
 
 	// 8. The text report is written inside the root (report.WriteReport derives

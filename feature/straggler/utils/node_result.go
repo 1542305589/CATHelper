@@ -23,11 +23,13 @@ type ScoreResult struct {
 	Score float64 `json:"score"`
 }
 
-// NpuResult aggregates per-NPU anomalies (cal). Only fields with anomalies are
-// populated (omitempty).
+// NpuResult aggregates per-NPU anomalies (cal / kernel_aivec / memcpy_async).
+// Only fields with anomalies are populated (omitempty).
 type NpuResult struct {
-	ID  int          `json:"id"`
-	Cal *ScoreResult `json:"cal,omitempty"`
+	ID          int          `json:"id"`
+	Cal         *ScoreResult `json:"cal,omitempty"`
+	KernelAivec *ScoreResult `json:"kernel_aivec,omitempty"`
+	MemcpyAsync *ScoreResult `json:"memcpy_async,omitempty"`
 }
 
 // NodeResult aggregates anomalies of one physical node. CPU is node-level;
@@ -45,6 +47,7 @@ type NodeResult struct {
 type NodeOutput struct {
 	NodeResult       []NodeResult                  `json:"node_result"`
 	CommDomainResult map[string]map[string]float64 `json:"comm_domain_result"`
+	PPCommResult     map[string]float64            `json:"pp_comm_result,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +103,7 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			metaRanks = debug.ValidRanks
 		} else {
 			seen := make(map[int]bool)
-			for _, cat := range []string{"cal", "cpu"} {
+			for _, cat := range []string{"cal", "kernel_aivec", "memcpy_async", "cpu"} {
 				for rankStr := range finalResult[cat] {
 					if r, err := strconv.Atoi(rankStr); err == nil && !seen[r] {
 						seen[r] = true
@@ -113,9 +116,17 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 	}
 	nodes := make(map[string]*nodeAccumulator)
 
-	// cal: per rank → node.npu[id].
-	for _, cat := range []string{"cal"} {
-		for rankStr, score := range finalResult[cat] {
+	// cal / kernel_aivec / memcpy_async: per rank → node.npu[id].
+	npuCategories := []struct {
+		key string
+		set func(*NpuResult, float64)
+	}{
+		{"cal", func(n *NpuResult, v float64) { n.Cal = &ScoreResult{Score: v} }},
+		{"kernel_aivec", func(n *NpuResult, v float64) { n.KernelAivec = &ScoreResult{Score: v} }},
+		{"memcpy_async", func(n *NpuResult, v float64) { n.MemcpyAsync = &ScoreResult{Score: v} }},
+	}
+	for _, cat := range npuCategories {
+		for rankStr, score := range finalResult[cat.key] {
 			rank, err := strconv.Atoi(rankStr)
 			if err != nil {
 				continue
@@ -126,22 +137,22 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			}
 			acc := ensureNodeAcc(nodes, m.Hostname)
 			npu := ensureNpuAcc(acc, m.NpuID)
-			npu.Cal = &ScoreResult{Score: score}
+			cat.set(npu, score)
 		}
 	}
 
-	// cpu: per rank → node-level score (all ranks of a slow node share the
-	// trimmed-mean value, so any of them gives the node's score).
-	for rankStr, score := range finalResult["cpu"] {
-		rank, err := strconv.Atoi(rankStr)
-		if err != nil {
+	// cpu: detection keys are node display names (hostName); accept legacy
+	// per-rank keys too by mapping the rank to its node.
+	for key, score := range finalResult["cpu"] {
+		if rank, err := strconv.Atoi(key); err == nil {
+			if m, ok := meta[rank]; ok && m.Hostname != "" {
+				acc := ensureNodeAcc(nodes, m.Hostname)
+				acc.cpu = score
+				acc.hasCPU = true
+			}
 			continue
 		}
-		m, ok := meta[rank]
-		if !ok || m.Hostname == "" {
-			continue
-		}
-		acc := ensureNodeAcc(nodes, m.Hostname)
+		acc := ensureNodeAcc(nodes, key)
 		acc.cpu = score
 		acc.hasCPU = true
 	}
@@ -162,6 +173,12 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 			}
 			if npu.Cal == nil && sc["cal"] > 0 {
 				npu.Cal = &ScoreResult{Score: sc["cal"]}
+			}
+			if npu.KernelAivec == nil && sc["kernel_aivec"] > 0 {
+				npu.KernelAivec = &ScoreResult{Score: sc["kernel_aivec"]}
+			}
+			if npu.MemcpyAsync == nil && sc["memcpy_async"] > 0 {
+				npu.MemcpyAsync = &ScoreResult{Score: sc["memcpy_async"]}
 			}
 			if !acc.hasCPU && sc["cpu"] > acc.cpu {
 				acc.cpu = sc["cpu"]
@@ -200,7 +217,7 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 	}
 
 	printNodeSummary(finalResult, calOnly)
-	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}, nil
+	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains, PPCommResult: finalResult["pp_comm"]}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +336,10 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 		skip       bool
 	}{
 		{"cal", "慢计算 (cal)", false},
+		{"kernel_aivec", "矢量 (kernel_aivec)", calOnly},
+		{"memcpy_async", "搬运 (memcpy_async)", calOnly},
 		{"comm", "慢通信 (comm)", calOnly},
+		{"pp_comm", "PP通信 (pp_comm)", calOnly},
 		{"cpu", "慢CPU (cpu)", calOnly || !cpuDetectable},
 	}
 

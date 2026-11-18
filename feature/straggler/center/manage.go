@@ -409,6 +409,13 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	}
 
 	dir := startedAt.Format("20060102-150405")
+
+	// Python-schema result file (dual write) alongside the Go output.
+	resultDir := filepath.Join(c.cfg.DataDir, b.Name, dir)
+	if err := report.WriteDetectionResult(resultDir, result, parallels, b.Thresholds); err != nil {
+		c.logf("business %s: write %s: %v", b.Name, report.DetectionResultFile, err)
+	}
+
 	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, startedAt, durationMs, len(op)); err != nil {
 		return fmt.Errorf("store result: %w", err)
 	}

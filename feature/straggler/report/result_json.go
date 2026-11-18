@@ -41,6 +41,18 @@ type detectionItem struct {
 // All six categories are present (empty arrays when clean); items are sorted by
 // degradation descending.
 func WriteDetectionResult(dir string, result config.DegradationData, parallels map[string][][]int, thresholds config.Thresholds) error {
+	raw, err := BuildDetectionResultJSON(result, parallels, thresholds)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, DetectionResultFile), raw, 0o644)
+}
+
+// BuildDetectionResultJSON marshals the Python flat-schema result document.
+func BuildDetectionResultJSON(result config.DegradationData, parallels map[string][][]int, thresholds config.Thresholds) ([]byte, error) {
 	out := make(map[string][]detectionItem, len(categoryOrder))
 	for _, cat := range categoryOrder {
 		items := make([]detectionItem, 0, len(result[cat.key]))
@@ -54,14 +66,7 @@ func WriteDetectionResult(dir string, result config.DegradationData, parallels m
 		sort.Slice(items, func(i, j int) bool { return items[i].MetricValue > items[j].MetricValue })
 		out[cat.label] = items
 	}
-	raw, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, DetectionResultFile), raw, 0o644)
+	return json.MarshalIndent(out, "", "  ")
 }
 
 // detectionDisplayKey maps an internal result key to the Python display key:
