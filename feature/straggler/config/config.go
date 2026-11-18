@@ -123,6 +123,12 @@ func (d DegradationData) AddGroup(category string, ranks []int, degradation floa
 	}
 }
 
+// AddKey records a result under an arbitrary display key (e.g. a node name).
+func (d DegradationData) AddKey(category, key string, degradation float64) {
+	d.ensureCategory(category)
+	d[category][key] = degradation
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------

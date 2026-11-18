@@ -37,21 +37,19 @@ func DelimitDetection(
 		return nil
 	}
 
-	// 2. NPU Bubble detection.
-	if bubbleData, ok := stepData[zpBubble]; ok {
-		detectionZpBubbleData(bubbleData, localResult)
-	}
-
-	// 3. Slow compute detection.
+	// 2. Slow compute detection (KERNEL_AICORE + kernel_aivec + memcpy_async).
 	_ = getSlowCalculateRanks(calGroups, stepData, calGroupName, localResult)
+	getSlowMetricRanks(calGroups, stepData, kernelAivecColumn, "kernel_aivec", config.CalThreshold, localResult)
+	getSlowMetricRanks(calGroups, stepData, memcpyAsyncColumn, "memcpy_async", config.CPUThreshold, localResult)
 
-	// 4. Slow communication detection (bandwidth comparison per domain group).
+	// 3. Slow communication detection (bandwidth comparison per domain group).
 	DetectSlowDomainByBandwidth(parallels, stepData, localResult)
 
-	// 5. Slow CPU detection.
+	// 4. Slow CPU detection (node-level; anomalous cards collapse to one entry).
 	if hostData, ok := stepData[zpHostDataColumn]; ok {
 		hostUidMapping := GetHostUidMapping(config.FilePath, validRanks)
-		getSlowHostRanksByHomogenize(validRanks, hostData, localResult, hostUidMapping)
+		nodeNames := GetNodeNameMapping(config.FilePath, validRanks)
+		getSlowHostRanksByHomogenize(validRanks, hostData, localResult, hostUidMapping, nodeNames)
 	}
 
 	return localResult

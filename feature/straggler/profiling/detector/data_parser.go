@@ -215,3 +215,30 @@ func GetHostUidMapping(jobPath string, ranks []int) map[int]string {
 	}
 	return mapping
 }
+
+// GetNodeNameMapping returns rank → display node name using host_info JSON:
+// hostName first, then hostUid, then "rank<N>".
+func GetNodeNameMapping(jobPath string, ranks []int) map[int]string {
+	metricDir := filepath.Join(jobPath, "op_metric")
+	mapping := make(map[int]string)
+	for _, rank := range ranks {
+		raw, err := os.ReadFile(filepath.Join(metricDir, "host_info_"+strconv.Itoa(rank)+".json"))
+		if err != nil {
+			continue
+		}
+		var data map[string]string
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if name := data["hostName"]; name != "" {
+			mapping[rank] = name
+			continue
+		}
+		if uid := data["hostUid"]; uid != "" {
+			mapping[rank] = uid
+			continue
+		}
+		mapping[rank] = "rank" + strconv.Itoa(rank)
+	}
+	return mapping
+}

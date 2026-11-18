@@ -21,6 +21,8 @@ const minRanksInGroup = 2
 const (
 	zpDeviceColumn       = "ZP_Device"
 	zpKernelColumn       = "KERNEL_AICORE"
+	kernelAivecColumn    = "KERNEL_AIVEC"
+	memcpyAsyncColumn    = "MEMCPY_ASYNC"
 	zpHostDataColumn     = "ZP_Host"
 	zpDurationColumn     = "ZP_Duration"
 	zpBubble             = "ZP_Bubble"
