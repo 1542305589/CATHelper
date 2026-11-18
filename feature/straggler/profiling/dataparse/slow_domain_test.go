@@ -142,3 +142,34 @@ func TestBandwidthFor(t *testing.T) {
 		t.Errorf("bandwidthFor with zero duration = %v, want 0", got)
 	}
 }
+
+// Python's wallclock match falls back to the nearest start when no overlap is
+// found, accepting it only within the 5ms tolerance.
+func TestWallclockNearestStartFallback(t *testing.T) {
+	idx := newBWIndex([]bwOp{{opType: "allReduce", count: 1, start: 10_000_000, end: 10_000_100}})
+	near := bwOp{opType: "allReduce", count: 1, start: 13_000_000, end: 13_000_100}
+	if got := idx.wallclock(near, 5_000_000); got != 0 {
+		t.Fatalf("near-start fallback = %d, want 0", got)
+	}
+	far := bwOp{opType: "allReduce", count: 1, start: 16_000_000, end: 16_000_100}
+	if got := idx.wallclock(far, 5_000_000); got != -1 {
+		t.Fatalf("outside tolerance = %d, want -1", got)
+	}
+}
+
+// A level0 group is skipped unless every expected rank is present (Python rule),
+// and the lenient variant still computes from the present subset.
+func TestComputeBandwidthRequiresFullGroup(t *testing.T) {
+	ops := map[int][]CommOp{
+		0: {{Domain: "tp", OpType: "allReduce", Count: 100, StartNs: 1000, EndNs: 1100}},
+		1: {{Domain: "tp", OpType: "allReduce", Count: 100, StartNs: 1000, EndNs: 1100}},
+	}
+	parallels := map[string][][]int{"tp": {{0, 1, 2}}}
+	if got := ComputeBandwidth(ops, parallels, false, true); len(got) != 0 {
+		t.Fatalf("strict incomplete group = %v, want none", got)
+	}
+	got := ComputeBandwidth(ops, parallels, false, false)
+	if v, ok := got["tp_allReduce_100"]; !ok || v <= 0 {
+		t.Fatalf("lenient group = %v, want tp_allReduce_100 > 0", got)
+	}
+}

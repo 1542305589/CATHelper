@@ -352,7 +352,7 @@ func main() {
 		// (opType,count) bandwidth columns into the CSVs for the bandwidth-based
 		// slow-communication detection that follows.
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Backfilling slow-domain bandwidth columns...\n")
-		if err := dataparse.BackfillSlowDomainBandwidth(inputPath); err != nil {
+		if err := dataparse.BackfillSlowDomainBandwidth(inputPath, true); err != nil {
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: slow-domain bandwidth backfill failed: %v (continuing with Duration-based columns)\n", err)
 		}
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Backfill done.\n")

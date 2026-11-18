@@ -166,6 +166,24 @@ func (b *bwIndex) wallclock(op bwOp, tol int) int {
 	if best >= 0 && bov > 0 {
 		return best
 	}
+	// Python fallback: the nearest start within tol is accepted even without
+	// overlap (covers clock skew / slightly shifted occurrences).
+	i := sort.SearchInts(starts, op.start)
+	nearest, nd := -1, int(^uint(0)>>1)
+	for _, j := range []int{i - 1, i} {
+		if j >= 0 && j < n {
+			d := starts[j] - op.start
+			if d < 0 {
+				d = -d
+			}
+			if d < nd {
+				nd, nearest = d, bucket[j]
+			}
+		}
+	}
+	if nearest >= 0 && nd <= tol {
+		return nearest
+	}
 	return -1
 }
 
@@ -273,6 +291,85 @@ func bandwidthFor(count, durNs int) float64 {
 		return 0
 	}
 	return float64(count) / float64(durNs)
+}
+
+// CommOp is one collective-communication operator sample. Times are
+// nanoseconds. It is the transport/interchange shape between daemons and the
+// center (the raw ops are never written into op_metric).
+type CommOp struct {
+	Domain  string
+	OpType  string
+	Count   int
+	StartNs int
+	EndNs   int
+}
+
+// ComputeBandwidth computes bandwidth for every (domain, opType, count) group
+// from per-rank ops. parallels maps a domain to its rank groups.
+//
+// When requireFullGroup is true a group is skipped unless every expected rank is
+// present (Python's level0 rule); otherwise the present subset is used.
+// When noAlign is true the flat-pool caliber is used (no cross-rank alignment).
+//
+// Returns "domain_opType_count" → bandwidth.
+func ComputeBandwidth(ops map[int][]CommOp, parallels map[string][][]int, noAlign, requireFullGroup bool) map[string]float64 {
+	out := make(map[string]float64)
+	for domain, groups := range parallels {
+		if domain == ppDomainName || domain == embdDomainName {
+			continue
+		}
+		for _, expected := range groups {
+			if len(expected) < 2 {
+				continue
+			}
+			ranks := expected
+			if requireFullGroup {
+				complete := true
+				for _, r := range expected {
+					if _, ok := ops[r]; !ok {
+						complete = false
+						break
+					}
+				}
+				if !complete {
+					continue
+				}
+			} else {
+				ranks = nil
+				for _, r := range expected {
+					if _, ok := ops[r]; ok {
+						ranks = append(ranks, r)
+					}
+				}
+				if len(ranks) < 2 {
+					continue
+				}
+			}
+
+			members := make(map[int][]bwOp, len(ranks))
+			for _, r := range ranks {
+				for _, op := range ops[r] {
+					if op.Domain != domain {
+						continue
+					}
+					members[r] = append(members[r], bwOp{
+						opType: op.OpType, count: op.Count, start: op.StartNs, end: op.EndNs,
+					})
+				}
+			}
+
+			var res map[bucketKey]float64
+			if noAlign {
+				res = computeBandwidthFromOpsFlat(members, ranks)
+			} else {
+				res = computeBandwidthFromOps(members, ranks)
+			}
+			for k, bw := range res {
+				out[domain+"_"+k.opType+"_"+strconv.Itoa(k.count)] = bw
+			}
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +492,7 @@ func mergedStep(db *sql.DB) StepTime {
 // and before detection reads the CSVs. Errors are returned but never fatal:
 // callers log and continue so detection still runs on the existing Duration
 // columns.
-func BackfillSlowDomainBandwidth(inputPath string) error {
+func BackfillSlowDomainBandwidth(inputPath string, requireFullGroup bool) error {
 	dbPaths := discoverDBFiles(inputPath)
 	minCount := config.SlowCommMinCount
 	if minCount <= 0 {
@@ -466,17 +563,6 @@ func BackfillSlowDomainBandwidth(inputPath string) error {
 		}
 	}
 
-	// Restrict each group to ranks we actually have db info for.
-	for _, g := range groupMap {
-		var present []int
-		for _, r := range g.ranks {
-			if _, ok := rankToInfo[r]; ok {
-				present = append(present, r)
-			}
-		}
-		g.ranks = present
-	}
-
 	for _, g := range groupMap {
 		if g.typ == ppDomainName || g.typ == embdDomainName {
 			continue
@@ -485,40 +571,55 @@ func BackfillSlowDomainBandwidth(inputPath string) error {
 			continue
 		}
 
-		members := make(map[int][]bwOp, len(g.ranks))
-		valid := true
+		var present []int
 		for _, r := range g.ranks {
+			if _, ok := rankToInfo[r]; ok {
+				present = append(present, r)
+			}
+		}
+		if requireFullGroup && len(present) != len(g.ranks) {
+			fmt.Fprintf(os.Stderr, "[SLOW-DOMAIN] %s group %v missing ranks, skip bandwidth\n", g.typ, g.ranks)
+			continue
+		}
+		ranks := present
+		if requireFullGroup {
+			ranks = g.ranks
+		}
+		if len(ranks) < 2 {
+			continue
+		}
+
+		ops := make(map[int][]CommOp, len(ranks))
+		valid := true
+		for _, r := range ranks {
 			ri := rankToInfo[r]
 			db, err := sql.Open("sqlite", ri.path+"?mode=ro")
 			if err != nil {
 				valid = false
 				break
 			}
-			ops := loadDomainOps(db, ri.pgi, g.typ, mergedStep(db), minCount)
+			raw := loadDomainOps(db, ri.pgi, g.typ, mergedStep(db), minCount)
 			db.Close()
-			members[r] = ops
+			cops := make([]CommOp, 0, len(raw))
+			for _, op := range raw {
+				cops = append(cops, CommOp{Domain: g.typ, OpType: op.opType, Count: op.count, StartNs: op.start, EndNs: op.end})
+			}
+			ops[r] = cops
 		}
 		if !valid {
 			continue
 		}
 
-		var res map[bucketKey]float64
-		if config.SlowCommFlat {
-			// Flat pool: every rank's qualifying op durations, no alignment.
-			res = computeBandwidthFromOpsFlat(members, g.ranks)
-		} else {
-			res = computeBandwidthFromOps(members, g.ranks)
-		}
-		if len(res) == 0 {
+		bw := ComputeBandwidth(ops, map[string][][]int{g.typ: {g.ranks}}, config.SlowCommFlat, requireFullGroup)
+		if len(bw) == 0 {
 			continue
 		}
 
-		cols := make(map[string]string, len(res))
-		for k, bw := range res {
-			cols[g.typ+"_"+k.opType+"_"+strconv.Itoa(k.count)] = strconv.FormatFloat(bw, 'f', -1, 64)
+		cols := make(map[string]string, len(bw))
+		for k, v := range bw {
+			cols[k] = strconv.FormatFloat(v, 'f', -1, 64)
 		}
-
-		for _, r := range g.ranks {
+		for _, r := range ranks {
 			path := filepath.Join(inputPath, "op_metric", "global_rank_"+strconv.Itoa(r)+".csv")
 			if err := backfillBandwidthCSV(path, cols); err != nil {
 				fmt.Fprintf(os.Stderr, "[SLOW-DOMAIN] backfill rank %d: %v\n", r, err)

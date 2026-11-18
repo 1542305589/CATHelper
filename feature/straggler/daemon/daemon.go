@@ -263,7 +263,7 @@ func (d *Daemon) runCycle(id int) {
 	// the op_metric archive/report below) sees them. Best-effort: a failure
 	// only drops the bandwidth dimension, not the whole cycle.
 	d.progress.step("回填慢域带宽列")
-	if err := dataparse.BackfillSlowDomainBandwidth(root); err != nil {
+	if err := dataparse.BackfillSlowDomainBandwidth(root, false); err != nil {
 		d.logf("cycle %d backfill slow-domain bandwidth: %v", cr.ID, err)
 	}
 	d.progress.step("回填完成")
