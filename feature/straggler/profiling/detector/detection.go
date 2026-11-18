@@ -45,6 +45,11 @@ func DelimitDetection(
 	// 3. Slow communication detection (bandwidth comparison per domain group).
 	DetectSlowDomainByBandwidth(parallels, stepData, localResult)
 
+	// 3b. PP slow communication: skipped when a compute anomaly was found.
+	if len(localResult["cal"]) == 0 && len(localResult["kernel_aivec"]) == 0 {
+		DetectPPSlowDomain(parallels, stepData, localResult, config.PPSessionNs)
+	}
+
 	// 4. Slow CPU detection (node-level; anomalous cards collapse to one entry).
 	if hostData, ok := stepData[zpHostDataColumn]; ok {
 		hostUidMapping := GetHostUidMapping(config.FilePath, validRanks)
