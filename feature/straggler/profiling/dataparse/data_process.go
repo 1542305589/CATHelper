@@ -370,15 +370,8 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 	// 2. Query KERNEL_AICORE connection IDs for host-time fallback.
 	kernelConnIDs, _ := getKernelAicoreTaskConnectionIDs(db, stepTime)
 
-	// If no parallel group info, everything except ZP_Kernel and DataLoader is invalid.
+	// No parallel group info → Python returns an all-zero snapshot.
 	if len(xpToGroupName) == 0 {
-		pm.ZPDevice = invalidData
-		pm.ZPDuration = invalidData
-		pm.ZPHost = invalidData
-		pm.ZPBubble = invalidData
-		pm.ZPCount = invalidData
-		pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
-		pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
 		return pm, nil
 	}
 
@@ -389,12 +382,17 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 	}
 
 	groupNameIDMap, err := batchQueryStringIDs(db, groupNames)
-	if err != nil || len(groupNameIDMap) == 0 {
+	if err != nil {
+		return pm, err
+	}
+	if len(groupNameIDMap) == 0 {
+		if durs := collectKernelHostDurations(db, kernelConnIDs); len(durs) > 0 {
+			pm.ZPHost, _ = CalculateMean(durs)
+		} else {
+			pm.ZPHost = 0
+		}
 		pm.ZPDuration = invalidData
 		pm.ZPDevice = invalidData
-		pm.ZPBubble = invalidData
-		pm.ZPCount = invalidData
-		pm.ZPHost = invalidData
 		pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
 		pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
 		return pm, nil
@@ -421,22 +419,19 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 
 	// 4. Query communication operators.
 	devOps, err := getDeviceOpList(db, groupNameIDs, stepTime)
-	if err != nil || len(devOps) == 0 {
-		// No communication ops — invalidate all but ZP_Host (use kernel host fallback).
+	if err != nil {
+		return pm, err
+	}
+	if len(devOps) == 0 {
+		// No communication ops — Python keeps only kernel host + kernel duration.
 		pm.ZPDevice = invalidData
 		pm.ZPDuration = invalidData
-		pm.ZPBubble = invalidData
-		pm.ZPCount = invalidData
 		pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
 		pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
-
-		// ZP_Host fallback from KERNEL_AICORE host times.
-		hostDurs := collectKernelHostDurations(db, kernelConnIDs)
-		if len(hostDurs) > 0 {
-			m, _ := CalculateMean(hostDurs)
-			pm.ZPHost = m
+		if hostDurs := collectKernelHostDurations(db, kernelConnIDs); len(hostDurs) > 0 {
+			pm.ZPHost, _ = CalculateMean(hostDurs)
 		} else {
-			pm.ZPHost = invalidData
+			pm.ZPHost = 0
 		}
 		return pm, nil
 	}
@@ -453,30 +448,34 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		connIDs = append(connIDs, cid)
 	}
 
-	// 6. Query host times from CANN_API and MSTX_EVENTS.
-	hostMap := make(map[int]HostOp)
-	for _, table := range []string{"CANN_API", "MSTX_EVENTS"} {
-		hm, _ := getHostOpFromTable(db, table, connIDs)
-		for k, v := range hm {
-			hostMap[k] = v
-		}
+	// 6. Query host times. Keep the two tables separate: CANN_API wins over
+	// MSTX_EVENTS for the same connection (Python precedence).
+	cannMap, _ := getHostOpFromTable(db, "CANN_API", connIDs)
+	mstxMap, _ := getHostOpFromTable(db, "MSTX_EVENTS", connIDs)
+
+	// Pre-seed every domain to 0 (Python initializes durations/counts this way).
+	for xp := range xpToGroupName {
+		pm.Durations[xp] = 0
+		pm.Counts[xp] = 0
 	}
 
-	// Fill host times into device ops.
-	var hostDurations []int
+	// Fill host times into device ops and collect metrics.
+	var commHostDurations []int
 	var bubbleDurations []int
 	var intervals []Interval
+	domainOps := make(map[string][]OpStat)
 
 	for i := range devOps {
-		if ho, ok := hostMap[devOps[i].ConnectionID]; ok {
-			devOps[i].HStartNs = ho.StartNs
-			devOps[i].HEndNs = ho.EndNs
+		if ho, ok := cannMap[devOps[i].ConnectionID]; ok {
+			devOps[i].HStartNs, devOps[i].HEndNs = ho.StartNs, ho.EndNs
+		} else if ho, ok := mstxMap[devOps[i].ConnectionID]; ok {
+			devOps[i].HStartNs, devOps[i].HEndNs = ho.StartNs, ho.EndNs
 		}
 		// Host duration.
 		if devOps[i].HStartNs > 0 && devOps[i].HEndNs >= devOps[i].HStartNs {
-			hostDurations = append(hostDurations, devOps[i].HEndNs-devOps[i].HStartNs)
+			commHostDurations = append(commHostDurations, devOps[i].HEndNs-devOps[i].HStartNs)
 		}
-		// Bubble duration.
+		// Bubble duration (Go-only metric; removed in a later task).
 		if devOps[i].HEndNs > 0 && devOps[i].StartNs > devOps[i].HEndNs {
 			bubbleDurations = append(bubbleDurations, devOps[i].StartNs-devOps[i].HEndNs)
 		}
@@ -484,11 +483,19 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		if devOps[i].StartNs > 0 && devOps[i].EndNs >= devOps[i].StartNs {
 			intervals = append(intervals, Interval{Start: devOps[i].StartNs, End: devOps[i].EndNs})
 		}
+		if xpName, ok := idToXp[devOps[i].DomainID]; ok {
+			dur := devOps[i].EndNs - devOps[i].StartNs
+			if dur >= 0 && devOps[i].Count >= 0 {
+				domainOps[xpName] = append(domainOps[xpName], OpStat{Duration: dur, Count: devOps[i].Count})
+			}
+		}
 	}
 
-	// Add kernel host durations.
+	// ZP_Host = mean(comm host + kernel host); HostDuration = mean(comm host only).
 	kernelHostDurs := collectKernelHostDurations(db, kernelConnIDs)
-	hostDurations = append(hostDurations, kernelHostDurs...)
+	allHostDurations := make([]int, 0, len(commHostDurations)+len(kernelHostDurs))
+	allHostDurations = append(allHostDurations, commHostDurations...)
+	allHostDurations = append(allHostDurations, kernelHostDurs...)
 
 	// 7. Compute metrics.
 	pm.ZPDuration = mergeIntervalsSimple(intervals)
@@ -498,40 +505,37 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		fmt.Fprintf(os.Stderr, "[WARN] Communication time exceeds step time, ZP_Device clamped to 0\n")
 	}
 
-	if m, err := CalculateMean(hostDurations); err == nil {
-		pm.ZPHost = m
-	} else {
-		pm.ZPHost = invalidData
+	pm.ZPHost = 0
+	if len(allHostDurations) > 0 {
+		pm.ZPHost, _ = CalculateMean(allHostDurations)
 	}
-
-	if m, err := CalculateMean(bubbleDurations); err == nil {
-		pm.ZPBubble = m
-	} else {
-		pm.ZPBubble = invalidData
+	pm.HostDuration = 0
+	if len(commHostDurations) > 0 {
+		pm.HostDuration, _ = CalculateMean(commHostDurations)
+	}
+	pm.ZPBubble = 0
+	if len(bubbleDurations) > 0 {
+		pm.ZPBubble, _ = CalculateMean(bubbleDurations)
 	}
 
 	pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
 	pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
-	pm.ZPCount = invalidData
+	pm.ZPCount = 0
 
-	// Per-domain metrics.
-	domainOps := make(map[string][]OpStat)
-	for _, op := range devOps {
-		if xpName, ok := idToXp[op.DomainID]; ok {
-			dur := op.EndNs - op.StartNs
-			if dur > 0 {
-				domainOps[xpName] = append(domainOps[xpName], OpStat{Duration: dur, Count: op.Count})
-			}
-		}
-	}
-
+	// Per-domain metrics: whitelist + plain mean.
 	for domain, stats := range domainOps {
-		dur, cnt, err := CalculateMidMeanPair(stats)
-		if err == nil {
+		if !domainAllowed(domain) {
+			continue
+		}
+		if dur, cnt, err := CalculateMeanPair(stats); err == nil {
 			pm.Durations[domain] = dur
 			pm.Counts[domain] = cnt
 		}
 	}
+
+	pm.MemcpyAsync, _ = getAvgTaskDurationByName(db, stepTime, "MEMCPY_ASYNC")
+	pm.MemcpyCount, pm.MemcpyLinked, pm.MemcpyExternal = getMemcpyCounters(db, stepTime)
+	pm.KernelAivec, _ = getAvgTaskDurationByName(db, stepTime, "KERNEL_AIVEC")
 
 	return pm, nil
 }
@@ -570,7 +574,7 @@ func queryDataLoaderDuration(db *sql.DB, dlID int, stepTime StepTime) (int, erro
 		SELECT startNs, endNs FROM MSTX_EVENTS
 		WHERE message = ? AND startNs >= ? AND endNs <= ?
 		LIMIT 1
-	`, dlID, stepTime.StartNs, stepTime.EndNs).Scan(&start, &end)
+	`, strconv.Itoa(dlID), stepTime.StartNs, stepTime.EndNs).Scan(&start, &end)
 	if err != nil {
 		return 0, err
 	}
@@ -716,19 +720,103 @@ func collectKernelHostDurations(db *sql.DB, kernelConnIDs []int) []int {
 	if len(kernelConnIDs) == 0 {
 		return nil
 	}
-	var durs []int
-	for _, table := range []string{"CANN_API", "MSTX_EVENTS"} {
-		hostMap, err := getHostOpFromTable(db, table, kernelConnIDs)
-		if err != nil {
+	cann, _ := getHostOpFromTable(db, "CANN_API", kernelConnIDs)
+	mstx, _ := getHostOpFromTable(db, "MSTX_EVENTS", kernelConnIDs)
+	return hostDurationsFor(kernelConnIDs, cann, mstx)
+}
+
+// getAvgTaskDurationByName returns AVG(endNs-startNs) for tasks whose
+// STRING_IDS value equals name; 0 when there are no rows.
+func getAvgTaskDurationByName(db *sql.DB, stepTime StepTime, name string) (int, error) {
+	var avg sql.NullFloat64
+	err := db.QueryRow(`
+		SELECT AVG(t.endNs - t.startNs)
+		FROM TASK t
+		INNER JOIN STRING_IDS s ON t.taskType = s.id
+		WHERE s.value = ?
+		  AND t.startNs >= ?
+		  AND t.endNs <= ?
+	`, name, stepTime.StartNs, stepTime.EndNs).Scan(&avg)
+	if err != nil || !avg.Valid {
+		return 0, nil
+	}
+	return int(math.Round(avg.Float64)), nil
+}
+
+// getMemcpyCounters returns (total MEMCPY_ASYNC tasks, tasks linked to CANN_API,
+// tasks whose API is aclrtMemcpyAsync). When CANN_API is missing the latter two
+// are -1 ("unavailable"), matching Python.
+func getMemcpyCounters(db *sql.DB, stepTime StepTime) (int, int, int) {
+	rows, err := db.Query(`
+		SELECT t.connectionId
+		FROM TASK t
+		INNER JOIN STRING_IDS s ON t.taskType = s.id
+		WHERE s.value = 'MEMCPY_ASYNC'
+		  AND t.startNs >= ?
+		  AND t.endNs <= ?
+	`, stepTime.StartNs, stepTime.EndNs)
+	if err != nil {
+		return 0, -1, -1
+	}
+	defer rows.Close()
+
+	var cids []int
+	for rows.Next() {
+		var cid sql.NullInt64
+		if err := rows.Scan(&cid); err != nil {
 			continue
 		}
-		for _, ho := range hostMap {
-			if ho.StartNs > 0 && ho.EndNs >= ho.StartNs {
-				durs = append(durs, ho.EndNs-ho.StartNs)
+		if cid.Valid {
+			cids = append(cids, int(cid.Int64))
+		}
+	}
+	total := len(cids)
+	if total == 0 {
+		return 0, -1, -1
+	}
+	exists, _ := tableExists(db, "CANN_API")
+	if !exists {
+		return total, -1, -1
+	}
+
+	placeholders := make([]string, len(cids))
+	args := make([]interface{}, len(cids))
+	for i, cid := range cids {
+		placeholders[i] = "?"
+		args[i] = cid
+	}
+	query := fmt.Sprintf("SELECT connectionId, name FROM CANN_API WHERE connectionId IN (%s)", strings.Join(placeholders, ", "))
+	nameRows, err := db.Query(query, args...)
+	if err != nil {
+		return total, -1, -1
+	}
+	defer nameRows.Close()
+
+	cidToNameID := make(map[int]int)
+	var nameIDs []int
+	for nameRows.Next() {
+		var cid int
+		var nameID sql.NullInt64
+		if err := nameRows.Scan(&cid, &nameID); err != nil {
+			continue
+		}
+		if nameID.Valid {
+			cidToNameID[cid] = int(nameID.Int64)
+			nameIDs = append(nameIDs, int(nameID.Int64))
+		}
+	}
+	idToName := stringMapByIDs(db, nameIDs)
+
+	linked, external := 0, 0
+	for _, cid := range cids {
+		if nid, ok := cidToNameID[cid]; ok {
+			linked++
+			if idToName[nid] == "aclrtMemcpyAsync" {
+				external++
 			}
 		}
 	}
-	return durs
+	return total, linked, external
 }
 
 func tableExists(db *sql.DB, tableName string) (bool, error) {
@@ -772,14 +860,16 @@ func WriteResultsToCSV(outputFile string, metrics []PerformanceMetrics) error {
 	}
 	sort.Strings(domains)
 
-	// Build header.
+	// Build header (Python level0 column order).
 	header := []string{
 		"StepIndex", "StepDuration", "ZP_Device", "ZP_Duration",
-		"ZP_Host", "ZP_Bubble", "ZP_Count", "ZP_Kernel", "DataLoader",
+		"ZP_Host", "ZP_Count", "KERNEL_AICORE",
+		"MEMCPY_ASYNC", "KERNEL_AIVEC", "HostDuration", "DataLoader",
 	}
 	for _, d := range domains {
 		header = append(header, d+"_Duration", d+"_Count")
 	}
+	header = append(header, "MEMCPY_ASYNC_Count", "MEMCPY_LINKED_Count", "MEMCPY_EXTERNAL_Count")
 
 	// Ensure output directory exists.
 	os.MkdirAll(filepath.Dir(outputFile), 0755)
@@ -805,16 +895,17 @@ func WriteResultsToCSV(outputFile string, metrics []PerformanceMetrics) error {
 			strconv.Itoa(m.ZPDevice),
 			strconv.Itoa(m.ZPDuration),
 			strconv.Itoa(m.ZPHost),
-			strconv.Itoa(m.ZPBubble),
 			strconv.Itoa(m.ZPCount),
 			strconv.Itoa(m.ZPKernel),
+			strconv.Itoa(m.MemcpyAsync),
+			strconv.Itoa(m.KernelAivec),
+			strconv.Itoa(m.HostDuration),
 			strconv.Itoa(m.DataLoader),
 		}
 		for _, d := range domains {
-			dur := m.Durations[d]
-			cnt := m.Counts[d]
-			row = append(row, strconv.Itoa(dur), strconv.Itoa(cnt))
+			row = append(row, strconv.Itoa(m.Durations[d]), strconv.Itoa(m.Counts[d]))
 		}
+		row = append(row, strconv.Itoa(m.MemcpyCount), strconv.Itoa(m.MemcpyLinked), strconv.Itoa(m.MemcpyExternal))
 		if err := w.Write(row); err != nil {
 			return err
 		}

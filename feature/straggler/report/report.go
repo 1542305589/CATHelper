@@ -93,8 +93,8 @@ func GenerateReport(
 	sb.WriteString(detectionSummary(detectionResult, validRanks, calOnly))
 	sb.WriteString("\n")
 
-	// ZP_Kernel section.
-	if kernelData, ok := stepData["ZP_Kernel"]; ok {
+	// KERNEL_AICORE section.
+	if kernelData, ok := stepData["KERNEL_AICORE"]; ok {
 		abnormal := abnormalSingleRanks(detectionResult["cal"])
 		sb.WriteString(metricSection("计算类算子耗时排序", kernelData, abnormal))
 		sb.WriteString("\n")

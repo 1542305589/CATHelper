@@ -12,7 +12,7 @@ func TestBuildDetectionInput(t *testing.T) {
 			NpuInfo:  map[string]any{"rank": "0", "id": float64(0)},
 			GlobalRank: map[string]any{
 				"StepIndex":  float64(0),
-				"ZP_Kernel":  float64(100),
+				"KERNEL_AICORE":  float64(100),
 				"tp_Duration": float64(50),
 			},
 		},
@@ -24,7 +24,7 @@ func TestBuildDetectionInput(t *testing.T) {
 			NpuInfo:  map[string]any{"rank": "1", "id": float64(1)},
 			GlobalRank: map[string]any{
 				"StepIndex":  float64(0),
-				"ZP_Kernel":  float64(200),
+				"KERNEL_AICORE":  float64(200),
 				"tp_Duration": float64(60),
 			},
 		},
@@ -38,8 +38,8 @@ func TestBuildDetectionInput(t *testing.T) {
 	if got := parallels["tp"]; len(got) != 1 || len(got[0]) != 2 {
 		t.Fatalf("parallels[tp] = %v, want [[0 1]]", got)
 	}
-	if got := stepData["ZP_Kernel"]; got[0] != 100 || got[1] != 200 {
-		t.Fatalf("stepData[ZP_Kernel] = %v, want {0:100 1:200}", got)
+	if got := stepData["KERNEL_AICORE"]; got[0] != 100 || got[1] != 200 {
+		t.Fatalf("stepData[KERNEL_AICORE] = %v, want {0:100 1:200}", got)
 	}
 	if got := stepData["tp_Duration"]; got[0] != 50 || got[1] != 60 {
 		t.Fatalf("stepData[tp_Duration] = %v, want {0:50 1:60}", got)

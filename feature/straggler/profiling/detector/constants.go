@@ -20,7 +20,7 @@ const minRanksInGroup = 2
 // CSV column name constants.
 const (
 	zpDeviceColumn       = "ZP_Device"
-	zpKernelColumn       = "ZP_Kernel"
+	zpKernelColumn       = "KERNEL_AICORE"
 	zpHostDataColumn     = "ZP_Host"
 	zpDurationColumn     = "ZP_Duration"
 	zpBubble             = "ZP_Bubble"
