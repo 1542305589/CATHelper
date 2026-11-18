@@ -357,6 +357,12 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Backfill done.\n")
 
+		// PP wait backfill: PP_WaitGap column + session length for pp_comm.
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Backfilling PP wait gaps...\n")
+		if err := dataparse.BackfillPPWait(inputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: PP wait backfill failed: %v (continuing without pp_comm)\n", err)
+		}
+
 		// Shared detection pipeline (steps 4-8); os.Exit on fatal conditions.
 		detectResult, derr := detectFromParsedData(inputPath, debugOutput)
 		if derr != nil {

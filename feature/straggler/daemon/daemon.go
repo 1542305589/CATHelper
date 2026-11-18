@@ -268,6 +268,11 @@ func (d *Daemon) runCycle(id int) {
 	}
 	d.progress.step("回填完成")
 
+	// 4c. PP wait backfill: PP_WaitGap column + session length for pp_comm.
+	if err := dataparse.BackfillPPWait(root); err != nil {
+		d.logf("cycle %d backfill PP wait: %v", cr.ID, err)
+	}
+
 	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so
 	//    whether KPI ran (and its outcome) is visible in history: "ok" means
 	//    detection executed; disabled/skipped/failed carry the reason.

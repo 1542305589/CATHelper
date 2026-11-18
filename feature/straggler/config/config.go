@@ -20,6 +20,7 @@ var (
 	SlowCommMinCount   int     // Minimum op count included in bandwidth stats (default 1000).
 	SlowCommCountFloor int     // Absolute lower bound on a group's representative count (default 10240).
 	SlowCommFlat       bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment).
+	PPSessionNs        int64   // PP session length (max merged profiling window) for pp_comm detection.
 )
 
 // Thresholds is the full set of independent detection thresholds. It is
