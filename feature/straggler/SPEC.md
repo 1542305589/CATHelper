@@ -48,8 +48,8 @@ slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--
 | 参数 | 类型 | 必需 | 默认 | 说明 |
 |------|------|------|------|------|
 | `path` | string | 否* | — | Profiler `.db` 文件目录（*KPI 模式或 Profiler 至少提供一个） |
-| `--cal-threshold` | float64 | 否 | 1.3 | 慢计算 kmeans 比例阈值 |
-| `--cpu-threshold` | float64 | 否 | 2.5 | 慢CPU kmeans 比例阈值 |
+| `--cal-threshold` | float64 | 否 | 1.3 | 计算 kmeans 比例阈值 |
+| `--cpu-threshold` | float64 | 否 | 2.5 | IO/CPU kmeans 比例阈值（cpu / memcpy_async） |
 | `--bubble-threshold-ns` | float64 | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--kpi-path` | string | 否 | — | KPI 模式：包含多个每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否 | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
@@ -83,8 +83,8 @@ KPI 模式:
   SpaceRatioThreshold = --space-ratio-threshold     # 默认 2.0
 
 Profiler 模式:
-  CalThreshold       = --cal-threshold              # 慢计算（默认 1.3）
-  CPUThreshold       = --cpu-threshold              # 慢CPU（默认 2.5）
+  CalThreshold       = --cal-threshold              # 计算（默认 1.3）
+  CPUThreshold       = --cpu-threshold              # IO/CPU（默认 2.5；cpu / memcpy_async）
   BubbleThresholdNs  = --bubble-threshold-ns        # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold            # 慢通信带宽比（默认 1.3）
   SlowCommMinCount   = --comm-min-count             # 带宽统计最小 op 计数（默认 1000）

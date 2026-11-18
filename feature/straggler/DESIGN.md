@@ -5,8 +5,8 @@
 ### config
 ```go
 var FilePath string                                  // CLI path= 设置
-var CalThreshold float64                             // 慢计算阈值（--cal-threshold，默认 1.3）
-var CPUThreshold float64                             // 慢CPU 阈值（--cpu-threshold，默认 2.5）
+var CalThreshold float64                             // 计算阈值（--cal-threshold，默认 1.3）
+var CPUThreshold float64                             // IO/CPU 阈值（--cpu-threshold，默认 2.5；cpu / memcpy_async）
 var BubbleThresholdNs float64                        // NPU Bubble 绝对阈值（--bubble-threshold-ns，默认 5000）
 var CommThreshold float64                            // 慢通信带宽劣化阈值（--comm-threshold，默认 1.3）
 var SlowCommMinCount int                             // 带宽统计最小 op 计数（--comm-min-count，默认 1000）

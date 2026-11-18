@@ -367,7 +367,7 @@ func detectionSummary(
 	var sb strings.Builder
 
 	th := config.Current()
-	sb.WriteString(fmt.Sprintf("  慢计算阈值: %.2f, 慢CPU阈值: %.2f, 慢通信阈值: %.2f\n\n",
+	sb.WriteString(fmt.Sprintf("  计算阈值: %.2f, IO/CPU 阈值: %.2f, 通信阈值: %.2f\n\n",
 		th.Cal, th.CPU, th.CommThreshold))
 
 	sb.WriteString("  " + padEnd("检测类型", 22) + "  " + padEnd("状态", 10) + "  " + padEnd("异常数", 10) + "  异常详情\n")

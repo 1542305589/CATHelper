@@ -337,7 +337,7 @@ func main() {
 		}
 
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Input path: %s\n", inputPath)
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f commRatio=%.2f commMinCount=%d commCountFloor=%d flat=%v\n",
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: compute=%.2f io=%.2f comm=%.2f commMinCount=%d commCountFloor=%d flat=%v\n",
 			thresholds.Cal, thresholds.CPU, thresholds.CommThreshold, thresholds.CommMinCount, thresholds.CommCountFloor, commFlat)
 
 		// Data parsing: SQLite → CSV + JSON intermediates.
@@ -418,7 +418,7 @@ func main() {
 func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectResult, error) {
 	config.FilePath = inputPath
 	th := config.Current()
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f commRatio=%.2f commMinCount=%d commCountFloor=%d\n",
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: compute=%.2f io=%.2f comm=%.2f commMinCount=%d commCountFloor=%d\n",
 		th.Cal, th.CPU, th.CommThreshold, th.CommMinCount, th.CommCountFloor)
 
 	// 4. Get parallel topology from group_info JSON files.

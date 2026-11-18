@@ -136,13 +136,13 @@
       <h2>阈值设置</h2>
       <div class="body">
         <div class="th-grid">
-          <label for="thCal">慢计算 cal</label>
+          <label for="thCal">计算 (compute)</label>
           <input id="thCal" type="number" step="0.05" min="0">
-          <span class="unit">kmeans 比例，默认 1.3</span>
-          <label for="thCpu">慢CPU cpu</label>
+          <span class="unit">kmeans 比例，默认 1.3（KERNEL_AICORE / kernel_aivec）</span>
+          <label for="thCpu">IO/CPU (io)</label>
           <input id="thCpu" type="number" step="0.05" min="0">
-          <span class="unit">kmeans 比例，默认 2.5</span>
-          <label for="thCommThreshold">慢通信 comm</label>
+          <span class="unit">kmeans 比例，默认 2.5（cpu / memcpy_async）</span>
+          <label for="thCommThreshold">通信 (comm)</label>
           <input id="thCommThreshold" type="number" step="0.05" min="1">
           <span class="unit">带宽比，默认 1.3</span>
           <label for="thCommMinCount">通信 min-count</label>
@@ -267,7 +267,7 @@ function renderStatus(b) {
   $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
   const th = b.thresholds || {};
   $('vThresholds').textContent = th.cal != null
-    ? `cal=${th.cal} cpu=${th.cpu} comm=${th.comm_threshold}`
+    ? `计算=${th.cal} IO/CPU=${th.cpu} 通信=${th.comm_threshold}`
     : '—';
   latestThresholds = th;
   latestDefaults = b.default_thresholds || {};
@@ -543,7 +543,7 @@ $('btnThresholds').onclick = () => {
   };
   if (!(body.cal > 0) || !(body.cpu > 0) || !(body.comm_threshold > 1) ||
       !(body.comm_min_count > 0) || !(body.comm_count_floor > 0)) {
-    toast('阈值非法：cal/cpu/min-count/floor 须 >0，comm 须 >1', false);
+    toast('阈值非法：计算/IO/CPU/min-count/floor 须 >0，通信 须 >1', false);
     return;
   }
   saveThresholds(body, '阈值已更新');

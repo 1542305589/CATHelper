@@ -294,7 +294,7 @@ func (d *Daemon) runCycle(id int) {
 	th := d.thresholds
 	d.mu.Unlock()
 	config.Apply(th)
-	d.progress.step("Profiler 检测 (阈值 cal=%.2f cpu=%.2f)", th.Cal, th.CPU)
+	d.progress.step("Profiler 检测 (阈值 compute=%.2f io=%.2f)", th.Cal, th.CPU)
 	res, derr := d.detect(root, d.cfg.DebugOutput)
 	if derr != nil {
 		cr.Error = fmt.Sprintf("profiler detection: %v", derr)

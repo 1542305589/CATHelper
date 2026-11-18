@@ -110,8 +110,8 @@ cd feature/straggler
 | `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
 | `--profiler-iterations` | 否 | 1 | dyno nputrace 每轮采集迭代数 |
 | `--daemon-port` | 否 | 8080 | HTTP 端口 |
-| `--cal-threshold` | 否 | 1.3 | 慢计算阈值 |
-| `--cpu-threshold` | 否 | 2.5 | 慢CPU 阈值 |
+| `--cal-threshold` | 否 | 1.3 | 计算阈值（KERNEL_AICORE / kernel_aivec） |
+| `--cpu-threshold` | 否 | 2.5 | IO/CPU 阈值（cpu / memcpy_async） |
 | `--bubble-threshold-ns` | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--comm-threshold` / `--comm-min-count` / `--comm-count-floor` / `--comm-flat` | 否 | 1.3 / 1000 / 10240 / 假 | 慢通信带宽检测旋钮 |
 
@@ -557,8 +557,8 @@ Bubble (npu_bubble): 无异常
 | 参数 | 类型 | 必需 | 默认 | 说明 |
 |------|------|------|------|------|
 | `path` | string | 否* | — | Profiler `.db` 目录（*与 KPI 输入至少提供一个） |
-| `--cal-threshold` | float64 | 否 | 1.3 | 慢计算阈值（kmeans 比例） |
-| `--cpu-threshold` | float64 | 否 | 2.5 | 慢CPU 阈值（kmeans 比例） |
+| `--cal-threshold` | float64 | 否 | 1.3 | 计算阈值（kmeans 比例） |
+| `--cpu-threshold` | float64 | 否 | 2.5 | IO/CPU 阈值（kmeans 比例；cpu / memcpy_async） |
 | `--bubble-threshold-ns` | float64 | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--kpi-path` | string | 否* | — | KPI 模式：每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_*.jsonl` 目录（优先于 `--kpi-path`） |
@@ -601,8 +601,8 @@ KPI 模式:
   SpaceRatioThreshold = --space-ratio-threshold      # 默认 2.0
 
 Profiler 模式（每个阈值独立可调，不再由 degradation 派生）:
-  CalThreshold       = --cal-threshold               # 慢计算（默认 1.3）
-  CPUThreshold       = --cpu-threshold               # 慢CPU（默认 2.5）
+  CalThreshold       = --cal-threshold               # 计算（默认 1.3）
+  CPUThreshold       = --cpu-threshold               # IO/CPU（默认 2.5；cpu / memcpy_async）
   BubbleThresholdNs  = --bubble-threshold-ns         # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold             # 慢通信带宽比（默认 1.3）
   SlowCommMinCount   = --comm-min-count              # 带宽统计最小 op 计数（默认 1000）
