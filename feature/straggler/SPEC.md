@@ -40,7 +40,7 @@
 ## CLI
 
 ```
-slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--bubble-threshold-ns=5000] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat] [--debug-output]
+slowNodeDetection path=/data/dir [--compute-threshold=1.3] [--io-threshold=2.5] [--bubble-threshold-ns=5000] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat] [--debug-output]
 ```
 
 ### 参数
@@ -48,8 +48,8 @@ slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--
 | 参数 | 类型 | 必需 | 默认 | 说明 |
 |------|------|------|------|------|
 | `path` | string | 否* | — | Profiler `.db` 文件目录（*KPI 模式或 Profiler 至少提供一个） |
-| `--cal-threshold` | float64 | 否 | 1.3 | 计算 kmeans 比例阈值 |
-| `--cpu-threshold` | float64 | 否 | 2.5 | IO/CPU kmeans 比例阈值（cpu / memcpy_async） |
+| `--compute-threshold` | float64 | 否 | 1.3 | 计算 kmeans 比例阈值；旧名 `--cal-threshold` |
+| `--io-threshold` | float64 | 否 | 2.5 | IO/CPU kmeans 比例阈值（cpu / memcpy_async）；旧名 `--cpu-threshold` |
 | `--bubble-threshold-ns` | float64 | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--kpi-path` | string | 否 | — | KPI 模式：包含多个每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否 | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
@@ -61,7 +61,7 @@ slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--
 ```
 slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] \
     [--daemon-port=8080] [--interval=600] [--collect-wait=60] \
-    [--profiler-iterations=1] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--debug-output]
+    [--profiler-iterations=1] [--compute-threshold=1.3] [--io-threshold=2.5] [--debug-output]
 ```
 
 | 参数 | 类型 | 必需 | 默认 | 说明 |
@@ -83,8 +83,8 @@ KPI 模式:
   SpaceRatioThreshold = --space-ratio-threshold     # 默认 2.0
 
 Profiler 模式:
-  CalThreshold       = --cal-threshold              # 计算（默认 1.3）
-  CPUThreshold       = --cpu-threshold              # IO/CPU（默认 2.5；cpu / memcpy_async）
+  CalThreshold       = --compute-threshold          # 计算（默认 1.3；旧名 --cal-threshold）
+  CPUThreshold       = --io-threshold               # IO/CPU（默认 2.5；cpu / memcpy_async；旧名 --cpu-threshold）
   BubbleThresholdNs  = --bubble-threshold-ns        # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold            # 慢通信带宽比（默认 1.3）
   SlowCommMinCount   = --comm-min-count             # 带宽统计最小 op 计数（默认 1000）

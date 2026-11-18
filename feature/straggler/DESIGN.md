@@ -5,8 +5,8 @@
 ### config
 ```go
 var FilePath string                                  // CLI path= 设置
-var CalThreshold float64                             // 计算阈值（--cal-threshold，默认 1.3）
-var CPUThreshold float64                             // IO/CPU 阈值（--cpu-threshold，默认 2.5；cpu / memcpy_async）
+var CalThreshold float64                             // 计算阈值（--compute-threshold，默认 1.3；旧名 --cal-threshold）
+var CPUThreshold float64                             // IO/CPU 阈值（--io-threshold，默认 2.5；cpu / memcpy_async；旧名 --cpu-threshold）
 var BubbleThresholdNs float64                        // NPU Bubble 绝对阈值（--bubble-threshold-ns，默认 5000）
 var CommThreshold float64                            // 慢通信带宽劣化阈值（--comm-threshold，默认 1.3）
 var SlowCommMinCount int                             // 带宽统计最小 op 计数（--comm-min-count，默认 1000）
@@ -370,7 +370,7 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 
 ```bash
 # 一次性模式（现状，不变）
-go run . path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] ...
+go run . path=/data/dir [--compute-threshold=1.3] [--io-threshold=2.5] ...
 
 # 守护进程模式（无需 path=，数据目录来自每周期采集）
 go run . --daemon \

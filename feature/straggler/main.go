@@ -8,7 +8,7 @@
 // anomaly detection before the heavy Profiler analysis.
 //
 // Two modes:
-//   - one-shot:  go run . path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--kpi-path=/dir/of/kpi_csvs]
+//   - one-shot:  go run . path=/data/dir [--compute-threshold=1.3] [--io-threshold=2.5] [--kpi-path=/dir/of/kpi_csvs]
 //   - daemon:    go run . --daemon --profiler-dir=/dir --kpi-dir=/dir [...]
 //     The daemon periodically triggers profiler collection (dynolog/dyno),
 //     converts and analyses the data, and exposes results + control over HTTP.
@@ -136,17 +136,17 @@ func main() {
 			}
 		case "path":
 			inputPath = val
-		case "--cal-threshold":
+		case "--compute-threshold", "--cal-threshold": // --cal-threshold: legacy alias
 			if v, err := strconv.ParseFloat(val, 64); err == nil && v > 0 {
 				thresholds.Cal = v
 			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --cal-threshold value, using default\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --compute-threshold value, using default\n")
 			}
-		case "--cpu-threshold":
+		case "--io-threshold", "--cpu-threshold": // --cpu-threshold: legacy alias
 			if v, err := strconv.ParseFloat(val, 64); err == nil && v > 0 {
 				thresholds.CPU = v
 			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --cpu-threshold value, using default\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --io-threshold value, using default\n")
 			}
 		case "--kpi-path":
 			kpiPath = val
@@ -270,7 +270,7 @@ func main() {
 
 	// No input at all → usage error before anything runs.
 	if inputPath == "" && kpiInput == "" {
-		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat]\n")
+		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--compute-threshold=1.3] [--io-threshold=2.5] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat]\n")
 		fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
 		os.Exit(1)
 	}
