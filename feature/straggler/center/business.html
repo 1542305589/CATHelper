@@ -145,12 +145,6 @@
           <label for="thCommThreshold">通信 (comm)</label>
           <input id="thCommThreshold" type="number" step="0.05" min="1">
           <span class="unit">带宽比，默认 1.3</span>
-          <label for="thCommMinCount">通信 min-count</label>
-          <input id="thCommMinCount" type="number" min="0">
-          <span class="unit">采集门槛，默认 1000</span>
-          <label for="thCommCountFloor">通信 count-floor</label>
-          <input id="thCommCountFloor" type="number" min="0">
-          <span class="unit">参与检测下限，默认 10240</span>
         </div>
         <div class="controls" style="margin-top:12px;">
           <button class="primary" id="btnThresholds">保存阈值</button>
@@ -525,7 +519,7 @@ $('btnInterval').onclick = () => {
 function fillThresholdInputs(th, force) {
   const set = (id, val) => { if (val != null && (force || !$(id).value)) $(id).value = val; };
   set('thCal', th.cal); set('thCpu', th.cpu);
-  set('thCommThreshold', th.comm_threshold); set('thCommMinCount', th.comm_min_count); set('thCommCountFloor', th.comm_count_floor);
+  set('thCommThreshold', th.comm_threshold);
 }
 async function saveThresholds(body, okMsg) {
   try {
@@ -538,12 +532,10 @@ $('btnThresholds').onclick = () => {
   const num = id => parseFloat($(id).value);
   const body = {
     cal: num('thCal'), cpu: num('thCpu'),
-    comm_threshold: num('thCommThreshold'), comm_min_count: parseInt($('thCommMinCount').value, 10),
-    comm_count_floor: parseInt($('thCommCountFloor').value, 10),
+    comm_threshold: num('thCommThreshold'),
   };
-  if (!(body.cal > 0) || !(body.cpu > 0) || !(body.comm_threshold > 1) ||
-      !(body.comm_min_count > 0) || !(body.comm_count_floor > 0)) {
-    toast('阈值非法：计算/IO/CPU/min-count/floor 须 >0，通信 须 >1', false);
+  if (!(body.cal > 0) || !(body.cpu > 0) || !(body.comm_threshold > 1)) {
+    toast('阈值非法：计算/IO/CPU 须 >0，通信 须 >1', false);
     return;
   }
   saveThresholds(body, '阈值已更新');
@@ -554,7 +546,7 @@ $('btnThresholdsDefault').onclick = () => {
   fillThresholdInputs(d, true);
   saveThresholds({
     cal: d.cal, cpu: d.cpu,
-    comm_threshold: d.comm_threshold, comm_min_count: d.comm_min_count, comm_count_floor: d.comm_count_floor,
+    comm_threshold: d.comm_threshold,
   }, '已恢复默认值');
 };
 

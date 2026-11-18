@@ -12,30 +12,34 @@ import (
 // and report. They are set per scope via Apply: once at startup in one-shot
 // mode, per cycle in daemon mode, per business in center mode.
 var (
-	FilePath           string  // Data directory containing ascend_pytorch_profiler_*.db files.
-	CalThreshold       float64 // Slow-compute ratio threshold (default 1.3).
-	CPUThreshold       float64 // Slow-CPU ratio threshold (default 2.5).
-	CommThreshold      float64 // Slow-comm bandwidth kmeans ratio threshold (default 1.3).
-	SlowCommMinCount   int     // Minimum op count included in bandwidth stats (default 1000).
-	SlowCommCountFloor int     // Absolute lower bound on a group's representative count (default 10240).
-	SlowCommFlat       bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment).
-	PPSessionNs        int64   // PP session length (max merged profiling window) for pp_comm detection.
+	FilePath      string  // Data directory containing ascend_pytorch_profiler_*.db files.
+	CalThreshold  float64 // Slow-compute ratio threshold (default 1.3).
+	CPUThreshold  float64 // IO/CPU ratio threshold (default 2.5), used by cpu and memcpy_async.
+	CommThreshold float64 // Slow-comm bandwidth kmeans ratio threshold (default 1.3).
+	SlowCommFlat  bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment).
+	PPSessionNs   int64   // PP session length (max merged profiling window) for pp_comm detection.
+)
+
+// Fixed comm-bandwidth filters, mirroring the Python skill's
+// SLOW_COMM_MIN_COUNT / SLOW_COMM_COUNT_FLOOR. They are deliberately not
+// tunable (no CLI flag / API field), matching the reference.
+const (
+	SlowCommMinCount   = 1000
+	SlowCommCountFloor = 10240
 )
 
 // Thresholds is the full set of independent detection thresholds. It is
 // persisted per business (center), held per daemon (daemon), or applied once
 // (one-shot). Zero values fall back to DefaultThresholds.
 type Thresholds struct {
-	Cal            float64 `json:"cal"`
-	CPU            float64 `json:"cpu"`
-	CommThreshold  float64 `json:"comm_threshold"`
-	CommMinCount   int     `json:"comm_min_count"`
-	CommCountFloor int     `json:"comm_count_floor"`
+	Cal           float64 `json:"cal"`
+	CPU           float64 `json:"cpu"`
+	CommThreshold float64 `json:"comm_threshold"`
 }
 
 // DefaultThresholds returns the defaults used for any unset threshold.
 func DefaultThresholds() Thresholds {
-	return Thresholds{Cal: 1.3, CPU: 2.5, CommThreshold: 1.3, CommMinCount: 1000, CommCountFloor: 10240}
+	return Thresholds{Cal: 1.3, CPU: 2.5, CommThreshold: 1.3}
 }
 
 // Normalized fills any non-positive threshold with its default.
@@ -50,12 +54,6 @@ func (t Thresholds) Normalized() Thresholds {
 	if t.CommThreshold <= 0 {
 		t.CommThreshold = d.CommThreshold
 	}
-	if t.CommMinCount <= 0 {
-		t.CommMinCount = d.CommMinCount
-	}
-	if t.CommCountFloor <= 0 {
-		t.CommCountFloor = d.CommCountFloor
-	}
 	return t
 }
 
@@ -65,18 +63,14 @@ func Apply(t Thresholds) {
 	CalThreshold = t.Cal
 	CPUThreshold = t.CPU
 	CommThreshold = t.CommThreshold
-	SlowCommMinCount = t.CommMinCount
-	SlowCommCountFloor = t.CommCountFloor
 }
 
 // Current returns the active global thresholds.
 func Current() Thresholds {
 	return Thresholds{
-		Cal:            CalThreshold,
-		CPU:            CPUThreshold,
-		CommThreshold:  CommThreshold,
-		CommMinCount:   SlowCommMinCount,
-		CommCountFloor: SlowCommCountFloor,
+		Cal:           CalThreshold,
+		CPU:           CPUThreshold,
+		CommThreshold: CommThreshold,
 	}
 }
 

@@ -40,7 +40,7 @@
 ## CLI
 
 ```
-slowNodeDetection path=/data/dir [--compute-threshold=1.3] [--io-threshold=2.5] [--bubble-threshold-ns=5000] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat] [--debug-output]
+slowNodeDetection path=/data/dir [--compute-threshold=1.3] [--io-threshold=2.5] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-flat] [--debug-output]
 ```
 
 ### 参数
@@ -85,11 +85,10 @@ KPI 模式:
 Profiler 模式:
   CalThreshold       = --compute-threshold          # 计算（默认 1.3；旧名 --cal-threshold）
   CPUThreshold       = --io-threshold               # IO/CPU（默认 2.5；cpu / memcpy_async；旧名 --cpu-threshold）
-  BubbleThresholdNs  = --bubble-threshold-ns        # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold            # 慢通信带宽比（默认 1.3）
-  SlowCommMinCount   = --comm-min-count             # 带宽统计最小 op 计数（默认 1000）
-  SlowCommCountFloor = --comm-count-floor           # 代表 count 下限（默认 10240）
   SlowCommFlat       = --comm-flat                  # 带宽扁平池口径（默认关）
+  SlowCommMinCount   = 1000                         # 固定常量，不可调（skill: SLOW_COMM_MIN_COUNT）
+  SlowCommCountFloor = 10240                        # 固定常量，不可调（skill: SLOW_COMM_COUNT_FLOOR）
 ```
 
 ---
@@ -620,7 +619,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 | `daemon` | 守护进程：周期调度（dynolog/dyno 采集）、runCycle 编排、HTTP 查询/控制、结果落盘 |
 | `resource` | KPI 检测引擎：解析 → 聚合 → 空间检测 → 指标分组 → 报告 → JSON 导出 |
 | `clustering` | 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 慢计算/慢CPU 聚类共用） |
-| `config` | Profiler 全局配置（FilePath + 一组独立阈值 CalThreshold/CPUThreshold/BubbleThresholdNs/CommThreshold/SlowCommMinCount/SlowCommCountFloor、SlowCommFlat）、Thresholds 结构 + Apply、DegradationData 结果聚合 |
+| `config` | Profiler 全局配置（FilePath + 一组独立阈值 CalThreshold/CPUThreshold/CommThreshold、SlowCommFlat）、固定常量 SlowCommMinCount/SlowCommCountFloor、Thresholds 结构 + Apply、DegradationData 结果聚合 |
 | `profiling/dataparse` | SQLite `.db` 解析 → CSV + JSON 中间文件（含 host_info/npu_info）；含慢通信带宽回填 `slow_domain.go` |
 | `profiling/detector` | 并行域拓扑解析、单步快照、四类检测逻辑（慢通信走带宽比较 `slow_domain.go`）、debug 诊断分 |
 | `utils` | Profiler 结果写入（stdout 摘要 + 节点聚合结构） |

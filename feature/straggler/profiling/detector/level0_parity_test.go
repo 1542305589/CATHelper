@@ -39,8 +39,6 @@ func TestLevel0ParityEndToEnd(t *testing.T) {
 	config.CPUThreshold = 2.5
 	config.CommThreshold = 1.3
 	config.SlowCommFlat = false
-	config.SlowCommMinCount = 1000
-	config.SlowCommCountFloor = 10240
 	config.PPSessionNs = 0
 	defer func() {
 		config.CalThreshold, config.CPUThreshold, config.CommThreshold = 0, 0, 0

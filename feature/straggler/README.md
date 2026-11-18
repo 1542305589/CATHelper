@@ -112,8 +112,7 @@ cd feature/straggler
 | `--daemon-port` | 否 | 8080 | HTTP 端口 |
 | `--compute-threshold` | 否 | 1.3 | 计算阈值（KERNEL_AICORE / kernel_aivec）；旧名 `--cal-threshold` |
 | `--io-threshold` | 否 | 2.5 | IO/CPU 阈值（cpu / memcpy_async）；旧名 `--cpu-threshold` |
-| `--bubble-threshold-ns` | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
-| `--comm-threshold` / `--comm-min-count` / `--comm-count-floor` / `--comm-flat` | 否 | 1.3 / 1000 / 10240 / 假 | 慢通信带宽检测旋钮 |
+| `--comm-threshold` / `--comm-flat` | 否 | 1.3 / 假 | 慢通信带宽检测旋钮（min-count=1000 / count-floor=10240 为固定常量，不可调） |
 
 > 命令为**可直接复制执行**写法：续行 `\` 后不留注释/空格，否则 shell 会把反斜杠当成普通字符导致参数被拆散。
 
@@ -327,7 +326,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
 | `GET /daemon/thresholds` | 读取当前检测阈值 | — |
-| `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","bubble_ns","comm_threshold","comm_min_count","comm_count_floor"}` |
+| `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","comm_threshold"}` |
 | `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
 | `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon"}` |
 | `POST /daemon/unmatch` | 解除托管（回到 running，需 `X-Match-Key`） | — |
@@ -429,7 +428,7 @@ curl -s -X POST localhost:8080/daemon/stop
 - **业务（business）**：一个真实训练任务；含名称、触发周期、守护进程列表、一组独立阈值、vllm `/metrics` 端点。
 - **守护进程（daemon）**：业务内的一个 `--daemon`（ip:port）。
 - **匹配（match）**：中心为每个守护进程生成**独立密钥**并下发，守护进程进入 `managed` 托管状态。密钥持久化落盘，中心重启后带同一密钥自证身份，无需守护进程重新匹配。
-- **阈值（thresholds）**：每个业务一组独立阈值（cal/cpu/bubble_ns/comm_threshold/comm_min_count/comm_count_floor），初始值继承中心启动参数，可在业务控制台/API 动态调整。
+- **阈值（thresholds）**：每个业务一组独立阈值（cal/cpu/comm_threshold），初始值继承中心启动参数，可在业务控制台/API 动态调整。
 
 ### 5.3 托管（managed）语义
 
@@ -466,7 +465,7 @@ curl -s -X POST localhost:8080/daemon/stop
 | `POST /center/business/{name}/pause` | 暂停业务调度 |
 | `POST /center/business/{name}/start` | 恢复业务调度 |
 | `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |
-| `POST /center/business/{name}/thresholds` | 修改业务阈值 `{"cal","cpu","bubble_ns","comm_threshold","comm_min_count","comm_count_floor"}` |
+| `POST /center/business/{name}/thresholds` | 修改业务阈值 `{"cal","cpu","comm_threshold"}` |
 | `POST /center/business/{name}/vllm` | 设置业务 vllm `/metrics` 端点 `{"url"}` |
 | `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |
 | `GET /center/business/{name}/metrics` | 业务 TPOT/TTFT 延迟时序（按 engine） |
@@ -564,8 +563,6 @@ Bubble (npu_bubble): 无异常
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_*.jsonl` 目录（优先于 `--kpi-path`） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮） |
 | `--comm-threshold` | float64 | 否 | 1.3 | 慢通信带宽劣化阈值（max/min ≥ 该值判劣化，须 >1） |
-| `--comm-min-count` | int | 否 | 1000 | 参与带宽统计的最小 op 计数（更小视为延迟主导，不计入） |
-| `--comm-count-floor` | int | 否 | 10240 | 检测阶段代表 count 的绝对下限 |
 | `--comm-flat` | bool | 否 | 假 | 带宽改按「全体 rank 的算子时长扁平池」取前10%均值（不跨 rank 匹配）；缺省保持按组内对齐+组内最短时长 |
 | `--debug-output` | bool | 否 | 假 | 结果含全部正常/异常数据便于排查（见 6.1） |
 
@@ -603,11 +600,10 @@ KPI 模式:
 Profiler 模式（每个阈值独立可调，不再由 degradation 派生）:
   CalThreshold       = --compute-threshold           # 计算（默认 1.3；旧名 --cal-threshold）
   CPUThreshold       = --io-threshold                # IO/CPU（默认 2.5；cpu / memcpy_async；旧名 --cpu-threshold）
-  BubbleThresholdNs  = --bubble-threshold-ns         # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold             # 慢通信带宽比（默认 1.3）
-  SlowCommMinCount   = --comm-min-count              # 带宽统计最小 op 计数（默认 1000）
-  SlowCommCountFloor = --comm-count-floor            # 代表 count 下限（默认 10240）
   SlowCommFlat       = --comm-flat                    # 带宽扁平池口径（默认关）
+  SlowCommMinCount   = 1000                           # 固定常量，不可调（skill: SLOW_COMM_MIN_COUNT）
+  SlowCommCountFloor = 10240                          # 固定常量，不可调（skill: SLOW_COMM_COUNT_FLOOR）
 ```
 
 > 这些阈值在守护进程/业务控制台或 API 均可运行期动态调整（见对应 HTTP 接口），只影响后续检测，不改写历史结果。

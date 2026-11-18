@@ -7,13 +7,12 @@
 var FilePath string                                  // CLI path= 设置
 var CalThreshold float64                             // 计算阈值（--compute-threshold，默认 1.3；旧名 --cal-threshold）
 var CPUThreshold float64                             // IO/CPU 阈值（--io-threshold，默认 2.5；cpu / memcpy_async；旧名 --cpu-threshold）
-var BubbleThresholdNs float64                        // NPU Bubble 绝对阈值（--bubble-threshold-ns，默认 5000）
 var CommThreshold float64                            // 慢通信带宽劣化阈值（--comm-threshold，默认 1.3）
-var SlowCommMinCount int                             // 带宽统计最小 op 计数（--comm-min-count，默认 1000）
-var SlowCommCountFloor int                           // 代表 count 下限（--comm-count-floor，默认 10240）
+const SlowCommMinCount = 1000                        // 固定常量，不可调（skill: SLOW_COMM_MIN_COUNT）
+const SlowCommCountFloor = 10240                     // 固定常量，不可调（skill: SLOW_COMM_COUNT_FLOOR）
 var SlowCommFlat bool                                // 带宽分母改用全体 rank 扁平池前10%均值（--comm-flat，默认 false）
 
-type Thresholds struct { Cal, CPU, BubbleNs, CommThreshold float64; CommMinCount, CommCountFloor int }
+type Thresholds struct { Cal, CPU, CommThreshold float64 }
 func DefaultThresholds() Thresholds
 func (t Thresholds) Normalized() Thresholds
 func Apply(t Thresholds)     // 设置上面这些全局「生效阈值」
@@ -151,7 +150,7 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
 - 带宽采用**方向 min**（带宽越小越慢）；匹配按算子类型分类后，组内取 count 最大代表，无 count 严格匹配。
 - **筛选**：count ≥ 最大 count×50% 且 count > 10240（`slowCommCountFloor`）。
 - **上报条件**：一个组必须在所有算子类型都异常（降低误报）；可同时上报多个满足条件的组。
-- 比较粒度仍是卡组；`CommThreshold` 默认 1.3、`SlowCommMinCount` 默认 1000、`SlowCommFlat` 默认 false（均 CLI 可调）。
+- 比较粒度仍是卡组；`CommThreshold` 默认 1.3、`SlowCommFlat` 默认 false（CLI 可调）；`SlowCommMinCount`=1000、`SlowCommCountFloor`=10240 为固定常量，不可调（对应 skill）。
 
 #### 慢CPU（getSlowHostRanksByHomogenize）
 ```
