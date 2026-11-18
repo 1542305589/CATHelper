@@ -25,7 +25,6 @@ package clustering
 
 import (
 	"math"
-	"math/rand"
 	"sort"
 )
 
@@ -38,7 +37,9 @@ const maxIter = 300
 // convergenceEps is the centroid movement / z-score epsilon.
 const convergenceEps = 1e-9
 
-// kmeansSeed fixes the D²-sampling stream so results are reproducible.
+// kmeansSeed fixes the D²-sampling stream so results are reproducible. The
+// stream is CPython's random.Random(42), so kmeans++ picks the same centers as
+// the Python skill.
 const kmeansSeed int64 = 42
 
 // Result is one detected anomalous data point.
@@ -56,7 +57,7 @@ func Detect(values []float64, ratioThreshold float64, highIsAnomaly bool) []Resu
 	if len(values) < 2 {
 		return nil
 	}
-	rng := rand.New(rand.NewSource(kmeansSeed))
+	rng := newPyRandom(kmeansSeed)
 	ids := make([]int, len(values))
 	for i := range ids {
 		ids[i] = i
@@ -108,7 +109,7 @@ func Diagnose(values []float64, ratioThreshold float64, highIsAnomaly bool) []Di
 		return entries
 	}
 
-	rng := rand.New(rand.NewSource(kmeansSeed))
+	rng := newPyRandom(kmeansSeed)
 	z := zscore(vals)
 	k := elbowK(z, rng)
 	clusters := kmeans(z, k, rng)
@@ -150,7 +151,7 @@ func Diagnose(values []float64, ratioThreshold float64, highIsAnomaly bool) []Di
 // recurseAnomaly mirrors Python's _recurse_anomaly: filter, detect one level,
 // then recurse on the union of anomalous points. A deeper anomaly replaces the
 // parent; deeper silence keeps the parent.
-func recurseAnomaly(data []float64, ids []int, depth int, threshold float64, highIsAnomaly bool, rng *rand.Rand) (float64, []int) {
+func recurseAnomaly(data []float64, ids []int, depth int, threshold float64, highIsAnomaly bool, rng *pyRandom) (float64, []int) {
 	var vd []float64
 	var vi []int
 	for i, v := range data {
@@ -177,7 +178,7 @@ func recurseAnomaly(data []float64, ids []int, depth int, threshold float64, hig
 }
 
 // kmeansAnomalyDetect mirrors Python's _kmeans_anomaly_detect.
-func kmeansAnomalyDetect(data []float64, ids []int, threshold float64, highIsAnomaly bool, rng *rand.Rand) ([]float64, []int, float64) {
+func kmeansAnomalyDetect(data []float64, ids []int, threshold float64, highIsAnomaly bool, rng *pyRandom) ([]float64, []int, float64) {
 	n := len(data)
 	if n < 2 {
 		return nil, nil, 0
@@ -297,7 +298,7 @@ func zscore(vals []float64) []float64 {
 }
 
 // elbowK computes inertias for k = 2..min(n,10) and applies pickElbowK.
-func elbowK(z []float64, rng *rand.Rand) int {
+func elbowK(z []float64, rng *pyRandom) int {
 	upper := len(z)
 	if upper > 10 {
 		upper = 10
@@ -337,7 +338,7 @@ func pickElbowK(inertias []float64) int {
 
 // kmeansInertia is the within-cluster sum of squared distances for a k-cluster
 // fit (used only by the elbow method).
-func kmeansInertia(z []float64, k int, rng *rand.Rand) float64 {
+func kmeansInertia(z []float64, k int, rng *pyRandom) float64 {
 	clusters := kmeans(z, k, rng)
 	var inertia float64
 	for _, cl := range clusters {
@@ -356,7 +357,7 @@ func kmeansInertia(z []float64, k int, rng *rand.Rand) float64 {
 // kmeans clusters z into k clusters (indices into z) via kmeans++ init and
 // Lloyd iteration, mirroring Python's _kmeans. The rng is shared across the
 // whole recursion (it is NOT re-seeded per call).
-func kmeans(z []float64, k int, rng *rand.Rand) [][]int {
+func kmeans(z []float64, k int, rng *pyRandom) [][]int {
 	n := len(z)
 	if n == 0 {
 		return nil
@@ -450,7 +451,7 @@ func kmeans(z []float64, k int, rng *rand.Rand) [][]int {
 // D²-weighted sampling; a chosen index already in the set is skipped (the next
 // draw is used). When all remaining distances are zero, the first unused index
 // is appended. Returns the chosen centers' values.
-func kmeansPP(z []float64, k int, rng *rand.Rand) []float64 {
+func kmeansPP(z []float64, k int, rng *pyRandom) []float64 {
 	n := len(z)
 	indices := []int{0}
 	centers := []float64{z[0]}
