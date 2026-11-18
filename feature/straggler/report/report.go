@@ -66,9 +66,9 @@ func GenerateReport(
 ) string {
 	var sb strings.Builder
 
-	// Degraded mode: no parallel topology (group names not registered). Only
-	// cal has input data — comm/CPU are not judged and must not be
-	// reported as "normal" just because their data is absent.
+	// Degraded mode: no parallel topology (group names not registered).
+	// Compute / aivec / memcpy / CPU still have input data, so only the
+	// communication categories are left out of the judgement.
 	calOnly := len(parallels) == 0
 
 	// Header.
@@ -90,7 +90,7 @@ func GenerateReport(
 
 	// Detection summary.
 	sb.WriteString(sepLine("检测结果摘要", reportSep))
-	sb.WriteString(detectionSummary(detectionResult, validRanks, calOnly))
+	sb.WriteString(detectionSummary(detectionResult, parallels, validRanks, calOnly))
 	sb.WriteString("\n")
 
 	// KERNEL_AICORE section.
@@ -105,7 +105,7 @@ func GenerateReport(
 	// per-rank values is meaningless. The section renders per-node aggregates
 	// and only appears with ≥2 physical nodes — the same gate the detection
 	// uses — otherwise cross-node comparison is impossible.
-	if !calOnly && utils.PhysicalNodeCount() >= 2 {
+	if utils.PhysicalNodeCount() >= 2 {
 		if hostData, ok := stepData["ZP_Host"]; ok {
 			sb.WriteString(hostSection(hostData, validRanks))
 			sb.WriteString("\n")
@@ -360,6 +360,7 @@ func hostSection(data map[int]float64, ranks []int) string {
 
 func detectionSummary(
 	detectionResult map[string]map[string]float64,
+	parallels map[string][][]int,
 	validRanks []int,
 	calOnly bool,
 ) string {
@@ -372,9 +373,9 @@ func detectionSummary(
 	sb.WriteString("  " + padEnd("检测类型", 22) + "  " + padEnd("状态", 10) + "  " + padEnd("异常数", 10) + "  异常详情\n")
 	sb.WriteString("  " + strings.Repeat("-", 22) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 10) + "  " + strings.Repeat("-", 30) + "\n")
 
-	// Ordered categories. In degraded mode (no parallel topology) only cal has
-	// input data; the other categories are omitted instead of being reported
-	// as "normal" without data.
+	// Ordered categories. In degraded mode (no parallel topology) only the
+	// communication categories lack input data; compute / aivec / memcpy / CPU
+	// still run, so they stay in the table.
 	categories := []struct {
 		key, label string
 	}{
@@ -386,7 +387,13 @@ func detectionSummary(
 		{"cpu", "慢CPU (cpu)"},
 	}
 	if calOnly {
-		categories = categories[:1]
+		kept := categories[:0]
+		for _, c := range categories {
+			if c.key != "comm" && c.key != "pp_comm" {
+				kept = append(kept, c)
+			}
+		}
+		categories = kept
 	}
 
 	for _, cat := range categories {
@@ -398,9 +405,14 @@ func detectionSummary(
 		if len(data) > 0 {
 			status = "异常"
 			count = len(data)
-			// Build detail strings (truncated).
-			for k, v := range data {
-				details = append(details, fmt.Sprintf("%s: %.2fx", k, v))
+			// Build detail strings (sorted by degradation, truncated).
+			for _, k := range sortedResultKeys(data) {
+				display := detectionDisplayKey(cat.key, k, parallels)
+				if cat.key == "pp_comm" {
+					details = append(details, fmt.Sprintf("%s: %.2f%%", display, data[k]*100))
+				} else {
+					details = append(details, fmt.Sprintf("%s: %.2fx", display, data[k]))
+				}
 				if len(details) >= 5 {
 					break
 				}
@@ -419,7 +431,7 @@ func detectionSummary(
 	}
 
 	if calOnly {
-		sb.WriteString(fmt.Sprintf("  注: 未注册组名,无并行拓扑 — 检测降级为仅慢计算;慢通信/慢CPU 无数据,本次不做判定。\n"))
+		sb.WriteString("  注: 未注册组名,无并行拓扑 — 慢通信/PP通信 未评估,本次不做判定。\n")
 	}
 
 	return sb.String()

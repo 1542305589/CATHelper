@@ -276,17 +276,13 @@ func zscore(vals []float64) []float64 {
 	if n == 0 {
 		return nil
 	}
-	var sum float64
-	for _, v := range vals {
-		sum += v
-	}
-	mean := sum / float64(n)
-	var sq float64
-	for _, v := range vals {
+	mean := pySum(vals) / float64(n)
+	sq := make([]float64, n)
+	for i, v := range vals {
 		d := v - mean
-		sq += d * d
+		sq[i] = d * d
 	}
-	std := math.Sqrt(sq / float64(n))
+	std := math.Sqrt(pySum(sq) / float64(n))
 	if std < convergenceEps {
 		std = 1
 	}
@@ -337,19 +333,26 @@ func pickElbowK(inertias []float64) int {
 }
 
 // kmeansInertia is the within-cluster sum of squared distances for a k-cluster
-// fit (used only by the elbow method).
+// fit (used only by the elbow method). It accumulates in original index order,
+// matching Python's `for j, x in enumerate(data): inertia += ...`.
 func kmeansInertia(z []float64, k int, rng *pyRandom) float64 {
 	clusters := kmeans(z, k, rng)
-	var inertia float64
+	centerOf := make([]float64, len(z))
 	for _, cl := range clusters {
 		if len(cl) == 0 {
 			continue
 		}
-		m := clusterMean(cl, z)
+		// Python's inertia uses the centroid built by `sums[c] += x` (naive
+		// accumulation), not a compensated sum.
+		m := clusterMeanNaive(cl, z)
 		for _, i := range cl {
-			d := z[i] - m
-			inertia += d * d
+			centerOf[i] = m
 		}
+	}
+	var inertia float64
+	for i, x := range z {
+		d := x - centerOf[i]
+		inertia += d * d
 	}
 	return inertia
 }
@@ -552,8 +555,22 @@ func pickBaselineCluster(clusters [][]int, vals []float64, highIsAnomaly bool) i
 	return best
 }
 
-// clusterMean returns the mean of a cluster (list of indices into vals).
+// clusterMean returns the mean of a cluster (list of indices into vals), using
+// CPython's compensated sum() as the reference does for baseline means.
 func clusterMean(idxList []int, vals []float64) float64 {
+	if len(idxList) == 0 {
+		return 0
+	}
+	members := make([]float64, len(idxList))
+	for i, k := range idxList {
+		members[i] = vals[k]
+	}
+	return pySum(members) / float64(len(members))
+}
+
+// clusterMeanNaive accumulates left to right, mirroring Python's kmeans
+// centroid update (`sums[c] += x`) rather than sum().
+func clusterMeanNaive(idxList []int, vals []float64) float64 {
 	if len(idxList) == 0 {
 		return 0
 	}

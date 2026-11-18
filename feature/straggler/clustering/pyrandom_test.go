@@ -1,7 +1,6 @@
 package clustering
 
 import (
-	"math"
 	"testing"
 )
 
@@ -22,6 +21,16 @@ func TestPyRandomMatchesPython(t *testing.T) {
 		if got := r.Float64(); got != w {
 			t.Fatalf("draw %d = %.17g, want %.17g", i, got, w)
 		}
+	}
+}
+
+// Seeds whose bit length is a multiple of 32 must not gain a padding word
+// (CPython keymax = ceil(bits/32)).
+func TestPyRandomSeedEdgeCases(t *testing.T) {
+	// python -c "import random; print(repr(random.Random(2147483648).random()))"
+	r := newPyRandom(2147483648)
+	if got, want := r.Float64(), 0.3387958510019964; got != want {
+		t.Fatalf("seed 2^31 first draw = %.17g, want %.17g", got, want)
 	}
 }
 
@@ -58,13 +67,18 @@ func TestDetectPythonGolden(t *testing.T) {
 		})
 	}
 
+	// Duplicate-heavy integer vectors: CPython 3.12's compensated sum() changes
+	// the kmeans split here, so naive summation diverges by ~1 ulp.
+	dupA := []float64{1000, 1100, 2000, 1200, 1100, 1200, 10000, 1000, 1000, 1200,
+		1100, 2000, 1000, 1200, 1000, 1500, 1000, 1100, 1000}
+	assertFlagged(t, Detect(dupA, 2.5, true), map[int]float64{6: 10.0})
+
+	dupB := []float64{15, 12, 30, 10, 12, 10, 30, 30, 10, 12, 15, 5, 15, 10, 5,
+		11, 10, 11, 12, 20, 20, 30, 12, 100, 11, 10}
+	assertFlagged(t, Detect(dupB, 2.5, false), map[int]float64{11: 20.0, 14: 20.0})
+
 	// Min direction over a stable 100 majority with two 10 outliers: Python
 	// reports baseline/own = 10x.
 	low := []float64{100, 100, 100, 100, 100, 100, 10, 10}
 	assertFlagged(t, Detect(low, 1.3, false), map[int]float64{6: 10.0, 7: 10.0})
-
-	// Sanity: the golden ratio above is a real value, not a rounded constant.
-	if math.Abs(67.0/13.0-5.153846153846154) > 1e-12 {
-		t.Fatal("unreachable")
-	}
 }

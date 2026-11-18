@@ -1,6 +1,9 @@
 package clustering
 
-import "math/bits"
+import (
+	"math"
+	"math/bits"
+)
 
 // pyRandom reproduces CPython's random.Random (MT19937 + genrand_res53) for a
 // single integer seed. The kmeans++ seeding draws from this stream, so matching
@@ -38,7 +41,7 @@ func seedToKey(seed int64) []uint32 {
 		return []uint32{0}
 	}
 	nbits := 64 - bits.LeadingZeros64(v)
-	keyused := nbits/32 + 1
+	keyused := (nbits + 31) / 32
 	key := make([]uint32, keyused)
 	for i := range key {
 		key[i] = uint32(v >> (32 * uint(i)))
@@ -116,4 +119,25 @@ func (r *pyRandom) Float64() float64 {
 	a := float64(r.uint32() >> 5)
 	b := float64(r.uint32() >> 6)
 	return (a*67108864.0 + b) * (1.0 / 9007199254740992.0)
+}
+
+// pySum mirrors CPython 3.12+'s builtin sum() over floats, which uses Neumaier
+// compensated summation. Plain left-to-right addition differs by ~1 ulp on
+// fractional data, and that is enough to flip a kmeans assignment when two
+// distances tie — so parity requires the same summation.
+func pySum(values []float64) float64 {
+	var total, c float64
+	for _, x := range values {
+		t := total + x
+		if math.Abs(total) >= math.Abs(x) {
+			c += (total - t) + x
+		} else {
+			c += (x - t) + total
+		}
+		total = t
+	}
+	if c != 0 {
+		total += c
+	}
+	return total
 }
