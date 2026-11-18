@@ -120,7 +120,7 @@ func DetectSlowDomainByBandwidth(parallels map[string][][]int, stepData map[stri
 			}
 			for _, r := range clustering.Detect(bws, ratio, false) {
 				gi := kept[r.Index].groupIdx
-				deg := 1.0 / r.Ratio // baseline/value → >1, larger = slower
+				deg := r.Ratio // clustering returns baseline/value (min direction) → >1, larger = slower
 				if anomalous[gi] == nil {
 					anomalous[gi] = map[string]float64{}
 				}

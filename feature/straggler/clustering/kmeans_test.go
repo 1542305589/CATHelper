@@ -68,12 +68,12 @@ func TestDetectBimodal(t *testing.T) {
 	assertFlagged(t, res, map[int]float64{4: 2.0, 5: 2.0, 6: 2.0, 7: 2.0})
 }
 
-// min direction: baseline = max-mean cluster; the low cluster is flagged with
-// the unified cluster/baseline ratio (10/40 = 0.25 < 1/threshold = 0.5).
+// min direction: baseline = max-mean cluster; the low cluster is flagged and
+// (Python semantics) degradation = baseline / own = 40/10 = 4.0.
 func TestDetectMinDirection(t *testing.T) {
 	vals := []float64{40, 40, 40, 40, 40, 40, 10, 10}
 	res := Detect(vals, 2.0, false)
-	assertFlagged(t, res, map[int]float64{6: 0.25, 7: 0.25})
+	assertFlagged(t, res, map[int]float64{6: 4.0, 7: 4.0})
 }
 
 // Recursive replacement: the top-level anomaly cluster {40,40,60} recurses and
@@ -123,5 +123,30 @@ func TestDetectEdgeInputs(t *testing.T) {
 	}
 	if res := Detect([]float64{5}, 2.0, true); res != nil {
 		t.Fatalf("single value → %v, want nil", res)
+	}
+}
+
+// Python's elbow rule: score(k) = 2*I[k] - I[k-1] - I[k+1] over k = 3..upper-1,
+// pick the maximum (ties: smallest k). The previous Go rule had the opposite
+// sign and therefore picked the other end of the curve.
+func TestPickElbowKPythonRule(t *testing.T) {
+	// index = k; k = 2..5.
+	inertias := []float64{0, 0, 100, 40, 30, 28}
+	if got := pickElbowK(inertias); got != 4 {
+		t.Fatalf("pickElbowK = %d, want 4", got)
+	}
+	// Fewer than three candidate ks → fall back to 2.
+	if got := pickElbowK([]float64{0, 0, 10, 5}); got != 2 {
+		t.Fatalf("pickElbowK(short) = %d, want 2", got)
+	}
+}
+
+// Baseline must ignore empty clusters (mean 0); otherwise the max direction
+// would always pick the empty cluster as "smallest mean".
+func TestPickBaselineClusterSkipsEmpty(t *testing.T) {
+	clusters := [][]int{{}, {0, 1, 2}}
+	vals := []float64{10, 10, 10}
+	if got := pickBaselineCluster(clusters, vals, true); got != 1 {
+		t.Fatalf("pickBaselineCluster = %d, want 1 (empty cluster skipped)", got)
 	}
 }
