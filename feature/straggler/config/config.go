@@ -20,6 +20,7 @@ var (
 	SlowCommCountFloor int     // Absolute lower bound on a group's representative count (default 10240).
 	SlowCommFlat       bool    // When true, compute bandwidth from the flat pool of ALL ranks' op durations (no cross-rank alignment).
 	PPSessionNs        int64   // PP session length (max merged profiling window) for pp_comm detection.
+	HasNamedDomain     bool    // Whether the data has at least one named parallel domain.
 )
 
 // Thresholds is the full set of independent detection thresholds. It is

@@ -1,6 +1,8 @@
 package detector
 
 import (
+	"sort"
+
 	"github.com/Computing-Availability-Tools/CATHelper/feature/straggler/config"
 )
 
@@ -31,9 +33,12 @@ func DelimitDetection(
 
 	localResult := config.NewDegradationData()
 
+	// Host mapping is used by CPU detection and by the no-named-domain fallback.
+	hostUidMapping := GetHostUidMapping(config.FilePath, validRanks)
+
 	// 1. Select primary detection group.
-	calGroupName, calGroups := GetCalDetectionGroup(parallels, validRanks)
-	if len(calGroupName) == 0 || len(calGroups) == 0 {
+	calGroupName, calGroups := GetCalDetectionGroup(parallels, validRanks, hostUidMapping)
+	if len(calGroups) == 0 {
 		return nil
 	}
 
@@ -43,16 +48,18 @@ func DelimitDetection(
 	getSlowMetricRanks(calGroups, stepData, memcpyAsyncColumn, "memcpy_async", config.CPUThreshold, localResult)
 
 	// 3. Slow communication detection (bandwidth comparison per domain group).
-	DetectSlowDomainByBandwidth(parallels, stepData, localResult)
+	// Only meaningful when the data has named parallel domains.
+	if config.HasNamedDomain {
+		DetectSlowDomainByBandwidth(parallels, stepData, localResult)
 
-	// 3b. PP slow communication: skipped when a compute anomaly was found.
-	if len(localResult["cal"]) == 0 && len(localResult["kernel_aivec"]) == 0 {
-		DetectPPSlowDomain(parallels, stepData, localResult, config.PPSessionNs)
+		// 3b. PP slow communication: skipped when a compute anomaly was found.
+		if len(localResult["cal"]) == 0 && len(localResult["kernel_aivec"]) == 0 {
+			DetectPPSlowDomain(parallels, stepData, localResult, config.PPSessionNs)
+		}
 	}
 
 	// 4. Slow CPU detection (node-level; anomalous cards collapse to one entry).
 	if hostData, ok := stepData[zpHostDataColumn]; ok {
-		hostUidMapping := GetHostUidMapping(config.FilePath, validRanks)
 		nodeNames := GetNodeNameMapping(config.FilePath, validRanks)
 		getSlowHostRanksByHomogenize(validRanks, hostData, localResult, hostUidMapping, nodeNames)
 	}
@@ -70,7 +77,7 @@ func DelimitDetection(
 //
 // Priority order: tp → exp → ep → tp_exp → cp → cp2 → cp_ulysses → cp_ring →
 // dp → dp_cp → dp_modulo_exp_cp
-func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, [][]int) {
+func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int, hostUid map[int]string) (string, [][]int) {
 	npuSet := make(map[int]bool, len(curNpus))
 	for _, n := range curNpus {
 		npuSet[n] = true
@@ -86,14 +93,40 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
 			return domain, filtered
 		}
 	}
-	// No recognized parallel domain (e.g. group names not registered in the
-	// profiler data, or only unknown domains like "mc2" present): degrade to
-	// a single group of all ranks so cal-only detection can still run. Slow
-	// comm/CPU have no data without group names and stay silent.
+	// No recognized parallel domain: fall back to physical-node groups by hostUid
+	// (Python's no-named-domain degradation).
+	if groups := hostUidGroups(curNpus, hostUid); len(groups) > 0 {
+		return "", groups
+	}
+	// Fallback when there is no host mapping either: a single all-ranks group so
+	// cal-only detection can still run.
 	if len(curNpus) >= minRanksInGroup {
 		return defaultGroupParallelDomainName, [][]int{curNpus}
 	}
 	return "", nil
+}
+
+// hostUidGroups groups ranks by physical node (hostUid), keeping groups with at
+// least two cards, sorted by their smallest rank.
+func hostUidGroups(ranks []int, hostUid map[int]string) [][]int {
+	if len(hostUid) == 0 {
+		return nil
+	}
+	byHost := make(map[string][]int)
+	for _, r := range ranks {
+		if h, ok := hostUid[r]; ok && h != "" {
+			byHost[h] = append(byHost[h], r)
+		}
+	}
+	var out [][]int
+	for _, g := range byHost {
+		if len(g) >= minRanksInGroup {
+			sort.Ints(g)
+			out = append(out, g)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
 }
 
 // getDetectionGroups filters groups to only include ranks that are present in

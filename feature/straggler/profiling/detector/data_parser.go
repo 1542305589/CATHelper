@@ -66,7 +66,9 @@ func GetCurDetectionInfo(jobPath string) (map[string][][]int, []int) {
 	}
 
 	validRanks := sortedKeys(rankSet)
-	return buildParallels(topos), validRanks
+	parallels := buildParallels(topos)
+	config.HasNamedDomain = len(parallels) > 0
+	return parallels, validRanks
 }
 
 // getCurRankTopo reads a single group_info JSON file and returns the raw data.
