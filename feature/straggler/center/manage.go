@@ -103,21 +103,32 @@ func (c *Center) scheduleLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		c.mu.Lock()
+		changed := false
 		for _, b := range c.biz {
 			if b.Paused {
 				continue
 			}
 			interval := c.businessInterval(b)
-			if b.nextTrigger.IsZero() {
-				b.nextTrigger = time.Now().Add(interval)
+			if b.NextTrigger.IsZero() {
+				b.NextTrigger = time.Now().Add(interval)
+				changed = true
+				continue
 			}
-			if time.Now().After(b.nextTrigger) {
-				// Re-anchor regardless; skip when a round is already in flight.
-				b.nextTrigger = time.Now().Add(interval)
-				if !b.triggering && c.businessReadyLocked(b) {
-					go c.triggerBusiness(b)
-				}
+			if time.Now().Before(b.NextTrigger) {
+				continue
 			}
+			// Deadline elapsed (normal tick or restart catch-up): fire once and
+			// re-anchor. When the business is not ready yet, keep the expired
+			// deadline so the single catch-up happens as soon as daemons re-match.
+			if b.triggering || !c.businessReadyLocked(b) {
+				continue
+			}
+			b.NextTrigger = time.Now().Add(interval)
+			changed = true
+			go c.triggerBusiness(b)
+		}
+		if changed {
+			c.save()
 		}
 		c.mu.Unlock()
 	}
@@ -165,10 +176,11 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 	// SAME key (not an empty or freshly-random one). Callers hold c.mu.
 	c.save()
 	body := map[string]any{
-		"center_addr": c.selfURL(),
-		"key":         d.Key,
-		"business":    b.Name,
-		"daemon":      d.Addr(),
+		"center_addr":  c.selfURL(),
+		"key":          d.Key,
+		"business":     b.Name,
+		"daemon":       d.Addr(),
+		"interval_sec": int64(c.businessInterval(b).Seconds()),
 	}
 	resp, err := doJSON(http.MethodPost, d.BaseURL()+"/daemon/match", body, "")
 	if err != nil {
@@ -178,6 +190,9 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 	}
 	cw, _ := resp["collect_wait"].(float64)
 	d.collectWait = int64(cw)
+	if capable, ok := resp["round_token_supported"].(bool); ok {
+		d.tokenCapable = capable
+	}
 	d.matchState = "healthy"
 	d.healthy = true
 	d.failCount = 0
@@ -318,6 +333,10 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	}
 	b.triggering = true
 	b.lastTriggerReason = reason
+	// Round token: daemons echo it back with their report so a late report from
+	// an older round can never be mistaken for this round's data.
+	b.pendingToken = strconv.FormatInt(triggerAt.UnixNano(), 10)
+	token := b.pendingToken
 	if b.progress == nil {
 		b.progress = newProgressLog()
 	}
@@ -347,7 +366,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 
 	for _, d := range b.Daemons {
 		if d.matchState == "healthy" {
-			go c.triggerDaemon(d)
+			go c.triggerDaemon(d, token)
 		}
 	}
 
@@ -362,7 +381,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 			if d.matchState != "healthy" {
 				continue
 			}
-			if d.lastReportAt.Before(triggerAt) {
+			if !roundReported(d, triggerAt, token) {
 				done = false
 			} else {
 				n++
@@ -379,9 +398,9 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	c.markMissingReports(b, triggerAt)
+	c.markMissingReports(b, triggerAt, token)
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt)
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, token)
 	durationMs := time.Since(triggerAt).Milliseconds()
 	prog.step("合并本轮上报的 op_metric: %d 个 rank（%d/%d 个守护进程）", len(merged), reportedDaemons, healthy)
 
@@ -413,7 +432,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	// cadence stays a fixed interval and does not drift by the detection duration.
 	// KPI-triggered rounds must not shift the normal profiler schedule.
 	if reschedule {
-		b.nextTrigger = triggerAt.Add(c.businessInterval(b))
+		b.NextTrigger = triggerAt.Add(c.businessInterval(b))
 	}
 	b.triggering = false
 	c.save()
@@ -433,31 +452,46 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 // markMissingReports flags daemons that failed to report within the round's
 // deadline (distinct from "断连": healthz is fine but the daemon lost its match
 // or hung). The next probe re-classifies them automatically once they recover.
-func (c *Center) markMissingReports(b *Business, triggerAt time.Time) {
+func (c *Center) markMissingReports(b *Business, triggerAt time.Time, token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, d := range b.Daemons {
-		if d.matchState == "healthy" && d.lastReportAt.Before(triggerAt) {
+		if d.matchState == "healthy" && !roundReported(d, triggerAt, token) {
 			d.matchState = "report_failed"
 		}
 	}
 }
 
-func (c *Center) triggerDaemon(d *Daemon) {
-	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", nil, d.Key)
+// roundReported reports whether d's latest report belongs to the round started
+// at triggerAt. Daemons without a token (old builds) fall back to a pure
+// freshness check; new daemons must echo the round token.
+func roundReported(d *Daemon, triggerAt time.Time, token string) bool {
+	if d.lastReportAt.Before(triggerAt) {
+		return false
+	}
+	if token != "" && d.tokenCapable && d.lastRoundToken != token {
+		return false
+	}
+	return true
+}
+
+func (c *Center) triggerDaemon(d *Daemon, token string) {
+	body := map[string]string{"round_token": token}
+	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", body, d.Key)
 }
 
 // mergeOpMetric merges only the op_metric reported in the CURRENT round.
-// A daemon whose lastReportAt is before triggerAt did not report this round; it
-// is skipped even if it still holds a cached op_metric from an earlier round, so
-// a failed round can never be detected as a success.
-func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time) (detector.OpMetric, int) {
+// A daemon whose lastReportAt is before triggerAt (or whose round token does not
+// match) did not report this round; it is skipped even if it still holds a
+// cached op_metric from an earlier round, so a failed round can never be
+// detected as a success.
+func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time, token string) (detector.OpMetric, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	merged := make(detector.OpMetric)
 	reported := 0
 	for _, d := range b.Daemons {
-		if d.lastOpMetric != nil && !d.lastReportAt.Before(triggerAt) {
+		if d.lastOpMetric != nil && roundReported(d, triggerAt, token) {
 			reported++
 			for rank, r := range d.lastOpMetric {
 				merged[rank] = r
@@ -465,8 +499,8 @@ func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time) (detector.OpMet
 			continue
 		}
 		if d.matchState == "healthy" || d.matchState == "report_failed" {
-			c.logf("skip stale/missing op_metric: daemon=%s lastReportAt=%s triggerAt=%s",
-				d.Addr(), d.lastReportAt.UTC().Format(time.RFC3339), triggerAt.UTC().Format(time.RFC3339))
+			c.logf("skip stale/missing op_metric: daemon=%s lastReportAt=%s triggerAt=%s token=%q",
+				d.Addr(), d.lastReportAt.UTC().Format(time.RFC3339), triggerAt.UTC().Format(time.RFC3339), d.lastRoundToken)
 		}
 	}
 	return merged, reported
@@ -498,7 +532,11 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	}
 	stepData := detector.GetCurJobLastStepData(validRanks)
 	result := detector.DelimitDetection(stepData, parallels, validRanks)
-	nodeOut, err := utils.BuildNodeResult(result, parallels, nil)
+	status := detector.CategoryStatus(stepData, parallels, validRanks)
+	if detector.AllNoData(status) {
+		return fmt.Errorf("no valid profiler data (no_data)")
+	}
+	nodeOut, err := utils.BuildNodeResult(result, parallels, nil, status)
 	if err != nil {
 		return fmt.Errorf("build node result: %w", err)
 	}
@@ -522,7 +560,7 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	}
 
 	dir := startedAt.Format("20060102-150405")
-	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, startedAt, durationMs, len(op)); err != nil {
+	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, status, startedAt, durationMs, len(op)); err != nil {
 		return fmt.Errorf("store result: %w", err)
 	}
 	c.logf("business %s: detection done (%d ranks, %d cal anomalies)", b.Name, len(validRanks), len(result["cal"]))
@@ -616,7 +654,7 @@ func writeGlobalRankCSV(path string, g any) error {
 // results dir, mirroring a single daemon's per-cycle archive shape: result JSON,
 // text report, the merged op_metric JSON, plus a cycle.json (ts + trigger time +
 // duration + per-category anomaly counts) for the per-business history.
-func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, startedAt time.Time, durationMs int64, worldSize int) error {
+func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, status map[string]string, startedAt time.Time, durationMs int64, worldSize int) error {
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(filepath.Join(base, "analysis_result"), 0o755); err != nil {
 		return err
@@ -633,13 +671,14 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		return err
 	}
 	meta, _ := json.MarshalIndent(map[string]any{
-		"ts":             dirRel,
-		"started_at":     startedAt.Format(time.RFC3339),
-		"duration_ms":    durationMs,
-		"world_size":     worldSize,
-		"summary":        summary,
-		"trigger_reason": b.lastTriggerReason,
-		"failed":         false,
+		"ts":              dirRel,
+		"started_at":      startedAt.Format(time.RFC3339),
+		"duration_ms":     durationMs,
+		"world_size":      worldSize,
+		"summary":         summary,
+		"category_status": status,
+		"trigger_reason":  b.lastTriggerReason,
+		"failed":          false,
 	}, "", "  ")
 	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
 }

@@ -32,7 +32,7 @@ func TestMergeOpMetricSkipsUnreportedDaemons(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{unreported, reported}}
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt)
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "")
 	if reportedDaemons != 1 {
 		t.Fatalf("reported daemons = %d, want 1", reportedDaemons)
 	}
@@ -63,12 +63,79 @@ func TestMergeOpMetricNoReportReturnsEmpty(t *testing.T) {
 			lastOpMetric: nil, lastReportAt: time.Time{}},
 	}}
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt)
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "")
 	if reportedDaemons != 0 {
 		t.Fatalf("reported daemons = %d, want 0", reportedDaemons)
 	}
 	if len(merged) != 0 {
 		t.Fatalf("merged ranks = %d, want 0", len(merged))
+	}
+}
+
+// A late report carrying an OLDER round token must not satisfy the current
+// round, even if its arrival timestamp is recent.
+func TestMergeOpMetricRejectsStaleRoundToken(t *testing.T) {
+	triggerAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	stale := &Daemon{
+		IP: "10.0.0.1", Port: 8080, matchState: "healthy",
+		lastOpMetric:   detector.OpMetric{"0": &detector.OpMetricRank{}},
+		lastReportAt:   triggerAt.Add(time.Second),
+		lastRoundToken: "old-round",
+		tokenCapable:   true,
+	}
+	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
+	b := &Business{Name: "biz", Daemons: []*Daemon{stale}}
+
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "new-round")
+	if reportedDaemons != 0 {
+		t.Fatalf("reported daemons = %d, want 0 (stale token)", reportedDaemons)
+	}
+	if len(merged) != 0 {
+		t.Fatalf("merged ranks = %d, want 0 (stale token)", len(merged))
+	}
+}
+
+// A legacy report without a token still counts by freshness.
+func TestMergeOpMetricAcceptsLegacyNoToken(t *testing.T) {
+	triggerAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	legacy := &Daemon{
+		IP: "10.0.0.1", Port: 8080, matchState: "healthy",
+		lastOpMetric: detector.OpMetric{"0": &detector.OpMetricRank{}},
+		lastReportAt: triggerAt.Add(time.Second),
+	}
+	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
+	b := &Business{Name: "biz", Daemons: []*Daemon{legacy}}
+
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "new-round")
+	if reportedDaemons != 1 || len(merged) != 1 {
+		t.Fatalf("legacy report dropped: reported=%d merged=%d", reportedDaemons, len(merged))
+	}
+}
+
+// Schedule deadlines must survive a center restart so the cadence resumes
+// instead of re-anchoring to "now".
+func TestScheduleDeadlinesPersist(t *testing.T) {
+	dir := t.TempDir()
+	nt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	nk := nt.Add(5 * time.Minute)
+
+	c := &Center{cfg: Config{DataDir: dir}, biz: map[string]*Business{}, logf: noopLogf}
+	c.mu.Lock()
+	c.biz["biz"] = &Business{Name: "biz", NextTrigger: nt, NextKPIDetect: nk}
+	c.save()
+	c.mu.Unlock()
+
+	c2 := &Center{cfg: Config{DataDir: dir}, biz: map[string]*Business{}, logf: noopLogf}
+	c2.load()
+	b := c2.biz["biz"]
+	if b == nil {
+		t.Fatal("business not loaded")
+	}
+	if !b.NextTrigger.Equal(nt) {
+		t.Fatalf("NextTrigger = %s, want %s", b.NextTrigger, nt)
+	}
+	if !b.NextKPIDetect.Equal(nk) {
+		t.Fatalf("NextKPIDetect = %s, want %s", b.NextKPIDetect, nk)
 	}
 }
 

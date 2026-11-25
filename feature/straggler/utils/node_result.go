@@ -45,6 +45,7 @@ type NodeResult struct {
 type NodeOutput struct {
 	NodeResult       []NodeResult                  `json:"node_result"`
 	CommDomainResult map[string]map[string]float64 `json:"comm_domain_result"`
+	CategoryStatus   map[string]string             `json:"category_status,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -77,18 +78,18 @@ type nodeAccumulator struct {
 // each NPU's cal / cpu scores (plus all comm groups) are filled
 // from the diagnostic scores even when not flagged — normal data shows its
 // diagnostic scores too.
-func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo) (*NodeOutput, error) {
-	return buildNodeResult(finalResult, parallels, debug, nil)
+func BuildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, status map[string]string) (*NodeOutput, error) {
+	return buildNodeResult(finalResult, parallels, debug, nil, status)
 }
 
 // BuildNodeResultWithMeta is like BuildNodeResult but uses the caller-provided
 // rank identity map instead of reading op_metric/host_info|npu_info files. This
 // lets the center node build the node output from in-memory reported op_metric.
-func BuildNodeResultWithMeta(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta) (*NodeOutput, error) {
-	return buildNodeResult(finalResult, parallels, debug, meta)
+func BuildNodeResultWithMeta(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta, status map[string]string) (*NodeOutput, error) {
+	return buildNodeResult(finalResult, parallels, debug, meta, status)
 }
 
-func buildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta) (*NodeOutput, error) {
+func buildNodeResult(finalResult map[string]map[string]float64, parallels map[string][][]int, debug *DebugInfo, meta map[int]RankMeta, status map[string]string) (*NodeOutput, error) {
 	includeAll := debug != nil
 	// Degraded mode: no parallel topology (group names not registered) — only
 	// cal has input data; comm/CPU are not judged and must not be reported as
@@ -197,8 +198,8 @@ func buildNodeResult(finalResult map[string]map[string]float64, parallels map[st
 		nodeResults = append(nodeResults, nr)
 	}
 
-	printNodeSummary(finalResult, calOnly)
-	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains}, nil
+	printNodeSummary(finalResult, calOnly, status)
+	return &NodeOutput{NodeResult: nodeResults, CommDomainResult: commDomains, CategoryStatus: status}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +300,7 @@ func sortedNpuIDs(npus map[int]*NpuResult) []int {
 // Print helpers
 // ---------------------------------------------------------------------------
 
-func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
+func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool, status map[string]string) {
 	// Slow-CPU needs ≥2 physical nodes to be meaningful: hostUid-based trimming
 	// collapses a single node's ranks to identical values, so no straggler can
 	// be found. Skip its line entirely in that case.
@@ -326,8 +327,17 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 			continue
 		}
 		data := finalResult[cat.key]
+		catStatus := status[cat.key]
+		if catStatus == config.CategoryNoData {
+			fmt.Printf("%s: 数据不足（no_data），不判定为正常\n", cat.label)
+			continue
+		}
 		if len(data) == 0 {
-			fmt.Printf("%s: 无异常\n", cat.label)
+			if catStatus == config.CategoryPartial {
+				fmt.Printf("%s: 无异常（数据不完整）\n", cat.label)
+			} else {
+				fmt.Printf("%s: 无异常\n", cat.label)
+			}
 			continue
 		}
 		keys := make([]string, 0, len(data))
@@ -339,7 +349,11 @@ func printNodeSummary(finalResult map[string]map[string]float64, calOnly bool) {
 		for _, k := range keys {
 			parts = append(parts, fmt.Sprintf("%s: %.2fx", k, data[k]))
 		}
-		fmt.Printf("%s: 异常 (%d) %s\n", cat.label, len(data), strings.Join(parts, "; "))
+		suffix := ""
+		if catStatus == config.CategoryPartial {
+			suffix = "（数据不完整）"
+		}
+		fmt.Printf("%s: 异常 (%d) %s%s\n", cat.label, len(data), strings.Join(parts, "; "), suffix)
 	}
 }
 

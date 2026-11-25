@@ -136,8 +136,8 @@ func businessStatusOfLocked(b *Business) businessStatus {
 		DefaultThresholds:      config.DefaultThresholds(),
 		Daemons:                make([]daemonStatus, 0, len(b.Daemons)),
 	}
-	if !b.nextTrigger.IsZero() {
-		bs.NextTrigger = b.nextTrigger.Format(time.RFC3339)
+	if !b.NextTrigger.IsZero() {
+		bs.NextTrigger = b.NextTrigger.Format(time.RFC3339)
 	}
 	for _, d := range b.Daemons {
 		bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait})
@@ -363,21 +363,25 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		body, _ := io.ReadAll(r.Body)
+		// Preferred envelope: {"round_token": "...", "ranks": {...}}. Also accept
+		// the legacy {cycle,dir,ranks} envelope and the bare rank map.
+		var roundToken string
 		var op detector.OpMetric
-		if err := json.Unmarshal(body, &op); err != nil {
-			// Backward-compatible: accept the {cycle,dir,ranks} envelope too.
-			var env struct {
-				Ranks detector.OpMetric `json:"ranks"`
-			}
-			if err2 := json.Unmarshal(body, &env); err2 != nil || env.Ranks == nil {
-				c.logf("op_metric decode error: %v (fallback: %v)", err, err2)
-				http.Error(w, "invalid op_metric JSON: "+err.Error(), http.StatusBadRequest)
-				return
-			}
+		var env struct {
+			RoundToken string            `json:"round_token"`
+			Ranks      detector.OpMetric `json:"ranks"`
+		}
+		if err := json.Unmarshal(body, &env); err == nil && env.Ranks != nil {
+			roundToken = env.RoundToken
 			op = env.Ranks
+		} else if err := json.Unmarshal(body, &op); err != nil || op == nil {
+			c.logf("op_metric decode error: %v", err)
+			http.Error(w, "invalid op_metric JSON", http.StatusBadRequest)
+			return
 		}
 		d.lastOpMetric = op
 		d.lastReportAt = time.Now()
+		d.lastRoundToken = roundToken
 		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
@@ -527,7 +531,7 @@ func (c *Center) handleBusinessStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.Paused = false
-	b.nextTrigger = time.Now().Add(c.businessInterval(b))
+	b.NextTrigger = time.Now().Add(c.businessInterval(b))
 	c.save()
 	writeJSON(w, map[string]string{"status": "started"})
 }
@@ -549,7 +553,7 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	b.IntervalSec = req.IntervalSec
-	b.nextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
+	b.NextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
 	c.save()
 	writeJSON(w, map[string]any{"interval_sec": req.IntervalSec})
 }

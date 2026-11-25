@@ -869,7 +869,7 @@ slowNodeDetection [path=<profiler_dir>] [degradation=0.3] \
 # 守护进程模式
 slowNodeDetection --daemon --profiler-dir=<dir> [--kpi-dir=<dir>] \
     [--daemon-port=8080] [--interval=600] [--collect-wait=60] \
-    [--profiler-iterations=1] [degradation=0.3]
+    [--profiler-iterations=3] [--allow-low-iterations] [degradation=0.3]
 ```
 
 | 参数 | 默认 | 说明 |
@@ -886,7 +886,7 @@ slowNodeDetection --daemon --profiler-dir=<dir> [--kpi-dir=<dir>] \
 | `--daemon-port` | 8080 | HTTP 端口 |
 | `--interval` | 600 | 检测周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | 1 | 透传 dyno `nputrace` 的采集迭代步数 |
+| `--profiler-iterations` | 3 | 透传 dyno `nputrace` 的采集迭代步数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
 
 > `--baseline-hours`/`--detection-hours`/`--faultsub-url`/`--space-method`/`--space-z-threshold`/`--time-z-threshold`/`--time-weight`/`--no-trend`/`--no-fallback`/`--always-profiling` 等旧 flag 已移除。
 

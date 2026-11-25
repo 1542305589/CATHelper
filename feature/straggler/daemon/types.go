@@ -19,7 +19,7 @@ type Config struct {
 	Interval    time.Duration     // 循环周期，默认 600s
 	Port        int               // HTTP 端口，默认 8080
 	CollectWait time.Duration     // dyno 触发成功后的等待秒数，默认 60s
-	Iterations  int               // dyno nputrace 采集迭代数（--profiler-iterations=，默认 1）
+	Iterations  int               // dyno nputrace 采集迭代数（--profiler-iterations=，默认 3）
 	DynoBin     string            // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
 	DynologBin  string            // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
 	Thresholds  config.Thresholds // independent detection thresholds (per-daemon, adjustable at runtime)
@@ -32,7 +32,7 @@ func DefaultConfig() Config {
 		Interval:    10 * time.Minute,
 		Port:        8080,
 		CollectWait: 60 * time.Second,
-		Iterations:  1,
+		Iterations:  3,
 		Thresholds:  config.DefaultThresholds(),
 	}
 }
@@ -46,19 +46,21 @@ func DefaultConfig() Config {
 // heavy fields) into daemon_meta.json inside the archive dir as a durable
 // record; the query API reads the in-memory store, not this file.
 type CycleResult struct {
-	ID         int                       `json:"id"`
-	StartedAt  time.Time                 `json:"started_at"`
-	FinishedAt time.Time                 `json:"finished_at"`
-	DurationMs int64                     `json:"duration_ms"`
-	DBs        int                       `json:"dbs"`
-	DumpDir    string                    `json:"dump_dir"`
-	JSONPath   string                    `json:"json_path,omitempty"`
-	KPI        *resource.DetectionResult `json:"-"`
-	KPIStatus  string                    `json:"kpi_status,omitempty"` // "ok" / "disabled..." / "skipped: ..." / "failed: ..."
-	Result     *utils.NodeOutput         `json:"-"`
-	Summary    map[string]int            `json:"summary"`
-	Report     string                    `json:"-"`
-	Error      string                    `json:"error,omitempty"`
+	ID             int                       `json:"id"`
+	StartedAt      time.Time                 `json:"started_at"`
+	FinishedAt     time.Time                 `json:"finished_at"`
+	DurationMs     int64                     `json:"duration_ms"`
+	DBs            int                       `json:"dbs"`
+	DumpDir        string                    `json:"dump_dir"`
+	JSONPath       string                    `json:"json_path,omitempty"`
+	KPI            *resource.DetectionResult `json:"-"`
+	KPIStatus      string                    `json:"kpi_status,omitempty"` // "ok" / "disabled..." / "skipped: ..." / "failed: ..."
+	Result         *utils.NodeOutput         `json:"-"`
+	Summary        map[string]int            `json:"summary"`
+	CategoryStatus map[string]string         `json:"category_status,omitempty"` // cal/comm/cpu -> ok|partial|no_data
+	Report         string                    `json:"-"`
+	RoundToken     string                    `json:"-"` // center-issued round token, echoed back with the report
+	Error          string                    `json:"error,omitempty"`
 }
 
 // dynoResponse is the JSON snippet embedded in the dyno trigger command's
@@ -77,9 +79,24 @@ type DetectFunc func(inputPath string, debugOutput bool) (*DetectResult, error)
 // DetectResult is the outcome of the profiler pipeline: the node output for the
 // combined JSON, per-category anomaly counts, and the text report.
 type DetectResult struct {
-	NodeOutput *utils.NodeOutput
-	Summary    map[string]int // cal/comm/cpu -> anomaly counts
-	Report     string         // report.GenerateReport text
+	NodeOutput     *utils.NodeOutput
+	Summary        map[string]int    // cal/comm/cpu -> anomaly counts
+	Report         string            // report.GenerateReport text
+	CategoryStatus map[string]string // cal/comm/cpu -> ok|partial|no_data
+}
+
+// AllNoData reports whether every profiler category had no usable data, i.e.
+// the round must not be counted as a normal detection.
+func (r *DetectResult) AllNoData() bool {
+	if r == nil || len(r.CategoryStatus) == 0 {
+		return true
+	}
+	for _, s := range r.CategoryStatus {
+		if s != config.CategoryNoData {
+			return false
+		}
+	}
+	return true
 }
 
 // CombinedOutput is the merged KPI + profiler result written as one JSON file
@@ -96,6 +113,7 @@ type statusResponse struct {
 	State             string            `json:"state"`
 	IntervalSec       int64             `json:"interval_sec"`
 	CollectWait       int64             `json:"collect_wait"`
+	Iterations        int               `json:"iterations"`
 	Thresholds        config.Thresholds `json:"thresholds"`
 	DefaultThresholds config.Thresholds `json:"default_thresholds"`
 	Managed           bool              `json:"managed"`
@@ -111,16 +129,17 @@ type statusResponse struct {
 // cycleSummary is the compact per-cycle entry served by /status and /history
 // (what a serialized CycleResult looks like without the heavy fields).
 type cycleSummary struct {
-	ID         int            `json:"id"`
-	StartedAt  time.Time      `json:"started_at"`
-	FinishedAt time.Time      `json:"finished_at"`
-	DurationMs int64          `json:"duration_ms"`
-	DBs        int            `json:"dbs"`
-	DumpDir    string         `json:"dump_dir"`
-	Summary    map[string]int `json:"summary"`
-	KPIStatus  string         `json:"kpi_status,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Running    bool           `json:"running,omitempty"` // in-flight cycle, prepended to history
+	ID             int               `json:"id"`
+	StartedAt      time.Time         `json:"started_at"`
+	FinishedAt     time.Time         `json:"finished_at"`
+	DurationMs     int64             `json:"duration_ms"`
+	DBs            int               `json:"dbs"`
+	DumpDir        string            `json:"dump_dir"`
+	Summary        map[string]int    `json:"summary"`
+	CategoryStatus map[string]string `json:"category_status,omitempty"`
+	KPIStatus      string            `json:"kpi_status,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	Running        bool              `json:"running,omitempty"` // in-flight cycle, prepended to history
 }
 
 // historyResponse is the GET /straggler/results/history payload.

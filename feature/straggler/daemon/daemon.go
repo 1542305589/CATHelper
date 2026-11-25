@@ -53,6 +53,10 @@ type Daemon struct {
 	matchKey   string // per-daemon secret, required on every controlled call
 	business   string // business name this daemon reports under
 	daemonID   string // daemon identifier within the business
+	// centerInterval is the center business interval reported at match time.
+	// On losing the center the daemon aligns its own self-trigger cadence to it
+	// (so it neither bursts nor drifts while unmanaged).
+	centerInterval time.Duration
 }
 
 // New creates a Daemon. detect is the shared profiler pipeline
@@ -148,7 +152,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-d.timer.C:
 			d.mu.Lock()
 			if d.state == "running" {
-				d.startCycle()
+				d.startCycle("")
 				// Re-anchor both the display and the actual timer to the next
 				// interval. (startCycle already sets nextRun unless a cycle
 				// was in flight and this tick was skipped.)
@@ -166,7 +170,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // startCycle launches one cycle if none is in flight (single-flight: a long
 // cycle skips the ticks that land while it runs). Caller holds d.mu.
-func (d *Daemon) startCycle() {
+func (d *Daemon) startCycle(roundToken string) {
 	if d.cycleInFlight {
 		return
 	}
@@ -175,7 +179,7 @@ func (d *Daemon) startCycle() {
 	id := d.cycleID
 	d.nextRun = time.Now().Add(d.interval)
 	go func() {
-		d.runCycle(id)
+		d.runCycle(id, roundToken)
 		d.mu.Lock()
 		d.cycleInFlight = false
 		d.mu.Unlock()
@@ -184,8 +188,8 @@ func (d *Daemon) startCycle() {
 
 // runCycle executes one collect→convert→parse→analyse pass and records the
 // CycleResult (success or error) into the store.
-func (d *Daemon) runCycle(id int) {
-	cr := &CycleResult{ID: id, StartedAt: time.Now()}
+func (d *Daemon) runCycle(id int, roundToken string) {
+	cr := &CycleResult{ID: id, StartedAt: time.Now(), RoundToken: roundToken}
 	d.progress.begin(id)
 	d.progress.step("触发采集 (dyno)")
 	// This cycle's analysed results (combined JSON, meta, report) are written
@@ -291,6 +295,11 @@ func (d *Daemon) runCycle(id int) {
 	}
 	cr.Result = res.NodeOutput
 	cr.Summary = res.Summary
+	cr.CategoryStatus = res.CategoryStatus
+	if res.AllNoData() && cr.KPI == nil {
+		cr.Error = "no valid profiler data (no_data)"
+		return
+	}
 	d.progress.step("Profiler 检测完成: cal=%d comm=%d cpu=%d",
 		res.Summary["cal"], res.Summary["comm"], res.Summary["cpu"])
 	// Merge the KPI anomaly counts (per metric) into the cycle summary so
@@ -557,6 +566,13 @@ func (d *Daemon) SetInterval(sec int64) error {
 // so the next automatic cycle is one interval after this manual one; in
 // "managed" the timer stays stopped (the center schedules the cycles).
 func (d *Daemon) Trigger() error {
+	return d.TriggerWithToken("")
+}
+
+// TriggerWithToken is Trigger with a center-issued round token: the token is
+// carried through the cycle and echoed back with the op_metric report so the
+// center can reject a late report from an older round.
+func (d *Daemon) TriggerWithToken(roundToken string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "paused" {
@@ -565,7 +581,7 @@ func (d *Daemon) Trigger() error {
 	if d.cycleInFlight {
 		return fmt.Errorf("a cycle is already running")
 	}
-	d.startCycle()
+	d.startCycle(roundToken)
 	if d.state == "running" {
 		d.resetTimer()
 	}
@@ -593,7 +609,7 @@ func (d *Daemon) Stop() {
 // Match establishes a managed relationship with a center. The daemon stops
 // self-scheduling (state=managed), records the center/key/business/daemon and
 // starts the reverse heartbeat. Returns an error if already managed.
-func (d *Daemon) Match(centerAddr, key, business, daemonID string) error {
+func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time.Duration) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "managed" {
@@ -605,6 +621,9 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string) error {
 		d.matchKey = key
 		d.business = business
 		d.daemonID = daemonID
+		if interval > 0 {
+			d.centerInterval = interval
+		}
 		d.logf("re-matched by center %s (business=%s daemon=%s)", centerAddr, business, daemonID)
 		return nil
 	}
@@ -612,6 +631,9 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string) error {
 	d.matchKey = key
 	d.business = business
 	d.daemonID = daemonID
+	if interval > 0 {
+		d.centerInterval = interval
+	}
 	d.state = "managed"
 	d.nextRun = time.Time{}
 	d.stopTimer()
@@ -633,9 +655,15 @@ func (d *Daemon) Unmatch() {
 	d.business = ""
 	d.daemonID = ""
 	d.state = "running"
+	// Align the self-trigger cadence with the center's business interval and
+	// schedule the first self-trigger one FULL interval out: losing the center
+	// must not replay the rounds it missed (no catch-up burst).
+	if d.centerInterval > 0 {
+		d.interval = d.centerInterval
+	}
 	d.nextRun = time.Now().Add(d.interval)
 	d.resetTimer()
-	d.logf("unmatched, back to running")
+	d.logf("unmatched, back to running (interval=%s)", d.interval)
 }
 
 // IsManaged reports whether the daemon is currently managed by a center.
@@ -706,9 +734,13 @@ func (d *Daemon) reportOpMetric(cr *CycleResult) {
 		d.logf("cycle %d op_metric view: %v", cr.ID, err)
 		return
 	}
-	// Report only the rank→artifacts map (the center parses it as detector.OpMetric),
-	// not the {cycle,dir,ranks} envelope.
-	payload, err := json.Marshal(view.Ranks)
+	// Report only the rank→artifacts map + round token (the center parses ranks
+	// as detector.OpMetric). Old centers accept the same envelope via their
+	// {ranks:...} fallback, so this stays backward compatible.
+	payload, err := json.Marshal(map[string]any{
+		"round_token": cr.RoundToken,
+		"ranks":       view.Ranks,
+	})
 	if err != nil {
 		d.logf("cycle %d marshal op_metric: %v", cr.ID, err)
 		return

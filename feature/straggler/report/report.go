@@ -89,8 +89,9 @@ func GenerateReport(
 	sb.WriteString("\n")
 
 	// Detection summary.
+	status := detector.CategoryStatus(stepData, parallels, validRanks)
 	sb.WriteString(sepLine("检测结果摘要", reportSep))
-	sb.WriteString(detectionSummary(detectionResult, validRanks, calOnly))
+	sb.WriteString(detectionSummary(detectionResult, validRanks, calOnly, status))
 	sb.WriteString("\n")
 
 	// ZP_Kernel section.
@@ -362,6 +363,7 @@ func detectionSummary(
 	detectionResult map[string]map[string]float64,
 	validRanks []int,
 	calOnly bool,
+	status map[string]string,
 ) string {
 	var sb strings.Builder
 
@@ -388,12 +390,19 @@ func detectionSummary(
 
 	for _, cat := range categories {
 		data := detectionResult[cat.key]
-		status := "正常"
+		catStatus := status[cat.key]
+		// No usable input data: never present this as "正常". A partial dataset
+		// is still judged, but the status/detail say it was incomplete.
+		if catStatus == config.CategoryNoData {
+			sb.WriteString("  " + padEnd(cat.label, 22) + "  " + padEnd("数据不足", 10) + "  " + padEnd("-", 10) + "  —\n")
+			continue
+		}
+		statusText := "正常"
 		count := 0
 		var details []string
 
 		if len(data) > 0 {
-			status = "异常"
+			statusText = "异常"
 			count = len(data)
 			// Build detail strings (truncated).
 			for k, v := range data {
@@ -402,6 +411,9 @@ func detectionSummary(
 					break
 				}
 			}
+		}
+		if catStatus == config.CategoryPartial {
+			statusText += "(不完整)"
 		}
 
 		detailStr := "-"
@@ -412,7 +424,7 @@ func detectionSummary(
 			}
 		}
 
-		sb.WriteString("  " + padEnd(cat.label, 22) + "  " + padEnd(status, 10) + "  " + padEnd(strconv.Itoa(count), 10) + "  " + detailStr + "\n")
+		sb.WriteString("  " + padEnd(cat.label, 22) + "  " + padEnd(statusText, 10) + "  " + padEnd(strconv.Itoa(count), 10) + "  " + detailStr + "\n")
 	}
 
 	if calOnly {

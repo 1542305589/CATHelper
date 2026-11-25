@@ -56,7 +56,8 @@ func main() {
 	daemonPort := 8080
 	intervalSec := 600
 	collectWait := 60
-	profilerIterations := 1
+	profilerIterations := 3
+	allowLowIterations := false
 	profilerDir := ""
 	kpiDir := ""
 
@@ -82,6 +83,10 @@ func main() {
 		}
 		if arg == "--center" {
 			centerMode = true
+			continue
+		}
+		if arg == "--allow-low-iterations" {
+			allowLowIterations = true
 			continue
 		}
 		parts := strings.SplitN(arg, "=", 2)
@@ -114,7 +119,7 @@ func main() {
 			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
 				profilerIterations = parsed
 			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --profiler-iterations value, using default 1\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --profiler-iterations value, using default 3\n")
 			}
 		case "--profiler-dir":
 			profilerDir = val
@@ -188,8 +193,15 @@ func main() {
 	// Daemon mode: resident service (dynolog/dyno collection + HTTP).
 	// ─────────────────────────────────────────────────────────────────
 	if daemonMode {
+		if profilerIterations < 3 {
+			if !allowLowIterations {
+				fmt.Fprintf(os.Stderr, "ERROR: --profiler-iterations=%d is too low: a single idle step can make the whole round look normal. Use the default 3, or pass --allow-low-iterations for debugging.\n", profilerIterations)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: --profiler-iterations=%d (<3) allowed by --allow-low-iterations; results may be unreliable\n", profilerIterations)
+		}
 		if profilerDir == "" {
-			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=1]\n")
+			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=3] [--allow-low-iterations]\n")
 			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir (--kpi-dir is optional; omit to run profiler-only cycles)\n")
 			os.Exit(1)
 		}
@@ -423,6 +435,10 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 	if result == nil {
 		return nil, fmt.Errorf("detection returned no results")
 	}
+	status := detector.CategoryStatus(stepData, parallels, validRanks)
+	if detector.AllNoData(status) {
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: 未采集到有效 Profiler 数据（cal/comm/cpu 均 no_data），本轮不判定为正常\n")
+	}
 
 	// 7. Build node-aggregated result (the JSON goes into the combined output).
 	var profilerOut *utils.NodeOutput
@@ -431,9 +447,9 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 			ValidRanks: validRanks,
 			RankScores: detector.DebugRankScores(stepData, validRanks),
 		}
-		profilerOut, _ = utils.BuildNodeResult(result, parallels, debug)
+		profilerOut, _ = utils.BuildNodeResult(result, parallels, debug, status)
 	} else {
-		profilerOut, _ = utils.BuildNodeResult(result, parallels, nil)
+		profilerOut, _ = utils.BuildNodeResult(result, parallels, nil, status)
 	}
 
 	// 8. Text report (written to <inputPath>/analysis_result/detection_report.log;
@@ -442,9 +458,10 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 	reportText := report.GenerateReport(stepData, parallels, validRanks, result, inputPath)
 
 	return &daemon.DetectResult{
-		NodeOutput: profilerOut,
-		Summary:    summarizeProfiler(result),
-		Report:     reportText,
+		NodeOutput:     profilerOut,
+		Summary:        summarizeProfiler(result),
+		Report:         reportText,
+		CategoryStatus: status,
 	}, nil
 }
 

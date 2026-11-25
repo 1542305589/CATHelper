@@ -276,7 +276,7 @@ func (c *Center) handleBusinessKPIInterval(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	b.KPIDetectIntervalSec = req.IntervalSec
-	b.nextKPIDetect = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
+	b.NextKPIDetect = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
 	c.save()
 	c.mu.Unlock()
 	writeJSON(w, map[string]any{"business": name, "kpi_interval_sec": req.IntervalSec})

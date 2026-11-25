@@ -237,16 +237,27 @@ function renderStatus(s) {
   $('btnPause').disabled = s.state !== 'running';
 }
 
-function renderSummary(el, summary) {
-  if (!summary || !Object.keys(summary).length) return '—';
+function renderSummary(el, summary, categoryStatus) {
+  if (!summary && !categoryStatus) return '—';
   const order = ['cal','comm','cpu'];
   const parts = [];
   for (const k of order) {
-    if (summary[k] != null && summary[k] > 0) parts.push(`<span class="sum bad">${k}:${summary[k]}</span>`);
+    const st = categoryStatus ? categoryStatus[k] : '';
+    if (st === 'no_data') {
+      parts.push(`<span class="sum">${k}:数据不足</span>`);
+      continue;
+    }
+    if (summary && summary[k] != null && summary[k] > 0) {
+      parts.push(`<span class="sum bad">${k}:${summary[k]}</span>`);
+    } else if (st === 'partial') {
+      parts.push(`<span class="sum">${k}:数据不完整</span>`);
+    }
   }
-  for (const [k,v] of Object.entries(summary)) {
-    if (order.includes(k)) continue;
-    if (v > 0) parts.push(`<span class="sum">${k}:${v}</span>`);
+  if (summary) {
+    for (const [k,v] of Object.entries(summary)) {
+      if (order.includes(k)) continue;
+      if (v > 0) parts.push(`<span class="sum">${k}:${v}</span>`);
+    }
   }
   return parts.length ? parts.join('') : '正常';
 }
@@ -265,7 +276,7 @@ function renderHistory(cycles) {
       timeFmt(c.started_at),
       c.running ? '进行中…' : msFmt(c.duration_ms),
       c.dbs != null ? c.dbs : '—',
-      c.running ? '<span class="ptag on">运行中</span>' : (c.error ? `<span class="err">失败</span>` : renderSummary(null, c.summary)),
+      c.running ? '<span class="ptag on">运行中</span>' : (c.error ? `<span class="err">失败</span>` : renderSummary(null, c.summary, c.category_status)),
       c.kpi_status || '—',
     ];
     cells.forEach((h, i) => {

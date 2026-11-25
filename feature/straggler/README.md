@@ -94,7 +94,7 @@ cd feature/straggler
     --kpi-dir=/data/kpi \
     --interval=600 \
     --collect-wait=60 \
-    --profiler-iterations=1 \
+    --profiler-iterations=3 \
     --daemon-port=8080 \
     --cal-threshold=1.3 \
     --cpu-threshold=2.5
@@ -108,7 +108,7 @@ cd feature/straggler
 | `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler |
 | `--interval` | 否 | 600 | 检测周期（秒，≥60） |
 | `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | 否 | 1 | dyno nputrace 每轮采集迭代数 |
+| `--profiler-iterations` | 否 | 3 | dyno nputrace 每轮采集迭代数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
 | `--daemon-port` | 否 | 8080 | HTTP 端口 |
 | `--cal-threshold` | 否 | 1.3 | 慢计算阈值 |
 | `--cpu-threshold` | 否 | 2.5 | 慢CPU 阈值 |
@@ -590,7 +590,7 @@ daemon_results/<start>/
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 检测周期（秒，≥60） |
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | int | 否 | 1 | dyno nputrace 每轮采集迭代数 |
+| `--profiler-iterations` | int | 否 | 3 | dyno nputrace 每轮采集迭代数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
 
 ### 中心节点参数（`--center`）
 

@@ -334,7 +334,7 @@ bash build.sh          # 首次：架构检查 + 装 dyno/dynolog(.deb) + Python
     --interval=600 \                       # 可选：检测周期（秒，≥60，默认 600）
     --collect-wait=60 \                    # 可选：触发成功后等待采集完成秒数
     --daemon-port=8080 \                   # 可选：HTTP 端口（默认 8080）
-    --profiler-iterations=1 \              # 可选：dyno 采集迭代数（默认 1）
+    --profiler-iterations=3 \              # 可选：dyno 采集迭代数（默认 3；<3 需 --allow-low-iterations）
     --degradation=0.3                      # 可选：灵敏度（与一次性模式同义）
 ```
 

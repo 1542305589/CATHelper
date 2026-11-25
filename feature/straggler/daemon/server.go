@@ -95,6 +95,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		State:             state,
 		IntervalSec:       int64(interval.Seconds()),
 		CollectWait:       int64(d.cfg.CollectWait.Seconds()),
+		Iterations:        d.cfg.Iterations,
 		Thresholds:        d.Thresholds(),
 		DefaultThresholds: config.DefaultThresholds(),
 		Managed:           managed,
@@ -441,7 +442,13 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 	if !d.requireManagedKey(w, r) {
 		return
 	}
-	if err := d.Trigger(); err != nil {
+	// Optional body: {"round_token": "..."}. Old centers send no body; the
+	// daemon then reports without a token and the center falls back to time.
+	var req struct {
+		RoundToken string `json:"round_token"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := d.TriggerWithToken(req.RoundToken); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -463,22 +470,27 @@ func (d *Daemon) handleDaemonStop(w http.ResponseWriter, r *http.Request) {
 // center can compute the report timeout.
 func (d *Daemon) handleDaemonMatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CenterAddr string `json:"center_addr"`
-		Key        string `json:"key"`
-		Business   string `json:"business"`
-		Daemon     string `json:"daemon"`
+		CenterAddr  string `json:"center_addr"`
+		Key         string `json:"key"`
+		Business    string `json:"business"`
+		Daemon      string `json:"daemon"`
+		IntervalSec int64  `json:"interval_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CenterAddr == "" || req.Key == "" {
-		http.Error(w, `invalid body: {"center_addr","key","business","daemon"}`, http.StatusBadRequest)
+		http.Error(w, `invalid body: {"center_addr","key","business","daemon","interval_sec"}`, http.StatusBadRequest)
 		return
 	}
 	// The center may self-report a loopback/unspecified host; override the host
 	// with the request's source IP so the reverse heartbeat reaches it.
-	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon); err != nil {
+	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon, time.Duration(req.IntervalSec)*time.Second); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	writeJSON(w, map[string]any{"status": "matched", "collect_wait": int64(d.cfg.CollectWait.Seconds())})
+	writeJSON(w, map[string]any{
+		"status":                "matched",
+		"collect_wait":          int64(d.cfg.CollectWait.Seconds()),
+		"round_token_supported": true,
+	})
 }
 
 // resolveCenterAddr replaces centerAddr's host with the HTTP request's source IP,
@@ -545,15 +557,16 @@ func toCycleSummary(c *CycleResult) *cycleSummary {
 		return nil
 	}
 	return &cycleSummary{
-		ID:         c.ID,
-		StartedAt:  c.StartedAt,
-		FinishedAt: c.FinishedAt,
-		DurationMs: c.DurationMs,
-		DBs:        c.DBs,
-		DumpDir:    c.DumpDir,
-		Summary:    c.Summary,
-		KPIStatus:  c.KPIStatus,
-		Error:      c.Error,
+		ID:             c.ID,
+		StartedAt:      c.StartedAt,
+		FinishedAt:     c.FinishedAt,
+		DurationMs:     c.DurationMs,
+		DBs:            c.DBs,
+		DumpDir:        c.DumpDir,
+		Summary:        c.Summary,
+		CategoryStatus: c.CategoryStatus,
+		KPIStatus:      c.KPIStatus,
+		Error:          c.Error,
 	}
 }
 

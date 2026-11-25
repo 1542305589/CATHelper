@@ -79,6 +79,13 @@ func Current() Thresholds {
 	}
 }
 
+// Category data status values reported alongside the detection result.
+const (
+	CategoryOK      = "ok"      // every expected rank/group had usable data
+	CategoryPartial = "partial" // some expected ranks/groups had no usable data
+	CategoryNoData  = "no_data" // nothing usable at all (must not be "normal")
+)
+
 // DegradationData is the aggregated result of all detection categories.
 //
 // Outer keys: "cal", "comm", "cpu".

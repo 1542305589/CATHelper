@@ -27,8 +27,10 @@ type Daemon struct {
 	failCount   int    // consecutive healthz failures
 	matchState  string // "", "healthy", "unmatched", "other"
 
-	lastOpMetric detector.OpMetric // most recent reported op_metric (in-memory)
-	lastReportAt time.Time         // when the last report arrived
+	lastOpMetric   detector.OpMetric // most recent reported op_metric (in-memory)
+	lastReportAt   time.Time         // when the last report arrived
+	lastRoundToken string            // round token that came with lastOpMetric ("" = legacy daemon)
+	tokenCapable   bool              // daemon echoes the round token (declared at match time)
 }
 
 // Addr returns "ip:port".
@@ -38,8 +40,8 @@ func (d *Daemon) Addr() string { return fmt.Sprintf("%s:%d", d.IP, d.Port) }
 func (d *Daemon) BaseURL() string { return fmt.Sprintf("http://%s:%d", d.IP, d.Port) }
 
 // Business is one managed training task covering 1..N daemons (globally unique
-// ranks across them). Paused / cycle counters are persisted; nextTrigger is
-// runtime-only.
+// ranks across them). Paused / cycle counters / schedule deadlines are persisted
+// so a center restart resumes the same cadence instead of re-anchoring to now.
 type Business struct {
 	Name                   string            `json:"name"`
 	IntervalSec            int64             `json:"interval_sec"`
@@ -54,9 +56,10 @@ type Business struct {
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio,omitempty"` // anomaly points admitted into reference (0..1)
 	ReferenceSince         map[string]int64  `json:"reference_since,omitempty"`           // node -> reference window start ts
 
-	nextTrigger              time.Time    // next scheduled profiler trigger (in-memory)
+	NextTrigger              time.Time    `json:"next_trigger,omitempty"` // next scheduled profiler trigger (persisted)
 	triggering               bool         // a profiler trigger round is currently in flight (in-memory, single-flight)
-	nextKPIDetect            time.Time    // next scheduled KPI detection (in-memory)
+	pendingToken             string       // round token issued to daemons for the in-flight round (in-memory)
+	NextKPIDetect            time.Time    `json:"next_kpi_detect,omitempty"` // next scheduled KPI detection (persisted)
 	kpiDetecting             bool         // a KPI detection round is currently in flight (in-memory, single-flight)
 	kpiAnomalyStreak         int          // consecutive KPI detection runs with any anomaly (in-memory)
 	kpiProfilerCooldownUntil time.Time    // KPI-triggered profiler cooldown (in-memory)

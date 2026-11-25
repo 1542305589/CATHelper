@@ -166,16 +166,21 @@ func (c *Center) dueKPIBusinesses(now time.Time) []kpiDueBusiness {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]kpiDueBusiness, 0, len(c.biz))
+	changed := false
 	for name, b := range c.biz {
 		interval := kpiBusinessInterval(b, c.cfg.KPIDetectInterval)
-		if b.nextKPIDetect.IsZero() {
-			b.nextKPIDetect = now.Add(interval)
+		if b.NextKPIDetect.IsZero() {
+			b.NextKPIDetect = now.Add(interval)
+			changed = true
 		}
-		if now.Before(b.nextKPIDetect) || b.kpiDetecting {
+		if now.Before(b.NextKPIDetect) || b.kpiDetecting {
 			continue
 		}
 		b.kpiDetecting = true
 		out = append(out, kpiDueBusiness{name: name, interval: interval, ns: b.KPINSigma.Normalized(), refAdmitRatio: b.NormalizedKPIReferenceAdmitRatio(), referenceSince: copyInt64Map(b.ReferenceSince)})
+	}
+	if changed {
+		c.save()
 	}
 	return out
 }
@@ -184,7 +189,8 @@ func (c *Center) finishKPIDetection(name string, interval time.Duration) {
 	c.mu.Lock()
 	if b := c.biz[name]; b != nil {
 		b.kpiDetecting = false
-		b.nextKPIDetect = time.Now().Add(interval)
+		b.NextKPIDetect = time.Now().Add(interval)
+		c.save()
 	}
 	c.mu.Unlock()
 }

@@ -11,15 +11,16 @@ import (
 // history endpoint (ts + trigger time + duration + total rank count +
 // per-category anomaly counts).
 type cycleInfo struct {
-	Ts            string         `json:"ts"`
-	StartedAt     string         `json:"started_at"`
-	DurationMs    int64          `json:"duration_ms"`
-	WorldSize     int            `json:"world_size"`
-	Summary       map[string]int `json:"summary"`
-	TriggerReason string         `json:"trigger_reason,omitempty"`
-	FailureReason string         `json:"failure_reason,omitempty"`
-	Failed        bool           `json:"failed,omitempty"`
-	Running       bool           `json:"running,omitempty"` // in-flight round, prepended to history
+	Ts             string            `json:"ts"`
+	StartedAt      string            `json:"started_at"`
+	DurationMs     int64             `json:"duration_ms"`
+	WorldSize      int               `json:"world_size"`
+	Summary        map[string]int    `json:"summary"`
+	CategoryStatus map[string]string `json:"category_status,omitempty"`
+	TriggerReason  string            `json:"trigger_reason,omitempty"`
+	FailureReason  string            `json:"failure_reason,omitempty"`
+	Failed         bool              `json:"failed,omitempty"`
+	Running        bool              `json:"running,omitempty"` // in-flight round, prepended to history
 }
 
 // latestResultDir returns the newest per-cycle result dir under a business, or
@@ -60,13 +61,14 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 		ci := cycleInfo{Ts: ts, Summary: map[string]int{}}
 		if raw, err := os.ReadFile(filepath.Join(base, ts, "cycle.json")); err == nil {
 			var m struct {
-				StartedAt     string         `json:"started_at"`
-				DurationMs    int64          `json:"duration_ms"`
-				WorldSize     int            `json:"world_size"`
-				Summary       map[string]int `json:"summary"`
-				TriggerReason string         `json:"trigger_reason"`
-				FailureReason string         `json:"failure_reason"`
-				Failed        bool           `json:"failed"`
+				StartedAt      string            `json:"started_at"`
+				DurationMs     int64             `json:"duration_ms"`
+				WorldSize      int               `json:"world_size"`
+				Summary        map[string]int    `json:"summary"`
+				CategoryStatus map[string]string `json:"category_status"`
+				TriggerReason  string            `json:"trigger_reason"`
+				FailureReason  string            `json:"failure_reason"`
+				Failed         bool              `json:"failed"`
 			}
 			if json.Unmarshal(raw, &m) == nil {
 				ci.StartedAt = m.StartedAt
@@ -78,6 +80,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				if m.Summary != nil {
 					ci.Summary = m.Summary
 				}
+				ci.CategoryStatus = m.CategoryStatus
 			}
 		}
 		out = append(out, ci)
