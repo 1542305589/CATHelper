@@ -336,7 +336,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 		if cw := d.collectWait; cw > 0 && time.Duration(cw)*time.Second > timeout {
 			timeout = time.Duration(cw) * time.Second
 		}
-		d.lastReportAt = time.Time{} // reset: wait for a fresh report
+		d.lastReportAt = time.Time{} // reset: wait for this round's report
 	}
 	c.mu.Unlock()
 	timeout += reportBufferSec * time.Second
@@ -381,17 +381,17 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 
 	c.markMissingReports(b, triggerAt)
 
-	merged, freshDaemons := c.mergeOpMetric(b, triggerAt)
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt)
 	durationMs := time.Since(triggerAt).Milliseconds()
-	prog.step("合并本轮新鲜 op_metric: %d 个 rank（%d/%d 个守护进程）", len(merged), freshDaemons, healthy)
+	prog.step("合并本轮上报的 op_metric: %d 个 rank（%d/%d 个守护进程）", len(merged), reportedDaemons, healthy)
 
 	var failed bool
 	failureReason := ""
 	if len(merged) == 0 {
-		c.logf("business %s: no fresh op_metric reported in this round", b.Name)
-		prog.step("本轮无新鲜 op_metric，判定本轮 failed")
+		c.logf("business %s: no op_metric reported in this round", b.Name)
+		prog.step("本轮无 op_metric 上报，判定本轮失败")
 		failed = true
-		failureReason = "no fresh op_metric in round"
+		failureReason = "no op_metric reported in round"
 	} else {
 		prog.step("跨节点合并检测中 ...")
 		if err := c.detectAndStore(b, merged, triggerAt, durationMs); err != nil {
@@ -448,17 +448,17 @@ func (c *Center) triggerDaemon(d *Daemon) {
 }
 
 // mergeOpMetric merges only the op_metric reported in the CURRENT round.
-// A daemon whose lastReportAt is before triggerAt had no fresh report this
-// round; it is skipped even if it still holds a cached op_metric from an
-// earlier round, so a failed round can never be detected as a success.
+// A daemon whose lastReportAt is before triggerAt did not report this round; it
+// is skipped even if it still holds a cached op_metric from an earlier round, so
+// a failed round can never be detected as a success.
 func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time) (detector.OpMetric, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	merged := make(detector.OpMetric)
-	fresh := 0
+	reported := 0
 	for _, d := range b.Daemons {
 		if d.lastOpMetric != nil && !d.lastReportAt.Before(triggerAt) {
-			fresh++
+			reported++
 			for rank, r := range d.lastOpMetric {
 				merged[rank] = r
 			}
@@ -469,7 +469,7 @@ func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time) (detector.OpMet
 				d.Addr(), d.lastReportAt.UTC().Format(time.RFC3339), triggerAt.UTC().Format(time.RFC3339))
 		}
 	}
-	return merged, fresh
+	return merged, reported
 }
 
 // detectAndStore runs detection on the merged op_metric and stores the result

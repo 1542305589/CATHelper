@@ -14,14 +14,14 @@ func noopLogf(string, ...any) {}
 
 // A daemon that did not report this round must not contribute its cached
 // op_metric from an earlier round.
-func TestMergeOpMetricSkipsStaleDaemons(t *testing.T) {
+func TestMergeOpMetricSkipsUnreportedDaemons(t *testing.T) {
 	triggerAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
-	stale := &Daemon{
+	unreported := &Daemon{
 		IP: "10.0.0.1", Port: 8080, matchState: "healthy",
 		lastOpMetric: detector.OpMetric{"0": &detector.OpMetricRank{}},
 		lastReportAt: triggerAt.Add(-time.Minute),
 	}
-	fresh := &Daemon{
+	reported := &Daemon{
 		IP: "10.0.0.2", Port: 8080, matchState: "healthy",
 		lastOpMetric: detector.OpMetric{
 			"1": &detector.OpMetricRank{},
@@ -30,29 +30,29 @@ func TestMergeOpMetricSkipsStaleDaemons(t *testing.T) {
 		lastReportAt: triggerAt.Add(time.Second),
 	}
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
-	b := &Business{Name: "biz", Daemons: []*Daemon{stale, fresh}}
+	b := &Business{Name: "biz", Daemons: []*Daemon{unreported, reported}}
 
-	merged, freshDaemons := c.mergeOpMetric(b, triggerAt)
-	if freshDaemons != 1 {
-		t.Fatalf("fresh daemons = %d, want 1", freshDaemons)
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt)
+	if reportedDaemons != 1 {
+		t.Fatalf("reported daemons = %d, want 1", reportedDaemons)
 	}
 	if len(merged) != 2 {
 		t.Fatalf("merged ranks = %d, want 2 (only daemon B)", len(merged))
 	}
 	if _, ok := merged["0"]; ok {
-		t.Fatalf("stale rank 0 from daemon A was merged")
+		t.Fatalf("unreported rank 0 from daemon A was merged")
 	}
 	if _, ok := merged["1"]; !ok {
-		t.Fatalf("fresh rank 1 from daemon B missing")
+		t.Fatalf("reported rank 1 from daemon B missing")
 	}
 	if _, ok := merged["2"]; !ok {
-		t.Fatalf("fresh rank 2 from daemon B missing")
+		t.Fatalf("reported rank 2 from daemon B missing")
 	}
 }
 
 // No daemon reported this round: the merge must be empty so the caller marks
 // the round failed instead of re-detecting cached data.
-func TestMergeOpMetricNoFreshReturnsEmpty(t *testing.T) {
+func TestMergeOpMetricNoReportReturnsEmpty(t *testing.T) {
 	triggerAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{
@@ -63,9 +63,9 @@ func TestMergeOpMetricNoFreshReturnsEmpty(t *testing.T) {
 			lastOpMetric: nil, lastReportAt: time.Time{}},
 	}}
 
-	merged, freshDaemons := c.mergeOpMetric(b, triggerAt)
-	if freshDaemons != 0 {
-		t.Fatalf("fresh daemons = %d, want 0", freshDaemons)
+	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt)
+	if reportedDaemons != 0 {
+		t.Fatalf("reported daemons = %d, want 0", reportedDaemons)
 	}
 	if len(merged) != 0 {
 		t.Fatalf("merged ranks = %d, want 0", len(merged))
@@ -79,7 +79,7 @@ func TestWriteFailedCycleRecordsReasonAndNoArtifacts(t *testing.T) {
 	c := &Center{cfg: Config{DataDir: dir}, biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz"}
 	startedAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
-	const reason = "no fresh op_metric in round"
+	const reason = "no op_metric reported in round"
 	c.writeFailedCycle(b, startedAt, 1234, "timer", reason)
 
 	cycleDir := filepath.Join(dir, "biz", startedAt.Format("20060102-150405"))
