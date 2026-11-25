@@ -56,7 +56,6 @@ type Business struct {
 	Iterations             int               `json:"iterations,omitempty"`                // dyno nputrace iterations pushed to every daemon (0 = legacy, defaults to 3)
 	KPINSigma              KPINSigma         `json:"kpi_nsigma,omitempty"`                // per-metric KPI n-sigma thresholds
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio,omitempty"` // anomaly points admitted into reference (0..1)
-	ReferenceSince         map[string]int64  `json:"reference_since,omitempty"`           // node -> reference window start ts
 
 	NextTrigger              time.Time    `json:"next_trigger,omitempty"` // next scheduled profiler trigger (persisted)
 	triggering               bool         // a profiler trigger round is currently in flight (in-memory, single-flight)

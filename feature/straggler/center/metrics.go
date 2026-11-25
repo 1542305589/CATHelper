@@ -219,17 +219,18 @@ func (m *metricsStore) snapshot(business string) map[string]any {
 }
 
 // loadSnapshot is the /metrics-derived load state used by KPI detection.
-// It is observe-only for now: it is stored with each detection run but does not
-// change global_shift, profiler triggering, or reference-window behavior.
+// Fresh means a scrape arrived in the last 60s; MinEngineRunning is the smallest
+// latest running value across engines; aicore_util comes from KPI samples.
 type loadSnapshot struct {
-	Reqs5m         float64
-	RunningP90     float64
-	RunningMax     float64
-	BaselineReqs5m float64
-	LoadRatio      float64
-	Points         int
-	BaselinePoints int
-	Fresh          bool
+	Reqs5m           float64
+	RunningP90       float64
+	RunningMax       float64
+	MinEngineRunning float64
+	BaselineReqs5m   float64
+	LoadRatio        float64
+	Points           int
+	BaselinePoints   int
+	Fresh            bool
 }
 
 // LoadSnapshot aggregates the current 5-minute request window and a 5-hour
@@ -294,9 +295,39 @@ func (m *metricsStore) LoadSnapshot(business string, now int64) loadSnapshot {
 		ratio = reqs / baseline
 	}
 	fresh := m.lastAt[business] > 0 && now-m.lastAt[business] <= 60
+	// "Every engine's latest running >= 1", using only engines that reported at
+	// the business's latest scrape timestamp. A stale engine is ignored rather
+	// than counted as running=0 (one quiet engine must not hide the others).
+	latestTs := int64(-1)
+	for _, e := range eng {
+		for _, p := range e.points {
+			if p.Ts >= since && p.Ts <= now && p.Ts > latestTs {
+				latestTs = p.Ts
+			}
+		}
+	}
+	minRunning := math.Inf(1)
+	participants := 0
+	if latestTs >= 0 {
+		for _, e := range eng {
+			for _, p := range e.points {
+				if p.Ts == latestTs {
+					participants++
+					if p.Running < minRunning {
+						minRunning = p.Running
+					}
+					break
+				}
+			}
+		}
+	}
+	if participants == 0 || math.IsInf(minRunning, 1) {
+		minRunning = 0
+	}
 	return loadSnapshot{
 		Reqs5m: reqs, RunningP90: p90, RunningMax: maxFloat(running),
-		BaselineReqs5m: baseline, LoadRatio: ratio,
+		MinEngineRunning: minRunning,
+		BaselineReqs5m:   baseline, LoadRatio: ratio,
 		Points: points, BaselinePoints: basePoints, Fresh: fresh,
 	}
 }
@@ -308,22 +339,17 @@ func maxFloat(v []float64) float64 {
 	return v[len(v)-1]
 }
 
-// classifyLoad maps /metrics load signals to idle/low/active/transition/unknown.
-func classifyLoad(s loadSnapshot) string {
+// classifyLoad maps /metrics + aicore_util signals to the two-class activity
+// state: active, not_active, or unknown (no fresh vLLM metrics). Active requires
+// every engine's latest running >= 1 and the node's aicore_util median >= 25%.
+func classifyLoad(s loadSnapshot, utilMedian float64) string {
 	if !s.Fresh || s.Points == 0 {
 		return "unknown"
 	}
-	reqs, base, running := s.Reqs5m, s.BaselineReqs5m, s.RunningP90
-	if running == 0 && (base <= 0 || reqs < math.Max(1, 0.05*base)) {
-		return "idle"
+	if s.MinEngineRunning < kpiActiveRunningMin || utilMedian < kpiActiveUtilMedianPct {
+		return "not_active"
 	}
-	if (base > 0 && reqs >= math.Max(3, 0.30*base)) || running >= 2 {
-		return "active"
-	}
-	if running <= 1 || (base > 0 && reqs < math.Max(2, 0.10*base)) {
-		return "low"
-	}
-	return "transition"
+	return "active"
 }
 
 // parseVLLMMetrics extracts cumulative sum/count for TTFT and TPOT per engine

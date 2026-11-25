@@ -1,6 +1,7 @@
 package center
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -314,6 +315,136 @@ func TestKPIStoreDetectRunsAndRecentAnomalies(t *testing.T) {
 	}
 	if len(anomalies) != 1 || anomalies[0].Device != 3 || anomalies[0].Metric != "power" {
 		t.Fatalf("anomalies = %+v", anomalies)
+	}
+}
+
+// Anomalies must round-trip the multi-baseline center/ratio fields.
+func TestKPIStoreAnomalyCenterRatio(t *testing.T) {
+	s := testKPIStore(t)
+	if err := s.InsertAnomalies([]kpiAnomaly{{
+		Business: "biz", Node: "node-a", Device: 3, Ts: 100,
+		Metric: "power", Kind: "space", Value: 140, Center: 100, Ratio: 1.4,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	at, err := s.AnomaliesAt("biz", 100)
+	if err != nil {
+		t.Fatalf("AnomaliesAt: %v", err)
+	}
+	if len(at) != 1 || at[0].Center != 100 || at[0].Ratio != 1.4 {
+		t.Fatalf("AnomaliesAt = %+v, want center=100 ratio=1.4", at)
+	}
+	recent, err := s.RecentAnomalies("biz", 10)
+	if err != nil {
+		t.Fatalf("RecentAnomalies: %v", err)
+	}
+	if len(recent) != 1 || recent[0].Center != 100 || recent[0].Ratio != 1.4 {
+		t.Fatalf("RecentAnomalies = %+v, want center=100 ratio=1.4", recent)
+	}
+}
+
+// An existing table without center/ratio is migrated in place (old rows keep 0).
+func TestKPIStoreAnomalyCenterRatioMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kpi.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE kpi_anomaly (
+		business TEXT NOT NULL,
+		node TEXT NOT NULL,
+		device INTEGER NOT NULL,
+		ts INTEGER NOT NULL,
+		metric TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		value REAL NOT NULL,
+		median REAL NOT NULL,
+		mad REAL NOT NULL,
+		z REAL NOT NULL,
+		reference_admitted INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (business, node, device, ts, metric, kind)
+	)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	_ = db.Close()
+
+	s, err := newKPIStore(path, nil)
+	if err != nil {
+		t.Fatalf("newKPIStore(migrate): %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.InsertAnomalies([]kpiAnomaly{{
+		Business: "biz", Node: "node-a", Device: 0, Ts: 200,
+		Metric: "aicore_freq", Kind: "space", Value: 1200, Center: 1500, Ratio: 0.8,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	at, err := s.AnomaliesAt("biz", 200)
+	if err != nil {
+		t.Fatalf("AnomaliesAt after migration: %v", err)
+	}
+	if len(at) != 1 || at[0].Center != 1500 || at[0].Ratio != 0.8 {
+		t.Fatalf("migrated anomaly = %+v, want center=1500 ratio=0.8", at)
+	}
+}
+
+// An existing kpi_detect_run table with the obsolete global_shift column is
+// migrated by dropping it; DetectRuns still works afterwards.
+func TestKPIStoreDropsGlobalShiftColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kpi.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE kpi_detect_run (
+		business TEXT NOT NULL,
+		node TEXT NOT NULL,
+		ts INTEGER NOT NULL,
+		devices INTEGER NOT NULL,
+		anomalies INTEGER NOT NULL,
+		flagged INTEGER NOT NULL,
+		reference_invalid INTEGER NOT NULL,
+		global_shift INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (business, node, ts)
+	)`); err != nil {
+		t.Fatalf("create legacy run table: %v", err)
+	}
+	_ = db.Close()
+
+	s, err := newKPIStore(path, nil)
+	if err != nil {
+		t.Fatalf("newKPIStore(migrate run): %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	rows, err := s.db.Query(`PRAGMA table_info(kpi_detect_run)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasShift := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if name == "global_shift" {
+			hasShift = true
+		}
+	}
+	rows.Close()
+	if hasShift {
+		t.Fatal("global_shift column still present after migration")
+	}
+	if err := s.InsertDetectRun(kpiDetectRun{Business: "biz", Node: "node-a", Ts: 100, Devices: 4, LoadState: "active"}); err != nil {
+		t.Fatalf("InsertDetectRun after migration: %v", err)
+	}
+	runs, err := s.DetectRuns("biz", 10)
+	if err != nil || len(runs) != 1 || runs[0].LoadState != "active" {
+		t.Fatalf("DetectRuns after migration = %+v, %v", runs, err)
 	}
 }
 

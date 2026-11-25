@@ -15,24 +15,6 @@ func TestKPIMedianMAD(t *testing.T) {
 	}
 }
 
-func TestKPIFilterWorkingReference(t *testing.T) {
-	ref := []kpiRefPoint{
-		{Ts: 1, Metrics: map[string]float64{"aicore_freq": 1800}},
-		{Ts: 2, Metrics: map[string]float64{"aicore_freq": 1800}},
-		{Ts: 3, Metrics: map[string]float64{"aicore_freq": 1800}},
-		{Ts: 4, Metrics: map[string]float64{"aicore_freq": 800}},
-	}
-	got := filterWorkingReference(ref, 1800)
-	if len(got) != 3 {
-		t.Fatalf("filtered len = %d, want 3: %+v", len(got), got)
-	}
-	for _, point := range got {
-		if point.Metrics["aicore_freq"] != 1800 {
-			t.Errorf("kept non-working point: %+v", point)
-		}
-	}
-}
-
 func TestKPIAggregateCurrent(t *testing.T) {
 	samples := []kpiStoredSample{
 		{Device: 0, Ts: 100, Metrics: map[string]float64{"power": 10, "aicore_freq": 1800}},
@@ -66,7 +48,7 @@ func TestKPIDetectorSpaceAnomaly(t *testing.T) {
 	if _, err := c.kpi.Insert("biz", "d1", "node-a", samples); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.kpiDet.runForBusiness("biz", defaultKPIDetectInterval, DefaultKPINSigma(), DefaultKPIReferenceAdmitRatio, nil); err != nil {
+	if _, err := c.kpiDet.runForBusiness("biz", defaultKPIDetectInterval, DefaultKPINSigma(), DefaultKPIReferenceAdmitRatio); err != nil {
 		t.Fatalf("runForBusiness: %v", err)
 	}
 	var count int
@@ -76,15 +58,25 @@ func TestKPIDetectorSpaceAnomaly(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("space anomaly count = %d, want 1", count)
 	}
+	var center, ratio float64
+	if err := c.kpi.db.QueryRow(`SELECT center, ratio FROM kpi_anomaly WHERE business='biz' AND kind='space' AND device=3 AND metric='power'`).Scan(&center, &ratio); err != nil {
+		t.Fatal(err)
+	}
+	if center != 100 || ratio != 10 {
+		t.Fatalf("space anomaly center/ratio = (%v, %v), want (100, 10)", center, ratio)
+	}
 }
 
-func TestKPIDetectorTimeAnomaly(t *testing.T) {
+// Only the space dimension is active: a device that would have been a time
+// anomaly (far from its own history) is judged against its peers instead, and no
+// kind='time' rows are written.
+func TestKPIDetectorSpaceOnly(t *testing.T) {
 	c := New(Config{DataDir: t.TempDir(), Port: 1})
 	defer func() { _ = c.kpi.Close() }()
 	c.biz["biz"] = &Business{Name: "biz"}
 	now := int64(10000)
 
-	ref := make([]kpiSample, 0, kpiMinReferencePoints)
+	ref := make([]kpiSample, 0, kpiMinReferencePoints*10)
 	for i := 0; i < kpiMinReferencePoints*10; i++ {
 		ref = append(ref, kpiSample{
 			Ts: now - 2000 + int64(i),
@@ -101,19 +93,27 @@ func TestKPIDetectorTimeAnomaly(t *testing.T) {
 		Vals: map[string]map[string]float64{
 			"0": {"power": 1000, "aicore_freq": 1800},
 			"1": {"power": 100, "aicore_freq": 1800},
+			"2": {"power": 100, "aicore_freq": 1800},
 		},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.kpiDet.runForBusiness("biz", defaultKPIDetectInterval, DefaultKPINSigma(), DefaultKPIReferenceAdmitRatio, nil); err != nil {
+	if _, err := c.kpiDet.runForBusiness("biz", defaultKPIDetectInterval, DefaultKPINSigma(), DefaultKPIReferenceAdmitRatio); err != nil {
 		t.Fatalf("runForBusiness: %v", err)
 	}
-	var count int
-	if err := c.kpi.db.QueryRow(`SELECT COUNT(*) FROM kpi_anomaly WHERE business='biz' AND kind='time' AND device=0 AND metric='power'`).Scan(&count); err != nil {
+	var timeCount int
+	if err := c.kpi.db.QueryRow(`SELECT COUNT(*) FROM kpi_anomaly WHERE business='biz' AND kind='time'`).Scan(&timeCount); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("time anomaly count = %d, want 1", count)
+	if timeCount != 0 {
+		t.Fatalf("time anomaly count = %d, want 0 (space dimension only)", timeCount)
+	}
+	var spaceCount int
+	if err := c.kpi.db.QueryRow(`SELECT COUNT(*) FROM kpi_anomaly WHERE business='biz' AND kind='space' AND device=0 AND metric='power'`).Scan(&spaceCount); err != nil {
+		t.Fatal(err)
+	}
+	if spaceCount != 1 {
+		t.Fatalf("space anomaly count = %d, want 1", spaceCount)
 	}
 }
 
@@ -133,8 +133,8 @@ func TestKPIRecordAnomalyStreak(t *testing.T) {
 		t.Fatalf("streak after normal = %d, want 0", b.kpiAnomalyStreak)
 	}
 	c.recordKPIAnomaly("biz", true, "active")
-	c.recordKPIAnomaly("biz", true, "low")
+	c.recordKPIAnomaly("biz", true, "not_active")
 	if b.kpiAnomalyStreak != 0 {
-		t.Fatalf("streak after low load = %d, want 0", b.kpiAnomalyStreak)
+		t.Fatalf("streak after not_active load = %d, want 0", b.kpiAnomalyStreak)
 	}
 }

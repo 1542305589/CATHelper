@@ -479,7 +479,7 @@ curl -s -X POST localhost:8080/daemon/stop
 | `GET /center/business/{name}/kpi/devices` | 业务最新 KPI 中出现过的节点/device 列表（忽略 allowlist，供控制台选择） |
 | `GET /center/business/{name}/console/kpi` | 业务控制台 KPI 检测 tab：最近检测运行与异常 |
 
-中心 KPI 检测连续 3 次出现**非全局漂移**的真实异常时，会自动触发一次该业务的 profiler 检测，触发后 10 分钟冷却；冷却期内不重复触发。同一 node/metric 连续 3 轮 `flagged >= 3` 且占比 >= 50% 时判定为全局漂移：回溯豁免这 3 轮异常、标记 `global_shift`、刷新参考窗口，且不触发 profiler。KPI n-sigma 可在业务控制台按 metric 和维度分别设置，默认 power/util 时间/空间 4，freq 时间/空间 3。
+中心 KPI 检测只做**空间维度**：每个指标、每轮对当前设备值做一次 1D KMeans（先 z-score，肘部法选 K=2..min(n,10)，kmeans++ seed 42），成员数最多的簇（并列则全部）作为 baseline；`v<=0` 不参与聚类；值落在任一 baseline 的 0.7~1.3 闭区间内为正常，否则记录异常（异常明细包含 `center` / `ratio`，最近 baseline 按 `|value/center-1|` 比值距离选取）。`active` 门控：business 最新时间戳上的每个 engine running ≥ 1（过期 engine 忽略）且 16 卡 `aicore_util` 中位数 ≥ 25%；没有新鲜 vLLM metrics 时为 `unknown`（不判 active / not_active）。参考窗口保留 50000 点 / 48h，只用于参考数据充足性和未来时间维度，不参与空间 baseline。连续 3 次 `active` 状态下的真实异常会自动触发一次该业务的 profiler 检测，触发后 10 分钟冷却。`global_shift`、`filterWorkingReference`、`kpiFreqTolerance` 已删除；KPI n-sigma 配置仍保留在结构和 API 中，但当前多基线带宽检测不使用 z 分数。
 | `GET /center/business/{name}/kpi/filter` | 查看节点 device 过滤（allowlist） |
 | `POST /center/business/{name}/kpi/filter` | 设置节点 device 过滤 `{"node","devices":[...],"filter_all":bool}`；空数组且 `filter_all=false`=不过滤，`filter_all=true`=全部 device 被过滤 |
 | `GET /center/business/{name}/history` | 业务检测历史 |
@@ -650,7 +650,7 @@ Profiler 模式（每个阈值独立可调，不再由 degradation 派生）:
 | Profiler 检测失败 | 只记录错误，KPI 检查照常执行（互不阻塞） |
 | Profiler 单节点 | 慢CPU 无法检测，stdout 不显示该行 |
 | Profiler 无并行拓扑 | 降级为仅慢计算（cal-only）检测 |
-| `aicore_freq` 轻度降频 | 簇比例未超阈值 → 空间不标记（时间维度已移除，无其他兜底） |
+| `aicore_freq` 轻度降频 | 空间多基线带宽未命中 → 不标记（时间维度已移除，无其他兜底） |
 
 ---
 

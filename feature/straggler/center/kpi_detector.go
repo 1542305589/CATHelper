@@ -11,36 +11,37 @@ import (
 )
 
 const (
-	defaultKPIDetectInterval    = 10 * time.Second
-	kpiDetectTick               = time.Second
-	kpiAggregationWindowSec     = 30
-	kpiReferenceLimit           = 10000
-	kpiMinReferencePoints       = 100
-	kpiSpaceMinDevices          = 3
-	kpiFreqTolerance            = 0.01
-	kpiGlobalShiftCandidateRuns = 3
-	kpiGlobalShiftConfirmRuns   = 10
-	kpiGlobalShiftMinRatio      = 0.8
-	kpiGlobalShiftCooldown      = 30 * time.Minute
-	kpiSampleRetention          = 48 * time.Hour
-	kpiAnomalyRetention         = 30 * 24 * time.Hour
-	vllmMetricsRetention        = 7 * 24 * time.Hour
+	defaultKPIDetectInterval = 10 * time.Second
+	kpiDetectTick            = time.Second
+	kpiAggregationWindowSec  = 30
+	kpiReferenceLimit        = 50000
+	kpiMinReferencePoints    = 100
+	kpiSpaceMinDevices       = 3
+	kpiActiveRunningMin      = 1.0
+	kpiActiveUtilMedianPct   = 25.0
+	kpiEnableTimeDimension   = false
+	kpiSampleRetention       = 48 * time.Hour
+	kpiAnomalyRetention      = 30 * 24 * time.Hour
+	vllmMetricsRetention     = 7 * 24 * time.Hour
 )
 
 // kpiMetricSpec defines one detected metric. absolute=true means |z| > n is
 // anomalous; absolute=false means only z < -n (low-side) is anomalous.
+// timeN is retained for the (disabled) time dimension; space detection uses the
+// multi-baseline band below instead of these z-score fields.
 type kpiMetricSpec struct {
-	name     string
-	timeN    float64
-	spaceN   float64
-	madFloor float64
-	absolute bool
+	name        string
+	timeN       float64
+	spaceN      float64
+	madFloor    float64
+	madFloorPct float64
+	absolute    bool
 }
 
 var kpiMetricSpecs = []kpiMetricSpec{
 	{name: "power", timeN: 4, spaceN: 4, madFloor: 5, absolute: true},
 	{name: "aicore_util", timeN: 4, spaceN: 4, madFloor: 5, absolute: true},
-	{name: "aicore_freq", timeN: 3, spaceN: 3, madFloor: 5, absolute: false},
+	{name: "aicore_freq", timeN: 3, spaceN: 3, madFloor: 5, madFloorPct: 0.0675, absolute: false},
 }
 
 type kpiStats struct {
@@ -55,47 +56,31 @@ type kpiDetector struct {
 	metrics *metricsStore
 	logf    func(format string, args ...any)
 
-	mu            sync.Mutex
-	lastDetected  map[string]int64   // business|node -> last detection ts
-	shiftCounts   map[string][]int64 // business|node|metric -> consecutive global-shift ts
-	shiftCooldown map[string]int64   // business|node -> global-shift cooldown until
+	mu           sync.Mutex
+	lastDetected map[string]int64 // business|node -> last detection ts
 }
 
 func newKPIDetector(store *kpiStore, metrics *metricsStore, logf func(format string, args ...any)) *kpiDetector {
 	return &kpiDetector{
-		store:         store,
-		metrics:       metrics,
-		logf:          logf,
-		lastDetected:  make(map[string]int64),
-		shiftCounts:   make(map[string][]int64),
-		shiftCooldown: make(map[string]int64),
+		store:        store,
+		metrics:      metrics,
+		logf:         logf,
+		lastDetected: make(map[string]int64),
 	}
 }
 
 // kpiCycleResult is one business detection cycle's outcome.
 type kpiCycleResult struct {
-	Detected             bool
-	RealAnomaly          bool
-	LoadState            string
-	GlobalShiftCandidate bool
-	GlobalShiftConfirmed bool
-	GlobalShiftEvents    []kpiGlobalShiftEvent
-}
-
-// kpiGlobalShiftEvent is a confirmed global drift for one metric.
-type kpiGlobalShiftEvent struct {
-	Node   string
-	Metric string
-	TsList []int64
-	Since  int64
+	Detected    bool
+	RealAnomaly bool
+	LoadState   string
 }
 
 type kpiDueBusiness struct {
-	name           string
-	interval       time.Duration
-	ns             KPINSigma
-	refAdmitRatio  float64
-	referenceSince map[string]int64
+	name          string
+	interval      time.Duration
+	ns            KPINSigma
+	refAdmitRatio float64
 }
 
 func (c *Center) kpiRetentionLoop(ctx context.Context) {
@@ -137,25 +122,15 @@ func (c *Center) kpiDetectLoop(ctx context.Context) {
 			for _, due := range c.dueKPIBusinesses(now) {
 				go func(due kpiDueBusiness) {
 					defer c.finishKPIDetection(due.name, due.interval)
-					res, err := c.kpiDet.runForBusiness(due.name, due.interval, due.ns, due.refAdmitRatio, due.referenceSince)
+					res, err := c.kpiDet.runForBusiness(due.name, due.interval, due.ns, due.refAdmitRatio)
 					if err != nil {
 						c.logf("KPI detection: business=%s: %v", due.name, err)
 						return
 					}
-					if len(res.GlobalShiftEvents) > 0 {
-						c.applyGlobalShift(due.name, res.GlobalShiftEvents)
-					}
 					if !res.Detected {
 						return
 					}
-					if res.GlobalShiftConfirmed {
-						c.resetKPIAnomalyStreak(due.name)
-					}
-					if res.RealAnomaly {
-						c.recordKPIAnomaly(due.name, true, res.LoadState)
-					} else if !res.GlobalShiftConfirmed {
-						c.recordKPIAnomaly(due.name, false, res.LoadState)
-					}
+					c.recordKPIAnomaly(due.name, res.RealAnomaly, res.LoadState)
 				}(due)
 			}
 		}
@@ -177,7 +152,7 @@ func (c *Center) dueKPIBusinesses(now time.Time) []kpiDueBusiness {
 			continue
 		}
 		b.kpiDetecting = true
-		out = append(out, kpiDueBusiness{name: name, interval: interval, ns: b.KPINSigma.Normalized(), refAdmitRatio: b.NormalizedKPIReferenceAdmitRatio(), referenceSince: copyInt64Map(b.ReferenceSince)})
+		out = append(out, kpiDueBusiness{name: name, interval: interval, ns: b.KPINSigma.Normalized(), refAdmitRatio: b.NormalizedKPIReferenceAdmitRatio()})
 	}
 	if changed {
 		c.save()
@@ -205,14 +180,12 @@ func kpiBusinessInterval(b *Business, def time.Duration) time.Duration {
 	return defaultKPIDetectInterval
 }
 
-func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns KPINSigma, refAdmitRatio float64, referenceSince map[string]int64) (kpiCycleResult, error) {
+func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns KPINSigma, refAdmitRatio float64) (kpiCycleResult, error) {
 	var res kpiCycleResult
 	load := loadSnapshot{}
 	if d.metrics != nil {
 		load = d.metrics.LoadSnapshot(business, time.Now().Unix())
 	}
-	loadState := classifyLoad(load)
-	res.LoadState = loadState
 	nodes, err := d.store.NodesDevices(business)
 	if err != nil {
 		return res, err
@@ -259,47 +232,28 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 		if len(current) == 0 {
 			continue
 		}
-
-		res.Detected = true
-		referenceInvalid := false
-		refSince := referenceSince[node]
-		var anomalies []kpiAnomaly
-
-		// Time dimension: each device against its own reference window.
-		for device, metrics := range current {
-			ref, err := d.store.ReferenceSamples(business, node, device, refSince, since, windowSec, kpiReferenceLimit)
-			if err != nil {
-				d.logf("KPI detection: reference %s/%s/device %d: %v", business, node, device, err)
-				continue
-			}
-			ref = aggregateReference(ref, windowSec)
-			ref = filterWorkingReference(ref, metrics["aicore_freq"])
-			if len(ref) < kpiMinReferencePoints {
-				referenceInvalid = true
-				continue
-			}
-			stats := computeMetricStats(ref)
-			for _, spec := range kpiMetricSpecs {
-				value, ok := metrics[spec.name]
-				if !ok {
-					continue
-				}
-				st, ok := stats[spec.name]
-				if !ok {
-					continue
-				}
-				z := modifiedZ(value, st.median, st.mad, spec.madFloor)
-				if isKPIAnomaly(z, ns.TimeN(spec.name), spec.absolute) {
-					anomalies = append(anomalies, kpiAnomaly{
-						Business: business, Node: node, Device: device, Ts: now,
-						Metric: spec.name, Kind: "time", Value: value,
-						Median: st.median, Mad: st.mad, Z: z,
-					})
-				}
+		utilValues := make([]float64, 0, len(current))
+		for _, metrics := range current {
+			if value, ok := metrics["aicore_util"]; ok {
+				utilValues = append(utilValues, value)
 			}
 		}
+		nodeLoadState := classifyLoad(load, median(utilValues))
+		res.LoadState = mergeLoadState(res.LoadState, nodeLoadState)
 
-		// Space dimension: same node, same detection window, per metric.
+		res.Detected = true
+		var anomalies []kpiAnomaly
+
+		// Space dimension only: per metric, cluster the current round's device
+		// values into baselines and flag values outside the 0.7-1.3 band. No
+		// cross-time comparison is performed.
+		referenceInvalid := false
+		refSince := since - int64(kpiSampleRetention.Seconds())
+		if refCount, err := d.store.ReferenceCount(business, node, refSince, since, windowSec); err != nil {
+			d.logf("KPI detection: reference count %s/%s: %v", business, node, err)
+		} else if refCount < kpiMinReferencePoints {
+			referenceInvalid = true
+		}
 		if len(current) >= kpiSpaceMinDevices {
 			for _, spec := range kpiMetricSpecs {
 				values := make(map[int]float64)
@@ -311,17 +265,13 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 				if len(values) < kpiSpaceMinDevices {
 					continue
 				}
-				median, mad := medianMAD(valuesToSlice(values))
-				mad = effectiveMAD(mad, spec.madFloor)
-				for device, value := range values {
-					z := modifiedZ(value, median, mad, spec.madFloor)
-					if isKPIAnomaly(z, ns.SpaceN(spec.name), spec.absolute) {
-						anomalies = append(anomalies, kpiAnomaly{
-							Business: business, Node: node, Device: device, Ts: now,
-							Metric: spec.name, Kind: "space", Value: value,
-							Median: median, Mad: mad, Z: z,
-						})
-					}
+				_, bandAnomalies := DetectMajorBand(values)
+				for _, a := range bandAnomalies {
+					anomalies = append(anomalies, kpiAnomaly{
+						Business: business, Node: node, Device: a.Device, Ts: now,
+						Metric: spec.name, Kind: "space", Value: a.Value,
+						Median: a.Center, Center: a.Center, Ratio: a.Ratio,
+					})
 				}
 			}
 		}
@@ -340,83 +290,26 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 			}
 		}
 
-		// Store anomalies first; only successfully stored anomalies may drive
-		// global-shift state, so a DB failure cannot create a 0/0 global_shift run.
 		if err := d.store.InsertAnomalies(anomalies); err != nil {
 			d.logf("KPI detection: store anomalies %s/%s: %v", business, node, err)
 			anomalies = nil
-		}
-
-		// Global-shift detection is load-gated: only active workloads can build
-		// or confirm a shift. Idle/low/transition clears any candidate and never
-		// rebuilds the reference window.
-		metricDevices := make(map[string]map[int]bool)
-		for _, a := range anomalies {
-			if metricDevices[a.Metric] == nil {
-				metricDevices[a.Metric] = make(map[int]bool)
-			}
-			metricDevices[a.Metric][a.Device] = true
-		}
-		cooldownKey := business + "|" + node
-		d.mu.Lock()
-		shiftCooling := now < d.shiftCooldown[cooldownKey]
-		d.mu.Unlock()
-		eligible := loadState == "active" && !referenceInvalid && !shiftCooling
-		for _, spec := range kpiMetricSpecs {
-			key := business + "|" + node + "|" + spec.name
-			if !eligible {
-				d.mu.Lock()
-				delete(d.shiftCounts, key)
-				d.mu.Unlock()
-				continue
-			}
-			fm := metricDevices[spec.name]
-			ratio := 0.0
-			if len(current) > 0 {
-				ratio = float64(len(fm)) / float64(len(current))
-			}
-			if len(fm) >= 3 && ratio >= kpiGlobalShiftMinRatio {
-				d.mu.Lock()
-				state := append(d.shiftCounts[key], now)
-				if len(state) > kpiGlobalShiftConfirmRuns {
-					state = state[len(state)-kpiGlobalShiftConfirmRuns:]
-				}
-				d.shiftCounts[key] = state
-				candidate := len(state) >= kpiGlobalShiftCandidateRuns
-				confirmed := len(state) >= kpiGlobalShiftConfirmRuns
-				if confirmed {
-					delete(d.shiftCounts, key)
-					d.shiftCooldown[cooldownKey] = now + int64(kpiGlobalShiftCooldown.Seconds())
-				}
-				d.mu.Unlock()
-				if confirmed {
-					res.GlobalShiftConfirmed = true
-					res.GlobalShiftEvents = append(res.GlobalShiftEvents, kpiGlobalShiftEvent{
-						Node: node, Metric: spec.name, TsList: state,
-						Since: state[0] - windowSec,
-					})
-				} else if candidate {
-					res.GlobalShiftCandidate = true
-					d.logf("KPI global shift candidate: %s/%s metric=%s runs=%d load=%s", business, node, spec.name, len(state), loadState)
-				}
-			} else {
-				d.mu.Lock()
-				delete(d.shiftCounts, key)
-				d.mu.Unlock()
-			}
 		}
 
 		flagged := make(map[int]bool)
 		for _, a := range anomalies {
 			flagged[a.Device] = true
 		}
-		res.RealAnomaly = res.RealAnomaly || len(anomalies) > 0
+		// Only active-node anomalies count toward the profiler-trigger streak;
+		// not_active / unknown rounds are recorded but never trigger.
+		if nodeLoadState == "active" && len(anomalies) > 0 {
+			res.RealAnomaly = true
+		}
 
 		if err := d.store.InsertDetectRun(kpiDetectRun{
 			Business: business, Node: node, Ts: now, Devices: len(current),
 			Anomalies: len(anomalies), Flagged: len(flagged),
-			ReferenceInvalid: referenceInvalid, GlobalShift: res.GlobalShiftConfirmed,
-			LoadState: loadState, Reqs5m: load.Reqs5m, RunningP90: load.RunningP90,
+			ReferenceInvalid: referenceInvalid,
+			LoadState:        nodeLoadState, Reqs5m: load.Reqs5m, RunningP90: load.RunningP90,
 			LoadRatio: load.LoadRatio, MetricsFresh: load.Fresh,
 		}); err != nil {
 			d.logf("KPI detection: store run %s/%s: %v", business, node, err)
@@ -425,7 +318,26 @@ func (d *kpiDetector) runForBusiness(business string, interval time.Duration, ns
 			d.logf("KPI detection: %s/%s anomalies=%d devices=%d", business, node, len(anomalies), len(flagged))
 		}
 	}
+	if res.LoadState == "" {
+		res.LoadState = "unknown"
+	}
 	return res, nil
+}
+
+// mergeLoadState combines per-node activity states for the business-level
+// decision: any active node makes the business active; otherwise any unknown
+// keeps it unknown; only all-not_active yields not_active.
+func mergeLoadState(cur, next string) string {
+	switch {
+	case cur == "":
+		return next
+	case cur == "active" || next == "active":
+		return "active"
+	case cur == "unknown" || next == "unknown":
+		return "unknown"
+	default:
+		return "not_active"
+	}
 }
 
 func (d *kpiDetector) lastRun(business, node string) int64 {
@@ -526,32 +438,6 @@ func aggregateReference(ref []kpiRefPoint, windowSec int64) []kpiRefPoint {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ts < out[j].Ts })
-	return out
-}
-
-func filterWorkingReference(ref []kpiRefPoint, currentFreq float64) []kpiRefPoint {
-	freqs := make([]float64, 0, len(ref))
-	for _, point := range ref {
-		if value, ok := point.Metrics["aicore_freq"]; ok {
-			freqs = append(freqs, value)
-		}
-	}
-	if len(freqs) == 0 {
-		return ref
-	}
-	medianFreq := median(freqs)
-	if allEqual(freqs) {
-		return ref
-	}
-	freqWork := math.Max(medianFreq, currentFreq)
-	threshold := freqWork * (1 - kpiFreqTolerance)
-	out := make([]kpiRefPoint, 0, len(ref))
-	for _, point := range ref {
-		value, ok := point.Metrics["aicore_freq"]
-		if !ok || value >= threshold {
-			out = append(out, point)
-		}
-	}
 	return out
 }
 
@@ -697,55 +583,4 @@ func (c *Center) recordKPIAnomaly(business string, hadAnomaly bool, loadState st
 	c.mu.Unlock()
 	c.logf("business %s: 3 consecutive KPI anomaly runs; triggering profiler (cooldown 10m)", business)
 	go c.triggerBusinessFromKPI(b)
-}
-
-func copyInt64Map(in map[string]int64) map[string]int64 {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]int64, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-func (c *Center) resetKPIAnomalyStreak(business string) {
-	c.mu.Lock()
-	if b := c.biz[business]; b != nil {
-		b.kpiAnomalyStreak = 0
-	}
-	c.mu.Unlock()
-}
-
-// applyGlobalShift retroactively exempts the confirmed global-drift cycles,
-// refreshes the node reference window, and records a per-metric global shift.
-func (c *Center) applyGlobalShift(business string, events []kpiGlobalShiftEvent) {
-	for _, e := range events {
-		if e.Since <= 0 || len(e.TsList) == 0 {
-			continue
-		}
-		latest := e.TsList[0]
-		for _, ts := range e.TsList {
-			if ts > latest {
-				latest = ts
-			}
-		}
-		if err := c.kpi.MarkRunsGlobalShift(business, e.Node, e.TsList); err != nil {
-			c.logf("KPI global shift: mark runs %s/%s/%s: %v", business, e.Node, e.Metric, err)
-		}
-		if err := c.kpi.AdmitAnomaliesInRange(business, e.Node, e.Since, latest); err != nil {
-			c.logf("KPI global shift: admit reference %s/%s: %v", business, e.Node, err)
-		}
-		c.mu.Lock()
-		if b := c.biz[business]; b != nil {
-			if b.ReferenceSince == nil {
-				b.ReferenceSince = make(map[string]int64)
-			}
-			b.ReferenceSince[e.Node] = e.Since
-			c.save()
-		}
-		c.mu.Unlock()
-		c.logf("KPI global shift: %s/%s metric=%s ts=%v since=%d", business, e.Node, e.Metric, e.TsList, e.Since)
-	}
 }

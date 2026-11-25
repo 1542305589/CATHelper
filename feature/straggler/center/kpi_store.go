@@ -126,6 +126,8 @@ func newKPIStore(path string, logf func(format string, args ...any)) (*kpiStore,
 			median REAL NOT NULL,
 			mad REAL NOT NULL,
 			z REAL NOT NULL,
+			center REAL NOT NULL DEFAULT 0,
+			ratio REAL NOT NULL DEFAULT 0,
 			reference_admitted INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (business, node, device, ts, metric, kind)
@@ -153,7 +155,6 @@ func newKPIStore(path string, logf func(format string, args ...any)) (*kpiStore,
 			anomalies INTEGER NOT NULL,
 			flagged INTEGER NOT NULL,
 			reference_invalid INTEGER NOT NULL,
-			global_shift INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (business, node, ts)
 		)`,
@@ -165,11 +166,11 @@ func newKPIStore(path string, logf func(format string, args ...any)) (*kpiStore,
 			return nil, fmt.Errorf("kpi schema: %w", err)
 		}
 	}
-	if err := ensureKPIAnomalyReferenceColumn(db); err != nil {
+	if err := ensureKPIAnomalyColumns(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := ensureKPIrunGlobalShiftColumn(db); err != nil {
+	if err := dropKPIrunGlobalShiftColumn(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -651,39 +652,57 @@ type kpiRefPoint struct {
 	Metrics map[string]float64
 }
 
-// kpiAnomaly is one detected time/space anomaly.
-func ensureKPIAnomalyReferenceColumn(db *sql.DB) error {
+// ensureKPIAnomalyColumns adds columns introduced after the initial schema to an
+// existing kpi_anomaly table. Old rows keep their zero defaults.
+func ensureKPIAnomalyColumns(db *sql.DB) error {
 	rows, err := db.Query(`PRAGMA table_info(kpi_anomaly)`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	has := false
+	existing := make(map[string]bool)
 	for rows.Next() {
 		var cid int
 		var name, ctype string
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
 			return err
 		}
-		if name == "reference_admitted" {
-			has = true
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{"reference_admitted", "reference_admitted INTEGER NOT NULL DEFAULT 0"},
+		{"center", "center REAL NOT NULL DEFAULT 0"},
+		{"ratio", "ratio REAL NOT NULL DEFAULT 0"},
+	}
+	for _, col := range cols {
+		if existing[col.name] {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE kpi_anomaly ADD COLUMN ` + col.ddl); err != nil {
+			return err
 		}
 	}
-	if has {
-		return nil
-	}
-	_, err = db.Exec(`ALTER TABLE kpi_anomaly ADD COLUMN reference_admitted INTEGER NOT NULL DEFAULT 0`)
-	return err
+	return nil
 }
 
-func ensureKPIrunGlobalShiftColumn(db *sql.DB) error {
+// dropKPIrunGlobalShiftColumn removes the obsolete global_shift column from an
+// existing kpi_detect_run table (SQLite >= 3.35 supports DROP COLUMN). New
+// databases never create it.
+func dropKPIrunGlobalShiftColumn(db *sql.DB) error {
 	rows, err := db.Query(`PRAGMA table_info(kpi_detect_run)`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	has := false
 	for rows.Next() {
 		var cid int
@@ -691,16 +710,22 @@ func ensureKPIrunGlobalShiftColumn(db *sql.DB) error {
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
 			return err
 		}
 		if name == "global_shift" {
 			has = true
 		}
 	}
-	if has {
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !has {
 		return nil
 	}
-	_, err = db.Exec(`ALTER TABLE kpi_detect_run ADD COLUMN global_shift INTEGER NOT NULL DEFAULT 0`)
+	_, err = db.Exec(`ALTER TABLE kpi_detect_run DROP COLUMN global_shift`)
 	return err
 }
 
@@ -745,6 +770,7 @@ func ensureKPILoadColumns(db *sql.DB) error {
 	return nil
 }
 
+// kpiAnomaly is one detected space anomaly (and, for historical rows, time).
 type kpiAnomaly struct {
 	Business          string  `json:"business"`
 	Node              string  `json:"node"`
@@ -756,6 +782,8 @@ type kpiAnomaly struct {
 	Median            float64 `json:"median"`
 	Mad               float64 `json:"mad"`
 	Z                 float64 `json:"z"`
+	Center            float64 `json:"center"`
+	Ratio             float64 `json:"ratio"`
 	ReferenceAdmitted bool    `json:"-"`
 }
 
@@ -904,6 +932,31 @@ func (s *kpiStore) RecentSamples(business, node string, since int64) ([]kpiStore
 	return out, rows.Err()
 }
 
+// ReferenceCount returns how many historical samples fall in [from, to),
+// excluding windows already marked anomalous (unless admitted). It is the
+// space-only detector's reference-window health check (kpiMinReferencePoints).
+func (s *kpiStore) ReferenceCount(business, node string, from, to, excludeWindowSec int64) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("kpi store disabled")
+	}
+	if excludeWindowSec < 1 {
+		excludeWindowSec = 1
+	}
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM (
+		SELECT 1 FROM kpi_samples s
+		WHERE s.business = ? AND s.node = ? AND s.ts >= ? AND s.ts < ?
+		AND NOT EXISTS (
+			SELECT 1 FROM kpi_anomaly a
+			WHERE a.business = s.business AND a.node = s.node AND a.device = s.device
+				AND s.ts > a.ts - ? AND s.ts <= a.ts
+				AND a.reference_admitted = 0
+		)
+		LIMIT ?
+	)`, business, node, from, to, excludeWindowSec, kpiReferenceLimit).Scan(&count)
+	return count, err
+}
+
 // ReferenceSamples returns the last limit historical rows for one device before
 // beforeTs, excluding any (device, ts) window already marked anomalous.
 func (s *kpiStore) ReferenceSamples(business, node string, device int, sinceTs, beforeTs int64, excludeWindowSec int64, limit int) ([]kpiRefPoint, error) {
@@ -976,8 +1029,8 @@ func (s *kpiStore) insertAnomaliesOnce(items []kpiAnomaly) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO kpi_anomaly
-		(business, node, device, ts, metric, kind, value, median, mad, z, reference_admitted, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(business, node, device, ts, metric, kind, value, median, mad, z, center, ratio, reference_admitted, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -985,7 +1038,8 @@ func (s *kpiStore) insertAnomaliesOnce(items []kpiAnomaly) error {
 	now := time.Now().Unix()
 	for _, item := range items {
 		if _, err := stmt.Exec(item.Business, item.Node, item.Device, item.Ts, item.Metric,
-			item.Kind, item.Value, item.Median, item.Mad, item.Z, boolInt(item.ReferenceAdmitted), now); err != nil {
+			item.Kind, item.Value, item.Median, item.Mad, item.Z, item.Center, item.Ratio,
+			boolInt(item.ReferenceAdmitted), now); err != nil {
 			return err
 		}
 	}
@@ -1001,7 +1055,6 @@ type kpiDetectRun struct {
 	Anomalies        int     `json:"anomalies"`
 	Flagged          int     `json:"flagged"`
 	ReferenceInvalid bool    `json:"reference_invalid"`
-	GlobalShift      bool    `json:"global_shift"`
 	LoadState        string  `json:"load_state"`
 	Reqs5m           float64 `json:"reqs_5m"`
 	RunningP90       float64 `json:"running_p90"`
@@ -1017,11 +1070,11 @@ func (s *kpiStore) InsertDetectRun(run kpiDetectRun) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO kpi_detect_run
-		(business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift,
+		(business, node, ts, devices, anomalies, flagged, reference_invalid,
 		 load_state, reqs_5m, running_p90, load_ratio, metrics_fresh, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.Business, run.Node, run.Ts, run.Devices, run.Anomalies, run.Flagged,
-		boolInt(run.ReferenceInvalid), boolInt(run.GlobalShift),
+		boolInt(run.ReferenceInvalid),
 		run.LoadState, run.Reqs5m, run.RunningP90, run.LoadRatio, boolInt(run.MetricsFresh),
 		time.Now().Unix())
 	return err
@@ -1035,7 +1088,7 @@ func (s *kpiStore) DetectRuns(business string, limit int) ([]kpiDetectRun, error
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift,
+	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid,
 			load_state, reqs_5m, running_p90, load_ratio, metrics_fresh
 		FROM kpi_detect_run WHERE business = ? ORDER BY ts DESC LIMIT ?`, business, limit)
 	if err != nil {
@@ -1045,13 +1098,12 @@ func (s *kpiStore) DetectRuns(business string, limit int) ([]kpiDetectRun, error
 	out := make([]kpiDetectRun, 0)
 	for rows.Next() {
 		var run kpiDetectRun
-		var invalid, shift, fresh int
+		var invalid, fresh int
 		if err := rows.Scan(&run.Business, &run.Node, &run.Ts, &run.Devices, &run.Anomalies, &run.Flagged,
-			&invalid, &shift, &run.LoadState, &run.Reqs5m, &run.RunningP90, &run.LoadRatio, &fresh); err != nil {
+			&invalid, &run.LoadState, &run.Reqs5m, &run.RunningP90, &run.LoadRatio, &fresh); err != nil {
 			return nil, err
 		}
 		run.ReferenceInvalid = invalid != 0
-		run.GlobalShift = shift != 0
 		run.MetricsFresh = fresh != 0
 		out = append(out, run)
 	}
@@ -1069,7 +1121,7 @@ func (s *kpiStore) DetectRunsRange(business string, from, to int64, limit int) (
 	if limit > 20000 {
 		limit = 20000
 	}
-	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid, global_shift,
+	rows, err := s.db.Query(`SELECT business, node, ts, devices, anomalies, flagged, reference_invalid,
 			load_state, reqs_5m, running_p90, load_ratio, metrics_fresh
 		FROM kpi_detect_run WHERE business = ? AND ts >= ? AND ts <= ?
 		ORDER BY ts DESC LIMIT ?`, business, from, to, limit)
@@ -1080,13 +1132,12 @@ func (s *kpiStore) DetectRunsRange(business string, from, to int64, limit int) (
 	out := make([]kpiDetectRun, 0)
 	for rows.Next() {
 		var run kpiDetectRun
-		var invalid, shift, fresh int
+		var invalid, fresh int
 		if err := rows.Scan(&run.Business, &run.Node, &run.Ts, &run.Devices, &run.Anomalies, &run.Flagged,
-			&invalid, &shift, &run.LoadState, &run.Reqs5m, &run.RunningP90, &run.LoadRatio, &fresh); err != nil {
+			&invalid, &run.LoadState, &run.Reqs5m, &run.RunningP90, &run.LoadRatio, &fresh); err != nil {
 			return nil, err
 		}
 		run.ReferenceInvalid = invalid != 0
-		run.GlobalShift = shift != 0
 		run.MetricsFresh = fresh != 0
 		out = append(out, run)
 	}
@@ -1098,7 +1149,7 @@ func (s *kpiStore) AnomaliesAt(business string, ts int64) ([]kpiAnomaly, error) 
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("kpi store disabled")
 	}
-	rows, err := s.db.Query(`SELECT business, node, device, ts, metric, kind, value, median, mad, z
+	rows, err := s.db.Query(`SELECT business, node, device, ts, metric, kind, value, median, mad, z, center, ratio
 		FROM kpi_anomaly WHERE business = ? AND ts = ? ORDER BY node, device, metric, kind`, business, ts)
 	if err != nil {
 		return nil, err
@@ -1108,7 +1159,7 @@ func (s *kpiStore) AnomaliesAt(business string, ts int64) ([]kpiAnomaly, error) 
 	for rows.Next() {
 		var a kpiAnomaly
 		if err := rows.Scan(&a.Business, &a.Node, &a.Device, &a.Ts, &a.Metric, &a.Kind,
-			&a.Value, &a.Median, &a.Mad, &a.Z); err != nil {
+			&a.Value, &a.Median, &a.Mad, &a.Z, &a.Center, &a.Ratio); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -1192,66 +1243,6 @@ func (s *kpiStore) PruneKPI(sampleRetention, anomalyRetention time.Duration) (in
 	return deleted, nil
 }
 
-// MarkRunsGlobalShift marks the given runs as global_shift without deleting
-// their anomaly rows, so the console can still show what happened.
-func (s *kpiStore) MarkRunsGlobalShift(business, node string, tsList []int64) error {
-	if s == nil || s.db == nil || len(tsList) == 0 {
-		return nil
-	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	stmt, err := tx.Prepare(`UPDATE kpi_detect_run SET global_shift = 1 WHERE business = ? AND node = ? AND ts = ?`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, ts := range tsList {
-		if _, err := stmt.Exec(business, node, ts); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// RecountDetectRun recalculates anomalies/flagged for one run from kpi_anomaly.
-func (s *kpiStore) RecountDetectRun(business, node string, ts int64) error {
-	if s == nil || s.db == nil {
-		return nil
-	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	var anomalies int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM kpi_anomaly WHERE business = ? AND node = ? AND ts = ?`,
-		business, node, ts).Scan(&anomalies); err != nil {
-		return err
-	}
-	var flagged int
-	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT device) FROM kpi_anomaly WHERE business = ? AND node = ? AND ts = ?`,
-		business, node, ts).Scan(&flagged); err != nil {
-		return err
-	}
-	_, err := s.db.Exec(`UPDATE kpi_detect_run SET anomalies = ?, flagged = ?, global_shift = 1 WHERE business = ? AND node = ? AND ts = ?`,
-		anomalies, flagged, business, node, ts)
-	return err
-}
-
-// AdmitAnomaliesInRange makes anomalies in [from, to] eligible for the reference window.
-func (s *kpiStore) AdmitAnomaliesInRange(business, node string, from, to int64) error {
-	if s == nil || s.db == nil {
-		return nil
-	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	_, err := s.db.Exec(`UPDATE kpi_anomaly SET reference_admitted = 1
-		WHERE business = ? AND node = ? AND ts >= ? AND ts <= ?`, business, node, from, to)
-	return err
-}
-
 // RecentAnomalies returns recent anomaly rows for a business.
 func (s *kpiStore) RecentAnomalies(business string, limit int) ([]kpiAnomaly, error) {
 	if s == nil || s.db == nil {
@@ -1260,7 +1251,7 @@ func (s *kpiStore) RecentAnomalies(business string, limit int) ([]kpiAnomaly, er
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`SELECT business, node, device, ts, metric, kind, value, median, mad, z
+	rows, err := s.db.Query(`SELECT business, node, device, ts, metric, kind, value, median, mad, z, center, ratio
 		FROM kpi_anomaly WHERE business = ? ORDER BY ts DESC, device, metric LIMIT ?`, business, limit)
 	if err != nil {
 		return nil, err
@@ -1270,7 +1261,7 @@ func (s *kpiStore) RecentAnomalies(business string, limit int) ([]kpiAnomaly, er
 	for rows.Next() {
 		var a kpiAnomaly
 		if err := rows.Scan(&a.Business, &a.Node, &a.Device, &a.Ts, &a.Metric, &a.Kind,
-			&a.Value, &a.Median, &a.Mad, &a.Z); err != nil {
+			&a.Value, &a.Median, &a.Mad, &a.Z, &a.Center, &a.Ratio); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

@@ -256,7 +256,7 @@
         <div id="kpiHistEmpty" class="empty">加载中…</div>
       </div>
       <div id="kpiHistHint" class="muted" style="display:none; padding:6px 10px;">
-        invalid (time only) = 时间维度参考不足，空间维度仍正常；global_shift = 全局漂移已刷新参考窗口
+        reference = 近 48h 参考窗口点数不足（不影响空间维度检测）；load = active / not_active / unknown
       </div>
     </div>
 
@@ -271,7 +271,7 @@
       <div id="kpiDetailWrap" style="display:none;">
         <div style="overflow:auto; max-height:36vh;">
           <table>
-            <thead><tr><th>时间</th><th>node</th><th>device</th><th>metric</th><th>维度</th><th>value</th><th>median</th><th>MAD</th><th>z</th></tr></thead>
+            <thead><tr><th>时间</th><th>node</th><th>device</th><th>metric</th><th>维度</th><th>value</th><th>center</th><th>ratio</th><th>median</th><th>MAD</th><th>z</th></tr></thead>
             <tbody id="kpiDetailBody"></tbody>
           </table>
         </div>
@@ -568,6 +568,10 @@ function setKPI24h() {
   refreshKPIRange();
 }
 
+function loadStateLabel(s) {
+  return (s === 'active' || s === 'not_active' || s === 'unknown') ? s : 'unknown';
+}
+
 function renderKPIHistory(runs) {
   latestKPIRuns = runs || [];
   if (historyMode === 'kpi') $('histCount').textContent = latestKPIRuns.length ? `（${latestKPIRuns.length}）` : '';
@@ -586,8 +590,8 @@ function renderKPIHistory(runs) {
       String(r.devices),
       String(r.anomalies),
       String(r.flagged),
-      r.global_shift ? 'global_shift' : (r.reference_invalid ? 'invalid (time only)' : 'ok'),
-      r.load_state || 'unknown',
+      r.reference_invalid ? 'insufficient' : 'ok',
+      loadStateLabel(r.load_state),
     ];
     cells.forEach(v => {
       const td = document.createElement('td');
@@ -710,6 +714,8 @@ function renderKPIDetail(d, ts) {
       a.metric,
       a.kind,
       kpiNum(a.value, 2),
+      kpiNum(a.center, 2),
+      kpiNum(a.ratio, 3),
       kpiNum(a.median, 2),
       kpiNum(a.mad, 3),
       kpiNum(a.z, 2),
