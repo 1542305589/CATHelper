@@ -535,6 +535,7 @@ JSON 响应，无鉴权（内网工具，绑定地址即边界）。控制接口
 | POST | `/daemon/pause` | 暂停循环 |
 | POST | `/daemon/stop` | 优雅关闭守护进程（停 HTTP + 等周期结束 + 杀 dynolog + 删除 daemon_results/ 全部落盘结果） |
 | POST | `/daemon/interval` | 修改循环周期 |
+| POST | `/daemon/iterations` | 修改 dyno 采集迭代数（下一轮生效；托管时仅中心可改） |
 | POST | `/daemon/trigger` | 立即触发一个周期 |
 
 查询接口以**本次会话的进程内记录为数据源**：`/straggler/results/latest` 与 `/straggler/results/{id}` 返回内存 store 里对应周期的结果 JSON（经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 读取）；`/straggler/results/history` 列出本次会话全部周期摘要（无条数上限，daemon 重启即空，不读磁盘历史）。

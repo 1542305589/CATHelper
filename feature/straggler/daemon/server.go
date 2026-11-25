@@ -39,6 +39,7 @@ func (d *Daemon) httpServer() *http.Server {
 	mux.HandleFunc("POST /daemon/pause", d.handleDaemonPause)
 	mux.HandleFunc("POST /daemon/stop", d.handleDaemonStop)
 	mux.HandleFunc("POST /daemon/interval", d.handleDaemonInterval)
+	mux.HandleFunc("POST /daemon/iterations", d.handleDaemonSetIterations)
 	mux.HandleFunc("GET /daemon/thresholds", d.handleDaemonGetThresholds)
 	mux.HandleFunc("POST /daemon/thresholds", d.handleDaemonSetThresholds)
 	mux.HandleFunc("POST /daemon/trigger", d.handleDaemonTrigger)
@@ -95,7 +96,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		State:             state,
 		IntervalSec:       int64(interval.Seconds()),
 		CollectWait:       int64(d.cfg.CollectWait.Seconds()),
-		Iterations:        d.cfg.Iterations,
+		Iterations:        d.Iterations(),
 		Thresholds:        d.Thresholds(),
 		DefaultThresholds: config.DefaultThresholds(),
 		Managed:           managed,
@@ -418,6 +419,31 @@ func (d *Daemon) handleDaemonInterval(w http.ResponseWriter, r *http.Request) {
 	}{req.IntervalSec})
 }
 
+// handleDaemonSetIterations changes the dyno nputrace iteration count for the
+// next cycle. When the daemon is managed by a center, only the matched center
+// (correct X-Match-Key) may change it; local edits get 409 so the center stays
+// the single source of truth. Applies from the next cycle onward.
+func (d *Daemon) handleDaemonSetIterations(w http.ResponseWriter, r *http.Request) {
+	if d.IsManaged() && !d.KeyMatches(r.Header.Get("X-Match-Key")) {
+		http.Error(w, "managed: iterations is controlled by the center", http.StatusConflict)
+		return
+	}
+	var req struct {
+		Iterations int `json:"iterations"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `invalid body: {"iterations": 3}`, http.StatusBadRequest)
+		return
+	}
+	if err := d.SetIterations(req.Iterations); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, struct {
+		Iterations int `json:"iterations"`
+	}{d.Iterations()})
+}
+
 // handleDaemonGetThresholds returns the current detection thresholds.
 func (d *Daemon) handleDaemonGetThresholds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, d.Thresholds())
@@ -475,14 +501,15 @@ func (d *Daemon) handleDaemonMatch(w http.ResponseWriter, r *http.Request) {
 		Business    string `json:"business"`
 		Daemon      string `json:"daemon"`
 		IntervalSec int64  `json:"interval_sec"`
+		Iterations  int    `json:"iterations"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CenterAddr == "" || req.Key == "" {
-		http.Error(w, `invalid body: {"center_addr","key","business","daemon","interval_sec"}`, http.StatusBadRequest)
+		http.Error(w, `invalid body: {"center_addr","key","business","daemon","interval_sec","iterations"}`, http.StatusBadRequest)
 		return
 	}
 	// The center may self-report a loopback/unspecified host; override the host
 	// with the request's source IP so the reverse heartbeat reaches it.
-	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon, time.Duration(req.IntervalSec)*time.Second); err != nil {
+	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon, time.Duration(req.IntervalSec)*time.Second, req.Iterations); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -524,7 +551,7 @@ func (d *Daemon) handleDaemonUnmatch(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request) {
 	state, center, _ := d.matchState()
 	if state != "managed" {
-		writeJSON(w, map[string]any{"state": state, "matched": false})
+		writeJSON(w, map[string]any{"state": state, "matched": false, "iterations": d.Iterations()})
 		return
 	}
 	if d.KeyMatches(r.Header.Get("X-Match-Key")) {
@@ -533,10 +560,11 @@ func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request)
 			"matched":      true,
 			"center":       center,
 			"collect_wait": int64(d.cfg.CollectWait.Seconds()),
+			"iterations":   d.Iterations(),
 		})
 		return
 	}
-	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center})
+	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center, "iterations": d.Iterations()})
 }
 
 // requireManagedKey gates a control endpoint: when NOT managed it passes

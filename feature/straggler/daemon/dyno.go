@@ -143,6 +143,7 @@ func parseDynologPort() int {
 func (d *Daemon) triggerCollection() error {
 	d.mu.Lock()
 	port := d.dynologPort
+	iterations := d.iterations
 	d.mu.Unlock()
 
 	args := []string{
@@ -155,7 +156,7 @@ func (d *Daemon) triggerCollection() error {
 	args = append(args,
 		"nputrace",
 		"--start-step", "-1",
-		"--iterations", strconv.Itoa(d.cfg.Iterations),
+		"--iterations", strconv.Itoa(iterations),
 		"--activities", "NPU,CPU",
 		"--profiler-level", "Level0",
 		"--msprof-tx",

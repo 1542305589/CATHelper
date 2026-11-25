@@ -181,6 +181,7 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 		"business":     b.Name,
 		"daemon":       d.Addr(),
 		"interval_sec": int64(c.businessInterval(b).Seconds()),
+		"iterations":   businessIterations(b),
 	}
 	resp, err := doJSON(http.MethodPost, d.BaseURL()+"/daemon/match", body, "")
 	if err != nil {
@@ -260,6 +261,11 @@ func (c *Center) applyProbeLocked(p daemonProbe) bool {
 		if p.st.CollectWait > 0 {
 			d.collectWait = p.st.CollectWait
 		}
+		// Surface the daemon's current iterations so the console can show
+		// drift (0 = old build / unknown).
+		if p.st.Iterations > 0 {
+			d.reportedIterations = p.st.Iterations
+		}
 	case p.st.Other:
 		d.matchState = "other"
 		return samePort(p.st.Center, c.cfg.Port)
@@ -289,6 +295,7 @@ type matchStatusResp struct {
 	Other       bool   `json:"other"`
 	Center      string `json:"center"`
 	CollectWait int64  `json:"collect_wait"`
+	Iterations  int    `json:"iterations"`
 }
 
 func samePort(raw string, port int) bool {
@@ -478,6 +485,45 @@ func roundReported(d *Daemon, triggerAt time.Time, token string) bool {
 func (c *Center) triggerDaemon(d *Daemon, token string) {
 	body := map[string]string{"round_token": token}
 	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", body, d.Key)
+}
+
+// businessIterations normalizes a business's iterations (0 = legacy/default).
+func businessIterations(b *Business) int {
+	if b.Iterations > 0 {
+		return b.Iterations
+	}
+	return defaultBusinessIterations
+}
+
+// iterationsTarget is a snapshot of a daemon's control endpoint + key, taken
+// under c.mu so the fan-out does not race with matching/mutating the daemon.
+type iterationsTarget struct {
+	url string
+	key string
+}
+
+// pushIterations fans the value out to the given daemons concurrently. A daemon
+// that is offline counts as failed; it receives the value again on its next
+// match (the match request carries the business iterations).
+func pushIterations(targets []iterationsTarget, iterations int) (pushed, failed int) {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t iterationsTarget) {
+			defer wg.Done()
+			_, err := doJSON(http.MethodPost, t.url, map[string]int{"iterations": iterations}, t.key)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				failed++
+			} else {
+				pushed++
+			}
+		}(t)
+	}
+	wg.Wait()
+	return pushed, failed
 }
 
 // mergeOpMetric merges only the op_metric reported in the CURRENT round.

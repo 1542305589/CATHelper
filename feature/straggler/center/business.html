@@ -111,6 +111,7 @@
       <div class="body">
         <dl class="kv">
           <dt>Profiler 检测周期</dt><dd id="vInterval">—</dd>
+          <dt>采集迭代数</dt><dd id="vIterations">—</dd>
           <dt>KPI 检测周期</dt><dd id="vKPIInterval">—</dd>
           <dt>阈值</dt><dd id="vThresholds">—</dd>
           <dt>已运行周期</dt><dd id="vTotal">—</dd>
@@ -133,6 +134,11 @@
           Profiler 周期(秒):
           <input id="intervalInput" type="number" min="60">
           <button id="btnInterval">设置</button>
+        </div>
+        <div class="interval-form">
+          采集迭代数:
+          <input id="iterationsInput" type="number" min="3" max="100">
+          <button id="btnIterations">设置</button>
         </div>
         <div class="interval-form">
           KPI 检测周期(秒):
@@ -212,7 +218,7 @@
       <h2>节点列表</h2>
       <div class="body">
         <table>
-          <thead><tr><th>节点</th><th>状态</th><th>等待完成采集时间</th></tr></thead>
+          <thead><tr><th>节点</th><th>状态</th><th>等待完成采集时间</th><th>采集迭代数</th></tr></thead>
           <tbody id="daemonBody"></tbody>
         </table>
       </div>
@@ -370,6 +376,7 @@ function toast(msg, ok) {
 function renderStatus(b) {
   $('title').textContent = '业务控制台 · ' + b.name;
   $('vInterval').textContent = b.interval_sec != null ? b.interval_sec + ' s' : '—';
+  $('vIterations').textContent = b.iterations != null ? b.iterations : '—';
   $('vKPIInterval').textContent = b.kpi_interval_sec != null ? b.kpi_interval_sec + ' s' : '—';
   latestKPIIntervalSec = b.kpi_interval_sec || 60;
   $('kpiStepHint').textContent = '粒度 ' + latestKPIIntervalSec + 's';
@@ -387,6 +394,7 @@ function renderStatus(b) {
   $('vNext').textContent = timeFmt(b.next_trigger);
   $('vCollectWait').textContent = b.collect_wait ? b.collect_wait + ' s' : '—';
   if (!$('intervalInput').value) $('intervalInput').value = b.interval_sec || 600;
+  if (!$('iterationsInput').value) $('iterationsInput').value = b.iterations || 3;
   if (!$('kpiIntervalInput').value) $('kpiIntervalInput').value = b.kpi_interval_sec || 10;
   $('btnPause').disabled = b.paused;
   $('btnStart').disabled = !b.paused;
@@ -397,10 +405,13 @@ function renderDaemons(b) {
   const tb = $('daemonBody');
   tb.innerHTML = '';
   for (const d of b.daemons || []) {
+    const iter = d.iterations ? d.iterations : '—';
+    const drift = d.iterations && b.iterations && d.iterations !== b.iterations;
     tb.innerHTML += `<tr>
       <td><a class="daemon-link" href="http://${d.ip}:${d.port}/" target="_blank">${d.ip}:${d.port}</a></td>
       <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
       <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
+      <td>${drift ? `<span class="badge report_failed">${iter}</span>` : iter}</td>
     </tr>`;
   }
 }
@@ -1022,6 +1033,20 @@ $('btnInterval').onclick = () => {
   const v = parseInt($('intervalInput').value, 10);
   if (!v || v < 60 || v > 86400) { toast('Profiler 周期需在 [60, 86400] 秒之间', false); return; }
   control('interval');
+};
+$('btnIterations').onclick = async () => {
+  const v = parseInt($('iterationsInput').value, 10);
+  if (!v || v < 3 || v > 100) { toast('采集迭代数需在 [3, 100] 之间', false); return; }
+  try {
+    const r = await post('/center/business/' + encodeURIComponent(BIZ) + '/iterations', { iterations: v });
+    const failed = (r && r.failed) || 0;
+    if (failed) {
+      toast('已保存，' + failed + ' 个节点下发失败（重连后自动同步）', false);
+    } else {
+      toast('采集迭代数已更新并下发到所有节点（下一轮生效）', true);
+    }
+    setTimeout(refresh, 400);
+  } catch (e) { toast('操作失败：' + e.message, false); }
 };
 $('btnKPIInterval').onclick = async () => {
   const v = parseInt($('kpiIntervalInput').value, 10);

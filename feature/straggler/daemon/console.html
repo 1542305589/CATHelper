@@ -81,6 +81,7 @@
       <div class="body">
         <dl class="kv">
           <dt>检测周期</dt><dd id="vInterval">—</dd>
+          <dt>采集迭代数</dt><dd id="vIterations">—</dd>
           <dt>阈值</dt><dd id="vThresholds">—</dd>
           <dt>已运行周期</dt><dd id="vTotal">—</dd>
           <dt>失败周期</dt><dd id="vFailed">—</dd>
@@ -104,6 +105,12 @@
           周期(秒):
           <input id="intervalInput" type="number" min="60">
           <button id="btnInterval">设置</button>
+        </div>
+        <div class="interval-form" style="margin-top:8px;">
+          采集迭代数:
+          <input id="iterationsInput" type="number" min="3" max="100">
+          <button id="btnIterations">设置</button>
+          <span id="iterationsHint" class="unit" style="display:none;">由中心统一管理</span>
         </div>
       </div>
     </div>
@@ -220,6 +227,7 @@ function renderStatus(s) {
   $('stateBadge').textContent = (s.state || '—').toUpperCase();
   $('stateBadge').className = 'badge ' + (s.state === 'running' ? 'running' : 'paused');
   $('vInterval').textContent = s.interval_sec != null ? s.interval_sec + ' s' : '—';
+  $('vIterations').textContent = s.iterations != null ? s.iterations : '—';
   const th = s.thresholds || {};
   $('vThresholds').textContent = th.cal != null
     ? `cal=${th.cal} cpu=${th.cpu} comm=${th.comm_threshold}`
@@ -233,6 +241,10 @@ function renderStatus(s) {
   $('vProfilerDir').textContent = s.profiler_dir || '—';
   $('vKpiDir').textContent = s.kpi_dir || '（未启用）';
   if (!$('intervalInput').value) $('intervalInput').value = s.interval_sec || 600;
+  if (!$('iterationsInput').value) $('iterationsInput').value = s.iterations || 3;
+  $('iterationsInput').disabled = !!s.managed;
+  $('btnIterations').disabled = !!s.managed;
+  $('iterationsHint').style.display = s.managed ? 'inline' : 'none';
   $('btnStart').disabled = s.state === 'running';
   $('btnPause').disabled = s.state !== 'running';
 }
@@ -385,6 +397,15 @@ $('btnInterval').onclick = async () => {
   try {
     await post('/daemon/interval', { interval_sec: v });
     toast('周期已更新为 ' + v + 's', true);
+    refresh();
+  } catch (e) { toast('设置失败：' + e.message, false); }
+};
+$('btnIterations').onclick = async () => {
+  const v = parseInt($('iterationsInput').value, 10);
+  if (!v || v < 3 || v > 100) { toast('采集迭代数需在 [3, 100] 之间（<3 需节点启动时加 --allow-low-iterations）', false); return; }
+  try {
+    await post('/daemon/iterations', { iterations: v });
+    toast('采集迭代数已更新为 ' + v + '（下一轮生效）', true);
     refresh();
   } catch (e) { toast('设置失败：' + e.message, false); }
 };

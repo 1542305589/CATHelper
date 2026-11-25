@@ -227,6 +227,7 @@ func main() {
 		cfg.Interval = time.Duration(intervalSec) * time.Second
 		cfg.CollectWait = time.Duration(collectWait) * time.Second
 		cfg.Iterations = profilerIterations
+		cfg.AllowLowIterations = allowLowIterations
 		cfg.DynoBin = dynoBin
 		cfg.DynologBin = dynologBin
 		cfg.Thresholds = thresholds

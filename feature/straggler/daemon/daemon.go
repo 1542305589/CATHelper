@@ -30,19 +30,21 @@ type Daemon struct {
 	st     *store
 	logf   func(format string, args ...any)
 
-	mu            sync.Mutex
-	state         string            // "running" | "paused" | "managed"
-	interval      time.Duration     // current cycle period (POST /daemon/interval updates it)
-	thresholds    config.Thresholds // current detection thresholds (CLI initial, POST /daemon/thresholds updates them)
-	nextRun       time.Time         // when the next cycle starts (zero when paused)
-	cycleID       int               // per-process id, starting from 1
-	cycleInFlight bool
-	timer         *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
-	dynolog       *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
-	dynologPort   int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
-	stopOnce      sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
-	stopCh        chan struct{} // closed by POST /daemon/stop to request graceful shutdown
-	removeResults bool          // set by Stop(): delete all daemon_results/ on shutdown
+	mu                 sync.Mutex
+	state              string            // "running" | "paused" | "managed"
+	interval           time.Duration     // current cycle period (POST /daemon/interval updates it)
+	iterations         int               // dyno nputrace iterations for the NEXT cycle (POST /daemon/iterations updates it)
+	allowLowIterations bool              // --allow-low-iterations: permit iterations <3 at runtime (debug-only)
+	thresholds         config.Thresholds // current detection thresholds (CLI initial, POST /daemon/thresholds updates them)
+	nextRun            time.Time         // when the next cycle starts (zero when paused)
+	cycleID            int               // per-process id, starting from 1
+	cycleInFlight      bool
+	timer              *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
+	dynolog            *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
+	dynologPort        int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
+	stopOnce           sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
+	stopCh             chan struct{} // closed by POST /daemon/stop to request graceful shutdown
+	removeResults      bool          // set by Stop(): delete all daemon_results/ on shutdown
 
 	progress *progressLog // live per-cycle stage log shown terminal-style in the console
 
@@ -71,6 +73,9 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 	if cfg.Port <= 0 {
 		cfg.Port = 8080
 	}
+	if cfg.Iterations <= 0 {
+		cfg.Iterations = 3
+	}
 	// Resolve --profiler-dir to an absolute path so the daemon's analyse/scan
 	// (its own cwd) and the profiler writer (the training process / dynolog,
 	// which resolves ACTIVITIES_LOG_FILE against ITS cwd) always refer to the
@@ -81,15 +86,17 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		}
 	}
 	return &Daemon{
-		cfg:        cfg,
-		detect:     detect,
-		st:         newStore(),
-		logf:       func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
-		state:      "running",
-		interval:   cfg.Interval,
-		thresholds: cfg.Thresholds,
-		stopCh:     make(chan struct{}),
-		progress:   newProgressLog(),
+		cfg:                cfg,
+		detect:             detect,
+		st:                 newStore(),
+		logf:               func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
+		state:              "running",
+		interval:           cfg.Interval,
+		iterations:         cfg.Iterations,
+		allowLowIterations: cfg.AllowLowIterations,
+		thresholds:         cfg.Thresholds,
+		stopCh:             make(chan struct{}),
+		progress:           newProgressLog(),
 	}
 }
 
@@ -561,6 +568,48 @@ func (d *Daemon) SetInterval(sec int64) error {
 	return nil
 }
 
+// Iterations returns the dyno nputrace iteration count used by the next cycle.
+func (d *Daemon) Iterations() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.iterations
+}
+
+// SetIterations updates the dyno nputrace iteration count for subsequent cycles,
+// validating [1, 100]. Values below 3 are only accepted when the daemon was
+// started with --allow-low-iterations (a single idle step can make a round look
+// normal); they are logged as a warning. The currently running cycle keeps the
+// value it captured at cycle start.
+func (d *Daemon) SetIterations(n int) error {
+	if n < 1 || n > 100 {
+		return fmt.Errorf("iterations out of range [1, 100]")
+	}
+	if n < 3 && !d.allowLowIterations {
+		return fmt.Errorf("iterations below 3 require --allow-low-iterations at daemon startup")
+	}
+	d.mu.Lock()
+	d.iterations = n
+	d.mu.Unlock()
+	if n < 3 {
+		d.logf("WARNING: iterations=%d (<3) may sample too few steps and make a round look normal", n)
+	}
+	return nil
+}
+
+// applyCenterIterations applies a center-provided value; the caller holds d.mu.
+// Values below 3 are ignored unless this daemon was started with
+// --allow-low-iterations, so a custom/legacy center cannot bypass the guardrail.
+func (d *Daemon) applyCenterIterations(n int) {
+	if n < 1 || n > 100 {
+		return
+	}
+	if n < 3 && !d.allowLowIterations {
+		d.logf("WARNING: ignoring center iterations=%d (<3) without --allow-low-iterations", n)
+		return
+	}
+	d.iterations = n
+}
+
 // Trigger runs one cycle immediately; returns an error when paused or when a
 // cycle is already in flight (HTTP 409). In "running" the timer is re-anchored
 // so the next automatic cycle is one interval after this manual one; in
@@ -609,7 +658,7 @@ func (d *Daemon) Stop() {
 // Match establishes a managed relationship with a center. The daemon stops
 // self-scheduling (state=managed), records the center/key/business/daemon and
 // starts the reverse heartbeat. Returns an error if already managed.
-func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time.Duration) error {
+func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time.Duration, iterations int) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "managed" {
@@ -624,6 +673,9 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time
 		if interval > 0 {
 			d.centerInterval = interval
 		}
+		if iterations > 0 {
+			d.applyCenterIterations(iterations)
+		}
 		d.logf("re-matched by center %s (business=%s daemon=%s)", centerAddr, business, daemonID)
 		return nil
 	}
@@ -633,6 +685,9 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time
 	d.daemonID = daemonID
 	if interval > 0 {
 		d.centerInterval = interval
+	}
+	if iterations > 0 {
+		d.applyCenterIterations(iterations)
 	}
 	d.state = "managed"
 	d.nextRun = time.Time{}

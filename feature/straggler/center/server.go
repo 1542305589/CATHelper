@@ -2,6 +2,7 @@ package center
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -48,6 +49,7 @@ func (c *Center) httpServer() *http.Server {
 	mux.HandleFunc("POST /center/business/{name}/pause", c.handleBusinessPause)
 	mux.HandleFunc("POST /center/business/{name}/start", c.handleBusinessStart)
 	mux.HandleFunc("POST /center/business/{name}/interval", c.handleBusinessInterval)
+	mux.HandleFunc("POST /center/business/{name}/iterations", c.handleBusinessIterations)
 	mux.HandleFunc("POST /center/business/{name}/thresholds", c.handleBusinessThresholds)
 	mux.HandleFunc("POST /center/business/{name}/vllm", c.handleSetVLLMMetrics)
 	mux.HandleFunc("DELETE /center/business/{name}/vllm", c.handleUnsetVLLMMetrics)
@@ -73,12 +75,14 @@ type daemonStatus struct {
 	Port        int    `json:"port"`
 	State       string `json:"state"` // healthy / unmatched / other / disconnected
 	CollectWait int64  `json:"collect_wait"`
+	Iterations  int    `json:"iterations,omitempty"` // daemon-reported current value (0 = unknown / old build)
 }
 
 // businessStatus is the web-visible view of one business.
 type businessStatus struct {
 	Name                   string            `json:"name"`
 	IntervalSec            int64             `json:"interval_sec"`
+	Iterations             int               `json:"iterations"` // dyno nputrace iterations applied to every daemon
 	KPIDetectIntervalSec   int64             `json:"kpi_interval_sec"`
 	KPINSigma              KPINSigma         `json:"kpi_nsigma"`
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio"`
@@ -125,6 +129,7 @@ func businessStatusOfLocked(b *Business) businessStatus {
 	bs := businessStatus{
 		Name:                   b.Name,
 		IntervalSec:            b.IntervalSec,
+		Iterations:             businessIterations(b),
 		KPIDetectIntervalSec:   b.KPIDetectIntervalSec,
 		KPINSigma:              b.KPINSigma.Normalized(),
 		KPIReferenceAdmitRatio: b.NormalizedKPIReferenceAdmitRatio(),
@@ -140,7 +145,7 @@ func businessStatusOfLocked(b *Business) businessStatus {
 		bs.NextTrigger = b.NextTrigger.Format(time.RFC3339)
 	}
 	for _, d := range b.Daemons {
-		bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait})
+		bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait, Iterations: d.reportedIterations})
 		if d.collectWait > bs.CollectWait {
 			bs.CollectWait = d.collectWait
 		}
@@ -175,7 +180,7 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "business already exists", http.StatusConflict)
 		return
 	}
-	b := &Business{Name: req.Name, IntervalSec: req.IntervalSec, KPIDetectIntervalSec: req.KPIDetectIntervalSec, Daemons: req.Daemons}
+	b := &Business{Name: req.Name, IntervalSec: req.IntervalSec, KPIDetectIntervalSec: req.KPIDetectIntervalSec, Iterations: defaultBusinessIterations, Daemons: req.Daemons}
 	if b.Daemons == nil {
 		b.Daemons = []*Daemon{}
 	}
@@ -556,6 +561,45 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 	b.NextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
 	c.save()
 	writeJSON(w, map[string]any{"interval_sec": req.IntervalSec})
+}
+
+// handleBusinessIterations updates the dyno nputrace iteration count for the
+// whole business and pushes it to every matched daemon. A daemon that is offline
+// now receives the value on its next match (the match request carries it), so
+// the stored business value is the source of truth.
+func (c *Center) handleBusinessIterations(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Iterations int `json:"iterations"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+		req.Iterations < minBusinessIterations || req.Iterations > maxBusinessIterations {
+		http.Error(w, fmt.Sprintf(`invalid body: {"iterations": 3} (range [%d, %d])`, minBusinessIterations, maxBusinessIterations), http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	b := c.biz[r.PathValue("name")]
+	if b == nil {
+		c.mu.Unlock()
+		http.Error(w, "business not found", http.StatusNotFound)
+		return
+	}
+	b.Iterations = req.Iterations
+	targets := make([]iterationsTarget, 0, len(b.Daemons))
+	for _, d := range b.Daemons {
+		if d.Key == "" {
+			continue // never matched: the next match carries the value
+		}
+		targets = append(targets, iterationsTarget{url: d.BaseURL() + "/daemon/iterations", key: d.Key})
+	}
+	c.save()
+	c.mu.Unlock()
+
+	pushed, failed := pushIterations(targets, req.Iterations)
+	writeJSON(w, map[string]any{
+		"iterations": req.Iterations,
+		"pushed":     pushed,
+		"failed":     failed,
+	})
 }
 
 // handleBusinessThresholds updates a business's merged-detection thresholds.

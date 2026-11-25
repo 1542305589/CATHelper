@@ -348,6 +348,7 @@ bash build.sh          # 首次：架构检查 + 装 dyno/dynolog(.deb) + Python
 | `GET /straggler/op_metric/latest` / `/{id}` / `/{id}/{file}` | 最近/指定周期 op_metric 聚合视图 / 该周期归档的原始 op_metric 文件 |
 | `POST /daemon/start` / `/pause` / `/trigger` | 恢复 / 暂停 / 立即补跑一轮（已有周期在跑 → 409） |
 | `POST /daemon/interval` | 改周期（body `{"interval_sec":300}`，60–86400） |
+| `POST /daemon/iterations` | 改 dyno 采集迭代数（body `{"iterations":3}`，3–100，下一轮生效；托管时仅中心可改） |
 | `POST /daemon/stop` | 优雅关闭守护进程（关闭时删除全部 `daemon_results/` 归档结果，需保留请先消费/备份） |
 
 ### 6.3 第二道 Profiler 检测（按需，独立）

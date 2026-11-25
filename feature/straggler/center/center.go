@@ -119,6 +119,9 @@ func (c *Center) load() {
 			if b.KPIDetectIntervalSec <= 0 {
 				b.KPIDetectIntervalSec = int64(c.cfg.KPIDetectInterval.Seconds())
 			}
+			if b.Iterations <= 0 {
+				b.Iterations = defaultBusinessIterations
+			}
 			b.KPINSigma = b.KPINSigma.Normalized()
 			b.KPIReferenceAdmitRatio = b.NormalizedKPIReferenceAdmitRatio()
 			if b.Thresholds == (config.Thresholds{}) {
