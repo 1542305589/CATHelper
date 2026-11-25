@@ -89,7 +89,7 @@ def profiler_summary(cycle):
     if not any(summary.values()):
         return "无异常"
     parts = []
-    for key, label in (("cal", "cal"), ("comm", "comm"), ("cpu", "cpu"), ("npu_bubble", "bubble")):
+    for key, label in (("cal", "cal"), ("comm", "comm"), ("cpu", "cpu")):
         if summary.get(key, 0):
             parts.append(f"{label}:{summary[key]}")
     return ";".join(parts)

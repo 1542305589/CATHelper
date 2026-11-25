@@ -512,14 +512,13 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	reportText := report.GenerateReport(stepData, parallels, validRanks, result, source)
 
 	summary := map[string]int{
-		"cal":        len(result["cal"]),
-		"comm":       len(result["comm"]),
-		"cpu":        len(result["cpu"]),
-		"npu_bubble": len(result["npu_bubble"]),
+		"cal":  len(result["cal"]),
+		"comm": len(result["comm"]),
+		"cpu":  len(result["cpu"]),
 	}
 	if b.progress != nil {
-		b.progress.step("检测完成: 慢计算 %d / 慢通信 %d / 慢CPU %d / Bubble %d",
-			summary["cal"], summary["comm"], summary["cpu"], summary["npu_bubble"])
+		b.progress.step("检测完成: 慢计算 %d / 慢通信 %d / 慢CPU %d",
+			summary["cal"], summary["comm"], summary["cpu"])
 	}
 
 	dir := startedAt.Format("20060102-150405")

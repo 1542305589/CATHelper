@@ -376,7 +376,7 @@ func main() {
     // ── 第二道防线：Profiler 慢节点检测 ──
     if inputPath != "" {
         config.FilePath = inputPath
-        config.Apply(thresholds)                                // 一组独立阈值（cal/cpu/bubble/comm…）
+        config.Apply(thresholds)                                // 一组独立阈值（cal/cpu/comm…）
         dataparse.DataParsing(inputPath)                        // SQLite → 中间文件
         parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
         stepData := detector.GetCurJobLastStepData(validRanks)
@@ -404,7 +404,6 @@ func main() {
 | 单卡 Kernel 计算慢 | ✗（UTIL 可能仍高） | ✓ 精确发现 |
 | 集体通信延迟 | ✗ 间接 | ✓ 精确发现 |
 | CPU Host 处理慢 | ✗ | ✓ |
-| Bubble 时间异常 | ✗ | ✓ |
 
 **总结**：KPI 擅长硬件/物理层异常，Profiling 擅长软件/性能层异常。两者互补。
 

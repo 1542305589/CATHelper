@@ -13,7 +13,6 @@ import (
 //   - cal:        top-level kmeans ratio of ZP_Kernel (max) — a normal rank
 //     sits near 1.0
 //   - cpu:        top-level kmeans ratio of ZP_Host (max)
-//   - npu_bubble: raw ZP_Bubble value
 //
 // Ranks absent from a metric simply lack that key (no data to diagnose).
 func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[int]map[string]float64 {
@@ -35,11 +34,6 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
 	if host, ok := stepData[zpHostDataColumn]; ok {
 		for r, ratio := range rankRatios(host, config.CPUThreshold, true) {
 			set(r, "cpu", ratio)
-		}
-	}
-	if bubble, ok := stepData[zpBubble]; ok {
-		for r, v := range bubble {
-			set(r, "npu_bubble", v)
 		}
 	}
 	return scores

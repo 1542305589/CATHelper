@@ -50,7 +50,7 @@ EEP 的故障信息输入已与 CATMonitor 底座有机整合：通过 `faultsub
 
 ### 上层特性 — [Straggler 慢节点检测](feature/straggler/)
 
-慢节点（慢卡）检测特性。两道防线：第一道（KPI 资源指标检测）基于 NPU 资源指标做**空间 peer 对比**（取最后一个聚合点，同节点卡互比，共享 kmeans 比例检测，无历史基线/检测窗口）；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble。两道结果合并输出为一份 JSON。详见 [feature/straggler/README.md](feature/straggler/README.md)。
+慢节点（慢卡）检测特性。两道防线：第一道（KPI 资源指标检测）基于 NPU 资源指标做**空间 peer 对比**（取最后一个聚合点，同节点卡互比，共享 kmeans 比例检测，无历史基线/检测窗口）；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）。两道结果合并输出为一份 JSON。详见 [feature/straggler/README.md](feature/straggler/README.md)。
 
 straggler 既支持一次性手动运行，也支持**常驻守护进程模式**（`--daemon`）：周期性自动完成「触发采集 → 转换 → 解析 → 检测」全链路，结果通过 HTTP 查询与运维控制（`GET /status`/`/straggler/results/*`/`/straggler/op_metric/*`、`POST /daemon/{start,pause,interval,trigger,stop}`，默认端口 `:8080`，`--profiler-iterations` 控制 dyno 采集步数），适合接入运维/调度系统持续巡检。第一道（KPI）的数据来源已与 CATMonitor 底座有机整合：CATMonitor 通过 opt-in 的 `stragglerout` 模块输出专用 KPI 时序文件（`straggler_kpi_{date}.jsonl`），straggler 读该文件检测；第二道（Profiler）保留独立。整合设计见 [straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)。
 

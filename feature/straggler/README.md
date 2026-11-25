@@ -1,6 +1,6 @@
 # CATHelper — 慢节点（Straggler）检测
 
-AI 智算集群中识别性能劣化 NPU 卡的两道独立检测。**Profiling 深查**（优先执行）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查；**KPI 资源检测**（轻量）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）。两道检查互不阻塞，结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制。
+AI 智算集群中识别性能劣化 NPU 卡的两道独立检测。**Profiling 深查**（优先执行）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU 三个维度精查；**KPI 资源检测**（轻量）基于 NPU 资源指标做空间 peer 对比（最后一个聚合点）。两道检查互不阻塞，结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行：周期性自动完成采集→检测，结果通过 HTTP 查询与运维控制。
 
 ---
 
@@ -81,7 +81,7 @@ python3 -c "import msmonitor; print('mindstudio_monitor OK')"
 
 ## 二、基于 Profiling 算子数据的慢卡检测
 
-基于 Ascend PyTorch Profiler 算子数据识别慢卡，覆盖慢计算/慢通信/慢CPU/Bubble 四个维度，深查定位。跑完即退出（一次性检测），产物是运行目录下的 `straggler_output.json`（只跑本维度时仅含 `profiler` 键）。
+基于 Ascend PyTorch Profiler 算子数据识别慢卡，覆盖慢计算/慢通信/慢CPU 三个维度，深查定位。跑完即退出（一次性检测），产物是运行目录下的 `straggler_output.json`（只跑本维度时仅含 `profiler` 键）。
 
 ### 2.1 在容器/hostOS 内拉起慢节点的守护进程
 
@@ -112,7 +112,6 @@ cd feature/straggler
 | `--daemon-port` | 否 | 8080 | HTTP 端口 |
 | `--cal-threshold` | 否 | 1.3 | 慢计算阈值 |
 | `--cpu-threshold` | 否 | 2.5 | 慢CPU 阈值 |
-| `--bubble-threshold-ns` | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--comm-threshold` / `--comm-min-count` / `--comm-count-floor` / `--comm-flat` | 否 | 1.3 / 1000 / 10240 / 假 | 慢通信带宽检测旋钮 |
 
 > 命令为**可直接复制执行**写法：续行 `\` 后不留注释/空格，否则 shell 会把反斜杠当成普通字符导致参数被拆散。
@@ -194,9 +193,8 @@ SQLite .db → 并行域拓扑解析 → 单步快照 → 4 类检测 → 节点
 | 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(默认 1.3) | kmeans，方向自适应 |
 | 慢通信 `comm` | `{域}_<opType>_<count>`（带宽回填列） | `CommThreshold`(默认 1.3) | 按算子类型分类，每组取 count 最大带宽作代表（带宽=count/组内单次算子最小时间的升序前10%均值），仅保留 count ≥ 最大 count×50% 且 count > `SlowCommCountFloor`(默认10240) 的组后做 kmeans 递归聚类（带宽小=慢）；一个组须在**所有算子类型都异常**才上报，劣化数值取各算子中的最大值 |
 | 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CPUThreshold`(默认 2.5) | 同主机卡取去 min/max 均值消除节点内差异 |
-| Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
 
-> cal / cpu 走共享 `clustering` 包（kmeans 比例检测，与 3.3 的 KPI 空间 cluster 同一算法）；慢通信走带宽比较（先回填 `{域}_<opType>_<count>` 带宽列，再按 `CommThreshold` 判劣化）；Bubble 走固定阈值。
+> cal / cpu 走共享 `clustering` 包（kmeans 比例检测，与 3.3 的 KPI 空间 cluster 同一算法）；慢通信走带宽比较（先回填 `{域}_<opType>_<count>` 带宽列，再按 `CommThreshold` 判劣化）。
 
 **中间产物（`op_metric/`）**：解析阶段在每个数据目录下生成每 rank 三件套——`group_info_{N}.json`（并行拓扑）、`host_info_{N}.json`（rank→hostUid）、`global_rank_{N}.csv`（各域通信耗时/计数 + ZP_* 指标）。守护进程会把每轮 `op_metric/` 归档到 `daemon_results/<start>/op_metric/` 供复查。
 
@@ -328,7 +326,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
 | `GET /daemon/thresholds` | 读取当前检测阈值 | — |
-| `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","bubble_ns","comm_threshold","comm_min_count","comm_count_floor"}` |
+| `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
 | `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
 | `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon"}` |
 | `POST /daemon/unmatch` | 解除托管（回到 running，需 `X-Match-Key`） | — |
@@ -371,7 +369,7 @@ curl -s -X POST localhost:8080/daemon/stop
     "duration_ms": 120000,
     "dbs": 8,
     "dump_dir": "daemon_results/20260820-100000",
-    "summary": { "cal": 1, "comm": 0, "cpu": 0, "npu_bubble": 0 }
+    "summary": { "cal": 1, "comm": 0, "cpu": 0 }
   },
   "next_run_at": "2026-08-20T10:10:00+08:00"
 }
@@ -430,7 +428,7 @@ curl -s -X POST localhost:8080/daemon/stop
 - **业务（business）**：一个真实训练任务；含名称、触发周期、守护进程列表、一组独立阈值、vllm `/metrics` 端点。
 - **守护进程（daemon）**：业务内的一个 `--daemon`（ip:port）。
 - **匹配（match）**：中心为每个守护进程生成**独立密钥**并下发，守护进程进入 `managed` 托管状态。密钥持久化落盘，中心重启后带同一密钥自证身份，无需守护进程重新匹配。
-- **阈值（thresholds）**：每个业务一组独立阈值（cal/cpu/bubble_ns/comm_threshold/comm_min_count/comm_count_floor），初始值继承中心启动参数，可在业务控制台/API 动态调整。
+- **阈值（thresholds）**：每个业务一组独立阈值（cal/cpu/comm_threshold/comm_min_count/comm_count_floor），初始值继承中心启动参数，可在业务控制台/API 动态调整。
 
 ### 5.3 托管（managed）语义
 
@@ -467,7 +465,7 @@ curl -s -X POST localhost:8080/daemon/stop
 | `POST /center/business/{name}/pause` | 暂停业务调度 |
 | `POST /center/business/{name}/start` | 恢复业务调度 |
 | `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |
-| `POST /center/business/{name}/thresholds` | 修改业务阈值 `{"cal","cpu","bubble_ns","comm_threshold","comm_min_count","comm_count_floor"}` |
+| `POST /center/business/{name}/thresholds` | 修改业务阈值 `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
 | `POST /center/business/{name}/vllm` | 设置业务 vllm `/metrics` 端点 `{"url"}` |
 | `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |
 | `GET /center/business/{name}/metrics` | 业务 TPOT/TTFT 延迟时序（按 engine） |
@@ -507,7 +505,7 @@ KPI 历史与节点/device allowlist 存在 `center_data/kpi.db`（SQLite）：�
 {
   "profiler": {
     "node_result": [
-      { "hostname": "<hostName>", "npu": [ { "id": 0, "cal": { "score": 1.5 }, "npu_bubble": { "score": 3200.0 } } ], "cpu": { "score": 1.4 } }
+      { "hostname": "<hostName>", "npu": [ { "id": 0, "cal": { "score": 1.5 } } ], "cpu": { "score": 1.4 } }
     ],
     "comm_domain_result": { "tp": { "0,1,2,3": 3.2 } }
   },
@@ -519,7 +517,7 @@ KPI 历史与节点/device allowlist 存在 `center_data/kpi.db`（SQLite）：�
 ```
 
 - **只跑 Profiler** → 只有 `"profiler"` 键；**只跑 KPI** → 只有 `"kpi"` 键。
-- `profiler` 段 = `node_result[]` 按物理节点分组（hostname，缺失回退 hostUid），`npu[]` 只含异常 NPU（cal / npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
+- `profiler` 段 = `node_result[]` 按物理节点分组（hostname，缺失回退 hostUid），`npu[]` 只含异常 NPU（cal），`cpu` 节点级；`comm_domain_result` 按通信域分组（组内 rank 逗号连接 → score）。
 - `kpi` 段 = summary + `anomaly_metrics`（指标优先：每个异常指标下列异常卡及其空间 score）。
 
 **守护进程模式的数据落盘**（`--profiler-dir` 之外，不受周期清理影响）：
@@ -558,7 +556,6 @@ daemon_results/<start>/
 慢计算 (cal): 异常 (2) 0: 1.50x; 3: 1.60x
 慢通信 (comm): 无异常
 慢CPU (cpu): 无异常            ← 物理节点数 < 2 时整行不显示
-Bubble (npu_bubble): 无异常
 ```
 
 ---
@@ -572,7 +569,6 @@ Bubble (npu_bubble): 无异常
 | `path` | string | 否* | — | Profiler `.db` 目录（*与 KPI 输入至少提供一个） |
 | `--cal-threshold` | float64 | 否 | 1.3 | 慢计算阈值（kmeans 比例） |
 | `--cpu-threshold` | float64 | 否 | 2.5 | 慢CPU 阈值（kmeans 比例） |
-| `--bubble-threshold-ns` | float64 | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--kpi-path` | string | 否* | — | KPI 模式：每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否* | — | KPI 模式：CATMonitor `straggler_kpi_*.jsonl` 目录（优先于 `--kpi-path`） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（独立旋钮） |
@@ -605,7 +601,7 @@ Bubble (npu_bubble): 无异常
 | `--center-data-dir` | string | 否 | center_data | 持久化根目录（业务列表 + 每业务每周期结果） |
 | `--center-interval` | int | 否 | 600 | 新业务默认触发周期（秒，≥60） |
 
-> 中心节点模式的**阈值每个业务独立**（一组 cal/cpu/bubble/comm 阈值），新业务继承中心启动参数，之后可在业务控制台/API 动态调整（见[五、中心节点模式](#五中心节点模式)）。
+> 中心节点模式的**阈值每个业务独立**（一组 cal/cpu/comm 阈值），新业务继承中心启动参数，之后可在业务控制台/API 动态调整（见[五、中心节点模式](#五中心节点模式)）。
 
 ### 阈值（各自独立，无派生基数）
 
@@ -616,7 +612,6 @@ KPI 模式:
 Profiler 模式（每个阈值独立可调，不再由 degradation 派生）:
   CalThreshold       = --cal-threshold               # 慢计算（默认 1.3）
   CPUThreshold       = --cpu-threshold               # 慢CPU（默认 2.5）
-  BubbleThresholdNs  = --bubble-threshold-ns         # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold             # 慢通信带宽比（默认 1.3）
   SlowCommMinCount   = --comm-min-count              # 带宽统计最小 op 计数（默认 1000）
   SlowCommCountFloor = --comm-count-floor            # 代表 count 下限（默认 10240）
@@ -700,8 +695,8 @@ straggler/
 │   └── detector/           #   检测算法
 │       ├── constants.go    #   并行域 / 列名常量
 │       ├── data_parser.go  #   并行域拓扑 + 单步快照
-│       ├── detection.go    #   主流水线（4 类检测编排）
-│       ├── data_handler.go #   慢计算/慢通信/慢CPU/Bubble 实现
+│       ├── detection.go    #   主流水线（3 类检测编排）
+│       ├── data_handler.go #   慢计算/慢通信/慢CPU 实现
 │       ├── clustering.go   #   HomogenizationComparisonFunc 包装（kmeans）
 │       └── debug.go        #   --debug-output 诊断分数
 ├── config/                 # Profiler 共享配置

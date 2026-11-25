@@ -356,7 +356,7 @@ KPI 未发现异常但怀疑性能问题时，启用 Profiler（一次性 `path=
 
 ```bash
 ./slowNodeDetection path=/data/profiler_output degradation=0.3
-# 读 ascend_pytorch_profiler_*.db，检测慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble
+# 读 ascend_pytorch_profiler_*.db，检测慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）
 ```
 
 可与第一道联合：`--kpi-jsonl-dir=... path=/data/profiler_output`（先 KPI，未命中则 fallback Profiler）。

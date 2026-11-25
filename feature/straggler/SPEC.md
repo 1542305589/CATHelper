@@ -20,7 +20,7 @@
    └─────────┬───────────┘               └─────────┬───────────┘
              │                                     │
              ▼                                     ▼
-   NPU 资源 KPI 异常报告                慢计算/慢通信/慢CPU/Bubble
+   NPU 资源 KPI 异常报告                慢计算/慢通信/慢CPU
         │                                       │
         └──────────────────┬────────────────────┘
                            ▼
@@ -29,7 +29,7 @@
 ```
 
 - **KPI 模式**：基于 11 个 NPU 资源指标，空间维度 peer 对比（最后一个聚合点），轻量快速，适合常态化初筛。
-- **Profiler 模式**：基于 Ascend PyTorch Profiler Level0 SQLite 数据，从计算/通信/CPU/Bubble 四个维度深入分析单步性能。
+- **Profiler 模式**：基于 Ascend PyTorch Profiler Level0 SQLite 数据，从计算/通信/CPU 三个维度深入分析单步性能。
 
 **运行策略**：KPI 检测优先执行。有 `path`（Profiler 数据）时：KPI 发现异常 → 继续跑 Profiler 交叉验证；KPI 无异常 → 降级到 Profiler。KPI 失败（有 `path`）→ 告警后仍执行 Profiler。仅 KPI 无 `path` → KPI 结果即为最终输出。
 
@@ -40,7 +40,7 @@
 ## CLI
 
 ```
-slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--bubble-threshold-ns=5000] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat] [--debug-output]
+slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat] [--debug-output]
 ```
 
 ### 参数
@@ -50,7 +50,6 @@ slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--
 | `path` | string | 否* | — | Profiler `.db` 文件目录（*KPI 模式或 Profiler 至少提供一个） |
 | `--cal-threshold` | float64 | 否 | 1.3 | 慢计算 kmeans 比例阈值 |
 | `--cpu-threshold` | float64 | 否 | 2.5 | 慢CPU kmeans 比例阈值 |
-| `--bubble-threshold-ns` | float64 | 否 | 5000 | NPU Bubble 绝对阈值（ns） |
 | `--kpi-path` | string | 否 | — | KPI 模式：包含多个每节点 CSV + `node_config.json` 的目录 |
 | `--kpi-jsonl-dir` | string | 否 | — | KPI 模式：CATMonitor `straggler_kpi_{date}.jsonl` 目录（优先于 `--kpi-path`） |
 | `--space-ratio-threshold` | float64 | 否 | 2.0 | 空间 kmeans 簇比例阈值（簇均值/基线均值，独立旋钮，不随 degradation 变化） |
@@ -85,7 +84,6 @@ KPI 模式:
 Profiler 模式:
   CalThreshold       = --cal-threshold              # 慢计算（默认 1.3）
   CPUThreshold       = --cpu-threshold              # 慢CPU（默认 2.5）
-  BubbleThresholdNs  = --bubble-threshold-ns        # NPU Bubble（默认 5000ns）
   CommThreshold      = --comm-threshold            # 慢通信带宽比（默认 1.3）
   SlowCommMinCount   = --comm-min-count             # 带宽统计最小 op 计数（默认 1000）
   SlowCommCountFloor = --comm-count-floor           # 代表 count 下限（默认 10240）
@@ -356,7 +354,6 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 | `ZP_Device` | step 内非通信时间 = stepDuration − 合并后通信总跨度 |
 | `ZP_Duration` | 总通信时间（合并重叠区间） |
 | `ZP_Host` | 平均 Host 耗时（通信算子 + KERNEL_AICORE 的 Host 端耗时均值） |
-| `ZP_Bubble` | 平均 Bubble 时间（OpStartNs − HostEndNs 的正值均值） |
 | `ZP_Kernel` | 平均 KERNEL_AICORE 任务耗时 |
 | `DataLoader` | MSTX_EVENTS 中 DataLoader 耗时 |
 | `{domain}_Duration` | 该并行域内通信算子平均耗时 |
@@ -370,7 +367,6 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 | 慢计算 | `cal` | ZP_Kernel | max | CalThreshold | 单卡 |
 | 慢通信 | `comm` | `{domain}_<opType>_<count>`（带宽，各域独立） | min | CommThreshold | 卡组 |
 | 慢CPU | `cpu` | ZP_Host（按 hostUid 平滑预处理） | max | CPUThreshold | 单卡 |
-| NPU Bubble | `npu_bubble` | ZP_Bubble | — | BubbleThresholdNs（默认 5000ns） | 单卡 |
 
 #### 检测方法
 
@@ -379,8 +375,6 @@ ascend_pytorch_profiler_{N}.db （每个设备一个）
 **慢通信（带宽聚类）**：解析完成后先做全局回填 —— 重新扫描 `.db`、重建并行拓扑，将各 rank 的集合通信 op 按 (opType, count) 对齐（跳过 pp / Send / Recv 点对点），计算每类 op 的带宽并写入 CSV 动态列 `{domain}_<opType>_<count>`。**带宽计算**：对每个 (opType,count) 组合取**前 10% 的均值时间**作分母，带宽 = count / 该均值时间。默认（不传 `--comm-flat`）：先跨 rank 对齐（wall-clock 时间重叠），每个 occurrence 取**组内各 rank 的最短时长**，收集这些组内最短时长后升序取前 10% 均值；传 `--comm-flat`：不跨 rank 匹配，把**全体 rank 的符合条件算子时长**汇成一个扁平池，在池上直接取前 10% 均值。检测时对每个非 PP/非 embd 域，**先按算子类型（opType）分类**：每个通信组在某一 opType 下取 **count 最大**的带宽作代表（大数据量更能体现真实带宽）；再取所有组代表 count 的最大值，仅保留 **count ≥ 该最大值 ×50% 且 count > 10240** 的组（其余组不参与该算子检测）；对剩余组的代表带宽用共享 kmeans 递归聚类（`clustering.Detect`，方向 min：带宽越小越慢，阈值 `CommThreshold` 默认 1.3）检出劣化组与劣化指数（= 基线带宽/该组带宽，>1）。最后：一个组**必须在该域所有算子类型都异常**才上报（否则视为噪声不报），上报的劣化数值取该组在所有算子异常劣化指数中的**最大值**，写入 `comm`（复用 `comm_domain_result`）。参与聚类数据 < 2 或该域无带宽列 → 跳过。
 
 **慢CPU**：从每张卡的 `.db` 文件读取 `HOST_INFO.hostUid`，将相同 hostUid 的卡视为同一物理节点。每组节点内计算去 min/max 的修剪均值（≤2 个则普通均值），覆盖原始值后均质化聚类（方向 max），消除节点内差异暴露节点间差异。旧版 profiler 缺少 HOST_INFO 表时对应卡跳过预处理，保留原始 ZP_Host 参与聚类。物理节点数 < 2 时该检测无意义，stdout 摘要整行不显示。
-
-**NPU Bubble**：固定阈值 `< 5000 ns`（5µs）且 > 0，直接判定；上报原始值（非比率）。
 
 ### 2.6 输出
 
@@ -397,8 +391,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
         "npu": [
           {
             "id": 0,
-            "cal":        { "score": 1.5 },
-            "npu_bubble": { "score": 3200.0 }
+            "cal":        { "score": 1.5 }
           }
         ],
         "cpu": { "score": 1.4 }
@@ -413,7 +406,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 }
 ```
 
-- `node_result[]`：每个异常节点一条，含 `hostname`、`npu[]`（只含异常的 NPU，`cal`/`npu_bubble` score 仅在异常时出现）、`cpu`（节点级，慢节点的共享值）
+- `node_result[]`：每个异常节点一条，含 `hostname`、`npu[]`（只含异常的 NPU，`cal` score 仅在异常时出现）、`cpu`（节点级，慢节点的共享值）
 - `comm_domain_result`：key = 通信域名字（可读域名，如 tp），value = 组内 rank 集（逗号连接）→ score
 - 顶层 `straggler_output.json`：KPI 结果在 `kpi` 键，Profiler 结果在 `profiler` 键；只跑 KPI 则只有 `kpi`，只跑 Profiler 则只有 `profiler`
 
@@ -564,7 +557,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
     "duration_ms": 120000,
     "dbs": 8,
     "dump_dir": "daemon_results/20260820-100000",
-    "summary": { "profiler": { "cal": 1, "comm": 0, "cpu": 0, "npu_bubble": 0 }, "kpi": { "temp": 1 } }
+    "summary": { "profiler": { "cal": 1, "comm": 0, "cpu": 0 }, "kpi": { "temp": 1 } }
   },
   "next_run_at": "2026-08-20T10:10:00+08:00"
 }
@@ -621,9 +614,9 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 | `daemon` | 守护进程：周期调度（dynolog/dyno 采集）、runCycle 编排、HTTP 查询/控制、结果落盘 |
 | `resource` | KPI 检测引擎：解析 → 聚合 → 空间检测 → 指标分组 → 报告 → JSON 导出 |
 | `clustering` | 共享 kmeans 比例检测算法（KPI 空间检测与 Profiler 慢计算/慢CPU 聚类共用） |
-| `config` | Profiler 全局配置（FilePath + 一组独立阈值 CalThreshold/CPUThreshold/BubbleThresholdNs/CommThreshold/SlowCommMinCount/SlowCommCountFloor、SlowCommFlat）、Thresholds 结构 + Apply、DegradationData 结果聚合 |
+| `config` | Profiler 全局配置（FilePath + 一组独立阈值 CalThreshold/CPUThreshold/CommThreshold/SlowCommMinCount/SlowCommCountFloor、SlowCommFlat）、Thresholds 结构 + Apply、DegradationData 结果聚合 |
 | `profiling/dataparse` | SQLite `.db` 解析 → CSV + JSON 中间文件（含 host_info/npu_info）；含慢通信带宽回填 `slow_domain.go` |
-| `profiling/detector` | 并行域拓扑解析、单步快照、四类检测逻辑（慢通信走带宽比较 `slow_domain.go`）、debug 诊断分 |
+| `profiling/detector` | 并行域拓扑解析、单步快照、检测逻辑（慢通信走带宽比较 `slow_domain.go`）、debug 诊断分 |
 | `utils` | Profiler 结果写入（stdout 摘要 + 节点聚合结构） |
 | `report` | Profiler 文本报告生成 |
 
@@ -639,7 +632,7 @@ daemon_results/<start>/                # 每周期结果直接落盘于此（dum
 - **KPI: ≤0 钳制参与**：真实 0（空闲/关闭）是有意义的读数，钳制到 `zeroFloor=1e-3` 参与聚类；钳制只在资源层做，共享聚类包保持过滤 ≤0（Profiler 侧 0/缺失不参与）。
 - **Profiler: 合并 Step**：所有 step 合并为单聚合 step（minStart → maxEnd），CSV 仅一行。Profiler 时间分辨率低，逐 step 不可靠。
 - **Profiler: 倒数第二行**：多行数据取 n-2 行，避免末行不完整。
-- **-99999 哨兵**（Profiler）：统一无效数据标记，在 GetCurJobLastStepData、detectionZpBubbleData、report.filterValid 中跳过。
+- **-99999 哨兵**（Profiler）：统一无效数据标记，在 GetCurJobLastStepData、report.filterValid 中跳过。
 - **Profiler: 单一算法**：kmeans 比例检测（`clustering` 包）是唯一的异常检测器，所有场景通用，并与 KPI 空间检测共享同一实现。
 - **Profiler: 不做时序分析**：仅处理单次快照，不进行趋势/移动平均/变点检测。
 - **单一检测管线**：daemon 与一次性模式共用 `detectFromParsedData`（main 以 `DetectFunc` 注入 daemon，避免 import cycle）。

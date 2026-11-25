@@ -194,7 +194,7 @@
 
 #### 上层特性 — Straggler 慢节点检测 v0.2.0
 
-- **两道防线检测体系**：第一道（KPI 资源指标检测）基于 15 天历史基线 + 1h 检测窗，时间×空间双维 Z-score + 二维交叉验证 + 根因定界；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU/NPU Bubble
+- **两道防线检测体系**：第一道（KPI 资源指标检测）基于 15 天历史基线 + 1h 检测窗，时间×空间双维 Z-score + 二维交叉验证 + 根因定界；第二道（Profiler 检测）读 Ascend PyTorch Profiler `.db`，均质化聚类检测慢计算/慢通信/慢CPU
 - **独立 Go module**：`feature/straggler/`（自带 `go.mod`，依赖纯 Go `modernc.org/sqlite`，无 CGo），import 路径重构为 `.../CATHelper/feature/straggler/*`
 - **与 CATMonitor 底座整合**：第一道接入 CATMonitor——新增 opt-in 的 `stragglerout` KPI 文件输出（替代自带 `kpi_collect.sh`）；第二道（Profiler `.db`）保留独立
 - **检测命中回注 faultsub**：straggler 把慢卡作为 `straggler_detected` 事件 POST 给 CATMonitor faultsub（经 `POST /faultsub/events` ingest 端点），由 faultsub 推送给订阅者（EEP/运维）触发卡隔离/排查，闭环"采集→检测→响应"

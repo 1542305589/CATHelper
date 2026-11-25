@@ -176,7 +176,7 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 | 防线 | 输入 | 方法 | 输出 |
 |------|------|------|------|
 | 第一道（KPI 资源检测） | NPU KPI 时序（取最后一个聚合点） | 空间 peer 对比（同节点卡互比，共享 kmeans 比例检测，无历史基线/检测窗口） | JSON + stdout 报告 |
-| 第二道（Profiler 检测） | Ascend PyTorch Profiler `.db`（按需） | 均质化聚类：慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble | JSON + 文本报告 |
+| 第二道（Profiler 检测） | Ascend PyTorch Profiler `.db`（按需） | 均质化聚类：慢计算/慢通信/慢CPU（按物理节点 hostUid 分组） | JSON + 文本报告 |
 
 两道结果合并为一份 `straggler_output.json`（只跑到的维度才有对应键）。守护进程模式默认端口 `:8080`，提供 `GET /status`/`/straggler/results/{latest,history,{id}}`/`/straggler/report/{latest,{id}}`/`/straggler/op_metric/{latest,{id},{id}/{file}}` 与 `POST /daemon/{start,pause,interval,trigger,stop}`。
 
@@ -199,7 +199,7 @@ Straggler 是 CATHelper 的第二个上层特性，检测 AI 集群中性能劣�
 | `aicore_freq`（频率降档） | 排查驱动/固件频率策略 |
 | `tx_bandwidth` / `rx_pfc_pkt` / `roce_*`（通信类异常） | 排查光模块/光纤/CRC |
 | `hbm_*`（HBM 带宽/使用率异常） | 排查 HBM 负载/容量 |
-| 慢计算 `cal` / 慢CPU `cpu` / Bubble `npu_bubble` | 触发 Profiler 精查 或 卡隔离 |
+| 慢计算 `cal` / 慢CPU `cpu` | 触发 Profiler 精查 或 卡隔离 |
 | 慢通信 `comm` | 排查通信拓扑/链路 |
 
 整合设计详见 [feature/straggler/straggler_combination_DESIGN.md](feature/straggler/straggler_combination_DESIGN.md)。

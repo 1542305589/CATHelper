@@ -8,15 +8,14 @@ import (
 // DelimitDetection — main detection pipeline
 // ---------------------------------------------------------------------------
 
-// DelimitDetection orchestrates all four detection categories and returns
+// DelimitDetection orchestrates all detection categories and returns
 // the aggregated results as a DegradationData map.
 //
 // Pipeline:
 //  1. Select primary detection group.
-//  2. Detect NPU Bubble (fixed threshold).
-//  3. Detect slow compute (homogeneous clustering on primary group).
-//  4. Detect slow communication (per-domain group bandwidth comparison).
-//  5. Detect slow CPU (homogeneous clustering with hostUid-based trim preprocessing).
+//  2. Detect slow compute (homogeneous clustering on primary group).
+//  3. Detect slow communication (per-domain group bandwidth comparison).
+//  4. Detect slow CPU (homogeneous clustering with hostUid-based trim preprocessing).
 func DelimitDetection(
 	stepData map[string]map[int]float64,
 	parallels map[string][][]int,
@@ -37,18 +36,13 @@ func DelimitDetection(
 		return nil
 	}
 
-	// 2. NPU Bubble detection.
-	if bubbleData, ok := stepData[zpBubble]; ok {
-		detectionZpBubbleData(bubbleData, localResult)
-	}
-
-	// 3. Slow compute detection.
+	// 2. Slow compute detection.
 	_ = getSlowCalculateRanks(calGroups, stepData, calGroupName, localResult)
 
-	// 4. Slow communication detection (bandwidth comparison per domain group).
+	// 3. Slow communication detection (bandwidth comparison per domain group).
 	DetectSlowDomainByBandwidth(parallels, stepData, localResult)
 
-	// 5. Slow CPU detection.
+	// 4. Slow CPU detection.
 	if hostData, ok := stepData[zpHostDataColumn]; ok {
 		hostUidMapping := GetHostUidMapping(config.FilePath, validRanks)
 		getSlowHostRanksByHomogenize(validRanks, hostData, localResult, hostUidMapping)
@@ -86,7 +80,7 @@ func GetCalDetectionGroup(parallels map[string][][]int, curNpus []int) (string, 
 	// No recognized parallel domain (e.g. group names not registered in the
 	// profiler data, or only unknown domains like "mc2" present): degrade to
 	// a single group of all ranks so cal-only detection can still run. Slow
-	// comm/CPU/bubble have no data without group names and stay silent.
+	// comm/CPU have no data without group names and stay silent.
 	if len(curNpus) >= minRanksInGroup {
 		return defaultGroupParallelDomainName, [][]int{curNpus}
 	}

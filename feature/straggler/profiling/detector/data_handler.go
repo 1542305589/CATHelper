@@ -55,23 +55,6 @@ func detCalForOneGroup(alignedData map[string]map[int]float64, npuGroup []int) (
 }
 
 // ---------------------------------------------------------------------------
-// NPU Bubble detection
-// ---------------------------------------------------------------------------
-
-// detectionZpBubbleData flags ranks whose NPU bubble time is below the
-// configured absolute threshold (config.BubbleThresholdNs, default 5000 ns).
-func detectionZpBubbleData(npuData map[int]float64, localResult config.DegradationData) {
-	for npuID, value := range npuData {
-		if value <= 0 {
-			continue
-		}
-		if value < config.BubbleThresholdNs {
-			localResult.AddSingle("npu_bubble", npuID, value)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Slow CPU detection
 // ---------------------------------------------------------------------------
 

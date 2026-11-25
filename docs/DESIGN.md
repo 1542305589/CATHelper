@@ -600,12 +600,12 @@ EEP（Elastic EP）实现推理大 EP 部署的卡级弹性容错，目前仅支
 
 ### 5.1 特性定位
 
-straggler 是 AI 智算集群中识别性能劣化 NPU 卡的**两道防线**检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（取最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU/Bubble 四个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行。
+straggler 是 AI 智算集群中识别性能劣化 NPU 卡的**两道防线**检测体系。第一道 **KPI 资源检测**（轻量、常态化）基于 NPU 资源指标做空间 peer 对比（取最后一个聚合点）；第二道 **Profiling 深查**（按需触发）基于 Ascend PyTorch Profiler 数据从计算/通信/CPU 三个维度精查。两道结果合并输出为**一个 JSON 文件**。既支持一次性手动运行，也支持**守护进程模式**（`--daemon`）常驻运行。
 
 | 防线 | 包 | 输入 | 方法 | 输出 |
 |------|----|------|------|------|
 | **第一道（KPI 资源检测）** | `resource/` | KPI 时序（CATMonitor opt-in 输出 `straggler_kpi_{date}.jsonl`，取最后一个聚合点） | 空间 peer 对比（同节点卡互比，共享 kmeans 比例检测） | JSON + stdout 报告 |
-| **第二道（Profiler 检测）** | `profiling/` | Ascend PyTorch Profiler `.db` SQLite（应用级、按需触发） | 均质化聚类：慢计算/慢通信/慢CPU（按物理节点 hostUid 分组）/NPU Bubble | JSON + 文本报告 |
+| **第二道（Profiler 检测）** | `profiling/` | Ascend PyTorch Profiler `.db` SQLite（应用级、按需触发） | 均质化聚类：慢计算/慢通信/慢CPU（按物理节点 hostUid 分组） | JSON + 文本报告 |
 
 **检测顺序**：先 KPI（轻量、无侵入）→ KPI 发现异常 → 有 `path` 时继续跑 Profiler 做交叉验证；KPI 无异常 → 自动 fallback 到 Profiler 精查；仅 KPI 无 `path` → KPI 结果即为最终输出。两道结果合并进 `straggler_output.json`（只跑哪个维度就只有哪个键）。
 
@@ -746,22 +746,20 @@ ProcessDatabase(dbPath):
 | 指标 | 计算方式 |
 |------|---------|
 | **ZP_Host** | 所有通信算子和 KERNEL_AICORE 的 `HEndNs - HStartNs` 均值（HStartNs > 0 && HEndNs ≥ HStartNs） |
-| **ZP_Bubble** | 所有 `OpStartNs - HostEndNs > 0` 的正值均值 |
 | **ZP_Duration** | 收集所有通信区间 → `mergeIntervalsSimple` 合并重叠 → 总跨度 |
 | **ZP_Device** | `stepDuration - ZP_Duration`（钳位到 0） |
 | **ZP_Kernel** | `SELECT AVG(endNs - startNs) FROM TASK ... WHERE KERNEL_AICORE` |
 | 各域 Duration/Count | 域内算子 → `CalculateMidMeanPair`（去 min/max 后均值） |
 
-#### 5.4.3 四类检测
+#### 5.4.3 检测类别
 
 | 类别 | 数据 | 阈值/方向 | 说明 |
 |------|------|-----------|------|
 | 慢计算 `cal` | ZP_Kernel（优先）/ ZP_Duration（降级） | `CalThreshold`(1+deg) | kmeans，方向 max/min |
 | 慢通信 `comm` | `{域}_Duration` | `CommThreshold`(1+deg×5) | 每组取通信时长最小的卡为代表，按 PP stage 分桶后 kmeans，方向 max |
 | 慢CPU `cpu` | ZP_Host（hostUid 平滑） | `CalThreshold` | 同主机卡取去 min/max 均值消除节点内差异 |
-| Bubble `npu_bubble` | ZP_Bubble | `< 5000 ns` | 固定阈值直接判定 |
 
-> cal / comm / cpu 三类检测统一走共享 `clustering` 包（kmeans 比例检测），与 KPI 空间 cluster 同一算法；Bubble 走固定阈值直接判定。
+> cal / comm / cpu 三类检测统一走共享 `clustering` 包（kmeans 比例检测），与 KPI 空间 cluster 同一算法。
 
 #### 5.4.4 主检测组优先级与去重
 
@@ -926,7 +924,7 @@ CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o slownode_linux_amd64 .       
   },
   "profiler": {
     "node_result": [
-      { "hostname": "<hostName>", "npu": [ { "id": 0, "cal": { "score": 1.5 }, "npu_bubble": { "score": 3200.0 } } ], "cpu": { "score": 1.4 } }
+      { "hostname": "<hostName>", "npu": [ { "id": 0, "cal": { "score": 1.5 } } ], "cpu": { "score": 1.4 } }
     ],
     "comm_domain_result": { "tp": { "0,1,2,3": 3.2 } }
   }
@@ -935,7 +933,7 @@ CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o slownode_linux_amd64 .       
 
 - **只跑 KPI** → 只有 `"kpi"` 键；**只跑 Profiler** → 只有 `"profiler"` 键；KPI 检测失败且无 Profiler → 不写文件。
 - `kpi` 段：`summary`/`anomaly_metrics`（每个异常指标下列异常卡及空间 score）。
-- `profiler` 段：`node_result[]` 按物理节点（hostname，缺失回退 hostUid）分组，`npu[]` 只含异常 NPU（cal/npu_bubble），`cpu` 节点级；`comm_domain_result` 按通信域分组。
+- `profiler` 段：`node_result[]` 按物理节点（hostname，缺失回退 hostUid）分组，`npu[]` 只含异常 NPU（cal），`cpu` 节点级；`comm_domain_result` 按通信域分组。
 
 文本报告：Profiler 报告 `path/analysis_result/detection_report.log`（4 类状态摘要表 + ZP_Kernel 跨 rank 排序柱状图 + ZP_Host 跨节点对比 + 通信域分组对比）；KPI 文本仅打印 stdout（`npu_resource_detection_report.log` 已移除）。
 

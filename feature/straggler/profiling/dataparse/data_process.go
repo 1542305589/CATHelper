@@ -32,7 +32,7 @@ var (
 // would otherwise keep stale *sync.Once objects for the same paths: the second
 // and later cycles' once.Do become no-ops, the JSON files stop being written,
 // GetCurDetectionInfo falls back to CSV-only rank collection (no parallel
-// topology), and slow-communication/CPU/bubble detection silently lose input.
+// topology), and slow-communication/CPU detection silently lose input.
 // One-shot mode is unaffected (single pass, first Do always fires).
 // Call this at the start of every daemon cycle, before StartProcess.
 func ResetFileWriteOnce() {
@@ -375,7 +375,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		pm.ZPDevice = invalidData
 		pm.ZPDuration = invalidData
 		pm.ZPHost = invalidData
-		pm.ZPBubble = invalidData
 		pm.ZPCount = invalidData
 		pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
 		pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
@@ -392,7 +391,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 	if err != nil || len(groupNameIDMap) == 0 {
 		pm.ZPDuration = invalidData
 		pm.ZPDevice = invalidData
-		pm.ZPBubble = invalidData
 		pm.ZPCount = invalidData
 		pm.ZPHost = invalidData
 		pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
@@ -425,7 +423,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		// No communication ops — invalidate all but ZP_Host (use kernel host fallback).
 		pm.ZPDevice = invalidData
 		pm.ZPDuration = invalidData
-		pm.ZPBubble = invalidData
 		pm.ZPCount = invalidData
 		pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
 		pm.DataLoader, _ = queryDataLoaderDuration(db, dlID, stepTime)
@@ -464,7 +461,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 
 	// Fill host times into device ops.
 	var hostDurations []int
-	var bubbleDurations []int
 	var intervals []Interval
 
 	for i := range devOps {
@@ -475,10 +471,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		// Host duration.
 		if devOps[i].HStartNs > 0 && devOps[i].HEndNs >= devOps[i].HStartNs {
 			hostDurations = append(hostDurations, devOps[i].HEndNs-devOps[i].HStartNs)
-		}
-		// Bubble duration.
-		if devOps[i].HEndNs > 0 && devOps[i].StartNs > devOps[i].HEndNs {
-			bubbleDurations = append(bubbleDurations, devOps[i].StartNs-devOps[i].HEndNs)
 		}
 		// Communication intervals.
 		if devOps[i].StartNs > 0 && devOps[i].EndNs >= devOps[i].StartNs {
@@ -502,12 +494,6 @@ func TimeDiffForStep(db *sql.DB, xpToGroupName map[string]string, stepTime StepT
 		pm.ZPHost = m
 	} else {
 		pm.ZPHost = invalidData
-	}
-
-	if m, err := CalculateMean(bubbleDurations); err == nil {
-		pm.ZPBubble = m
-	} else {
-		pm.ZPBubble = invalidData
 	}
 
 	pm.ZPKernel, _ = GetAvgKernelTaskDuration(db, stepTime)
@@ -775,7 +761,7 @@ func WriteResultsToCSV(outputFile string, metrics []PerformanceMetrics) error {
 	// Build header.
 	header := []string{
 		"StepIndex", "StepDuration", "ZP_Device", "ZP_Duration",
-		"ZP_Host", "ZP_Bubble", "ZP_Count", "ZP_Kernel", "DataLoader",
+		"ZP_Host", "ZP_Count", "ZP_Kernel", "DataLoader",
 	}
 	for _, d := range domains {
 		header = append(header, d+"_Duration", d+"_Count")
@@ -805,7 +791,6 @@ func WriteResultsToCSV(outputFile string, metrics []PerformanceMetrics) error {
 			strconv.Itoa(m.ZPDevice),
 			strconv.Itoa(m.ZPDuration),
 			strconv.Itoa(m.ZPHost),
-			strconv.Itoa(m.ZPBubble),
 			strconv.Itoa(m.ZPCount),
 			strconv.Itoa(m.ZPKernel),
 			strconv.Itoa(m.DataLoader),

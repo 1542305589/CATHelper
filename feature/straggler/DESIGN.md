@@ -7,13 +7,12 @@
 var FilePath string                                  // CLI path= 设置
 var CalThreshold float64                             // 慢计算阈值（--cal-threshold，默认 1.3）
 var CPUThreshold float64                             // 慢CPU 阈值（--cpu-threshold，默认 2.5）
-var BubbleThresholdNs float64                        // NPU Bubble 绝对阈值（--bubble-threshold-ns，默认 5000）
 var CommThreshold float64                            // 慢通信带宽劣化阈值（--comm-threshold，默认 1.3）
 var SlowCommMinCount int                             // 带宽统计最小 op 计数（--comm-min-count，默认 1000）
 var SlowCommCountFloor int                           // 代表 count 下限（--comm-count-floor，默认 10240）
 var SlowCommFlat bool                                // 带宽分母改用全体 rank 扁平池前10%均值（--comm-flat，默认 false）
 
-type Thresholds struct { Cal, CPU, BubbleNs, CommThreshold float64; CommMinCount, CommCountFloor int }
+type Thresholds struct { Cal, CPU, CommThreshold float64; CommMinCount, CommCountFloor int }
 func DefaultThresholds() Thresholds
 func (t Thresholds) Normalized() Thresholds
 func Apply(t Thresholds)     // 设置上面这些全局「生效阈值」
@@ -69,7 +68,6 @@ func CalculateMidMeanPair(stats []OpStat) (meanDuration, meanCount int, err erro
 | 指标 | 计算方式 |
 |------|---------|
 | ZP_Host | 所有通信算子和 KERNEL_AICORE 的 `HEndNs - HStartNs` 均值（HStartNs > 0 && HEndNs ≥ HStartNs）；空 → -99999 |
-| ZP_Bubble | 所有 `OpStartNs - HostEndNs > 0` 的正值均值（HEndNs > 0）；空 → -99999 |
 | ZP_Duration | 收集所有通信区间 → `mergeIntervalsSimple` 合并重叠 → 总跨度 |
 | ZP_Device | `stepDuration - ZP_Duration`（钳位到 0） |
 | ZP_Kernel | `SELECT AVG(endNs - startNs) FROM TASK ... WHERE KERNEL_AICORE` |
@@ -128,7 +126,7 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
   2. 收集非零值，要求 >= minRanksInGroup(2)
   3. kmeans 比例检测 → AddSingle("cal", rank, degradation)
 ```
-主检测组无可用并行域（组名未注册/仅未知域如 mc2）时，GetCalDetectionGroup 降级为**全体 rank 一组**（default_group），cal 仍可检测；comm/CPU/Bubble 无数据保持静默。
+主检测组无可用并行域（组名未注册/仅未知域如 mc2）时，GetCalDetectionGroup 降级为**全体 rank 一组**（default_group），cal 仍可检测；comm/CPU 无数据保持静默。
 
 #### 慢通信（DetectSlowDomainByBandwidth，带宽 kmeans 递归聚类）
 ```
@@ -167,14 +165,6 @@ func DebugRankScores(stepData map[string]map[int]float64, validRanks []int) map[
 ```
 
 注：旧版本硬编码每 4 个连续 rank 为一台机器，现已改为从 profiler 数据库 `HOST_INFO` 表读取实际 `hostUid` 进行分组。若 `HOST_INFO` 表不存在则对应卡跳过预处理。
-
-#### NPU Bubble（detectionZpBubbleData）
-```go
-for npuID, value := range ZP_Bubble:
-    if value > 0 && value < 5000:
-        AddSingle("npu_bubble", npuID, value)
-```
-注：阈值硬编码 `< 5000`；config 中无对应参数（`zpBubbleAbnormalBoundary` 已移除）。
 
 ### clustering（共享 kmeans 比例检测）
 ```go
@@ -215,10 +205,10 @@ func ReadFile(filePath string) ([]byte, error)
 
 **BuildNodeResult 逻辑**（节点聚合输出，不写文件，返回 `NodeOutput` 供 main 合并进 `straggler_output.json` 的 `profiler` 段）：
 1. 读 `op_metric/host_info_{N}.json`（hostName）+ `npu_info_{N}.json`（NPU id）作为每 rank 元数据
-2. cal / npu_bubble（逐 rank）→ 按 hostname 分组、按 NPU id 聚合 → `node_result[].npu[]`，只含有异常的节点/NPU
+2. cal（逐 rank）→ 按 hostname 分组、按 NPU id 聚合 → `node_result[].npu[]`，只含有异常的节点/NPU
 3. cpu（逐 rank，节点级）→ `node_result[].cpu`（节点内 rank 值相同，取共享值）
 4. comm → 用 `findDomainForRanks` 解析域名 → `comm_domain_result[域名][组key] = score`
-5. stdout 逐类摘要（慢计算/慢通信/慢CPU/Bubble，单节点跳过慢CPU）；JSON 由 main.go 合并写入运行目录 `straggler_output.json`（`{"kpi": ..., "profiler": ...}`）。`--debug-output` 时传入 `DebugInfo{ValidRanks, RankScores, CommScores}`，输出全部节点/NPU（含正常）及其诊断分
+5. stdout 逐类摘要（慢计算/慢通信/慢CPU，单节点跳过慢CPU）；JSON 由 main.go 合并写入运行目录 `straggler_output.json`（`{"kpi": ..., "profiler": ...}`）。`--debug-output` 时传入 `DebugInfo{ValidRanks, RankScores, CommScores}`，输出全部节点/NPU（含正常）及其诊断分
 
 ### report
 ```go
@@ -260,7 +250,6 @@ type PerformanceMetrics struct {
     ZPDevice     int            // 非通信时间 = stepDuration - ZP_Duration（钳位到 0）
     ZPDuration   int            // 总通信时间（合并区间后）
     ZPHost       int            // 平均 Host 耗时（-99999 表示缺失）
-    ZPBubble     int            // 平均 Bubble 时间（-99999 表示缺失）
     ZPCount      int            // 未使用（恒为 -99999）
     ZPKernel     int            // 平均 KERNEL_AICORE 耗时
     DataLoader   int            // DataLoader 耗时
@@ -334,7 +323,7 @@ WHERE message = ? AND startNs >= ? AND endNs <= ? LIMIT 1
 | Kernel 查询无数据 | ZP_Kernel = 0 |
 | 通信耗时 > step 总耗时 | ZP_Device 钳位到 0 + 警告 |
 | 某域在 STRING_IDS/COMMUNICATION_OP 无算子 | 该域无带宽回填列（不参与慢通信检测） |
-| 组名未注册（无并行拓扑） | 降级 cal-only：validRanks 从 global_rank_*.csv 收集，全体 rank 一组检测慢计算；comm/CPU/Bubble 无数据不检测 |
+| 组名未注册（无并行拓扑） | 降级 cal-only：validRanks 从 global_rank_*.csv 收集，全体 rank 一组检测慢计算；comm/CPU 无数据不检测 |
 
 ## 日志前缀
 
@@ -565,7 +554,7 @@ JSON 响应，无鉴权（内网工具，绑定地址即边界）。控制接口
     "finished_at": "2026-08-18T10:00:08+08:00",
     "duration_ms": 8123,
     "dbs": 8,
-    "summary": {"profiler": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0}, "kpi": {"temp": 1}},
+    "summary": {"profiler": {"cal": 0, "comm": 1, "cpu": 0}, "kpi": {"temp": 1}},
     "error": null
   },
   "next_run_at": "2026-08-18T10:10:00+08:00"
@@ -582,7 +571,7 @@ JSON 响应，无鉴权（内网工具，绑定地址即边界）。控制接口
       "finished_at": "2026-08-18T10:01:30+08:00",
       "dbs": 8,
       "dump_dir": "daemon_results/20260818-100000",
-      "summary": {"profiler": {"cal": 0, "comm": 1, "cpu": 0, "npu_bubble": 0}, "kpi": {"temp": 1}},
+      "summary": {"profiler": {"cal": 0, "comm": 1, "cpu": 0}, "kpi": {"temp": 1}},
       "error": null
     }
   ]
@@ -625,7 +614,7 @@ type CycleResult struct {
     JSONPath   string                // 本周期结果 JSON 落盘路径（查询接口的数据源）
     KPI        *resource.DetectionResult // KPI 检测结果（nil = 本轮无 KPI 数据）
     Result     *utils.NodeOutput     // profiler 检测结果（nil = 周期失败或无新数据）
-    Summary    CycleSummary          // {kpi: {指标->异常卡数}, profiler: {cal=卡/comm=通信组/cpu=节点/npu_bubble=卡}}
+    Summary    CycleSummary          // {kpi: {指标->异常卡数}, profiler: {cal=卡/comm=通信组/cpu=节点}}
     Report     string                // 文本报告（供 /report/latest）
     Error      string                // 空 = 成功
 }

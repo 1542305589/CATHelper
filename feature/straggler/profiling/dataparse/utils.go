@@ -41,7 +41,6 @@ type PerformanceMetrics struct {
 	ZPDevice     int
 	ZPDuration   int
 	ZPHost       int
-	ZPBubble     int
 	ZPCount      int
 	ZPKernel     int
 	DataLoader   int

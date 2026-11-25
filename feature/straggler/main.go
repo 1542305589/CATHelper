@@ -1,7 +1,7 @@
 // Command slowNodeDetection is the straggler (slow-node) detection tool for
 // AI training clusters. It reads Ascend PyTorch Profiler Level0 data (one
 // SQLite .db file per NPU device), detects performance-degraded devices
-// across four dimensions (compute, communication, CPU, NPU bubble), and
+// across three dimensions (compute, communication, CPU), and
 // outputs results as JSON and a human-readable text report.
 //
 // Optionally, a KPI resource CSV can be provided for lightweight NPU resource
@@ -148,12 +148,6 @@ func main() {
 			} else {
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --cpu-threshold value, using default\n")
 			}
-		case "--bubble-threshold-ns":
-			if v, err := strconv.ParseFloat(val, 64); err == nil && v > 0 {
-				thresholds.BubbleNs = v
-			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --bubble-threshold-ns value, using default\n")
-			}
 		case "--kpi-path":
 			kpiPath = val
 		case "--kpi-jsonl-dir":
@@ -276,7 +270,7 @@ func main() {
 
 	// No input at all → usage error before anything runs.
 	if inputPath == "" && kpiInput == "" {
-		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--bubble-threshold-ns=5000] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat]\n")
+		fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection path=/your/data/dir [--kpi-path=/dir/of/kpi_csvs | --kpi-jsonl-dir=/dir] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--space-ratio-threshold=2.0] [--comm-threshold=1.3] [--comm-min-count=1000] [--comm-count-floor=10240] [--comm-flat]\n")
 		fmt.Fprintf(os.Stderr, "ERROR: Missing required parameter: path=/your/data/dir (or a KPI input)\n")
 		os.Exit(1)
 	}
@@ -341,8 +335,8 @@ func main() {
 		}
 
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Input path: %s\n", inputPath)
-		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f bubble=%.0fns commRatio=%.2f commMinCount=%d commCountFloor=%d flat=%v\n",
-			thresholds.Cal, thresholds.CPU, thresholds.BubbleNs, thresholds.CommThreshold, thresholds.CommMinCount, thresholds.CommCountFloor, commFlat)
+		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f commRatio=%.2f commMinCount=%d commCountFloor=%d flat=%v\n",
+			thresholds.Cal, thresholds.CPU, thresholds.CommThreshold, thresholds.CommMinCount, thresholds.CommCountFloor, commFlat)
 
 		// Data parsing: SQLite → CSV + JSON intermediates.
 		fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Starting data parsing...\n")
@@ -404,8 +398,8 @@ func main() {
 func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectResult, error) {
 	config.FilePath = inputPath
 	th := config.Current()
-	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f bubble=%.0fns commRatio=%.2f commMinCount=%d commCountFloor=%d\n",
-		th.Cal, th.CPU, th.BubbleNs, th.CommThreshold, th.CommMinCount, th.CommCountFloor)
+	fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] Thresholds: cal=%.2f cpu=%.2f commRatio=%.2f commMinCount=%d commCountFloor=%d\n",
+		th.Cal, th.CPU, th.CommThreshold, th.CommMinCount, th.CommCountFloor)
 
 	// 4. Get parallel topology from group_info JSON files.
 	parallels, validRanks := detector.GetCurDetectionInfo(inputPath)
@@ -456,14 +450,12 @@ func detectFromParsedData(inputPath string, debugOutput bool) (*daemon.DetectRes
 
 // summarizeProfiler counts anomalies per profiler category for the cycle
 // summary (a flat map merged with per-metric KPI counts by the daemon). Units:
-// cal = 卡, comm = 通信组, cpu = 物理节点数（同节点 rank 共享 host，按 hostUid
-// 去重），npu_bubble = 卡。
+// cal = 卡, comm = 通信组, cpu = 物理节点数（同节点 rank 共享 host，按 hostUid 去重）。
 func summarizeProfiler(result config.DegradationData) map[string]int {
 	return map[string]int{
-		"cal":        len(result["cal"]),
-		"comm":       len(result["comm"]),
-		"cpu":        countCPUNodes(result["cpu"]),
-		"npu_bubble": len(result["npu_bubble"]),
+		"cal":  len(result["cal"]),
+		"comm": len(result["comm"]),
+		"cpu":  countCPUNodes(result["cpu"]),
 	}
 }
 

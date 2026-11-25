@@ -5,8 +5,8 @@
 // kmeans detector that finds abnormal data points by selecting the direction
 // extreme cluster as the baseline and comparing cluster mean ratios.
 //
-// It is the single anomaly-detection primitive used by all four detection
-// categories (slow compute, slow communication, slow CPU, NPU bubble).
+// It is the single anomaly-detection primitive used by the profiling detection
+// categories (slow compute, slow communication, slow CPU).
 package detector
 
 import (
