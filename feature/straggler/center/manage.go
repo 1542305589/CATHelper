@@ -381,28 +381,31 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 
 	c.markMissingReports(b, triggerAt)
 
-	merged := c.mergeOpMetric(b)
+	merged, freshDaemons := c.mergeOpMetric(b, triggerAt)
 	durationMs := time.Since(triggerAt).Milliseconds()
-	prog.step("合并 op_metric: %d 个 rank", len(merged))
+	prog.step("合并本轮新鲜 op_metric: %d 个 rank（%d/%d 个守护进程）", len(merged), freshDaemons, healthy)
 
 	var failed bool
+	failureReason := ""
 	if len(merged) == 0 {
-		c.logf("business %s: no op_metric reported", b.Name)
-		prog.step("本轮无 op_metric 上报，跳过检测")
+		c.logf("business %s: no fresh op_metric reported in this round", b.Name)
+		prog.step("本轮无新鲜 op_metric，判定本轮 failed")
 		failed = true
+		failureReason = "no fresh op_metric in round"
 	} else {
 		prog.step("跨节点合并检测中 ...")
 		if err := c.detectAndStore(b, merged, triggerAt, durationMs); err != nil {
 			c.logf("business %s: detect failed: %v", b.Name, err)
 			prog.step("检测失败: %v", err)
 			failed = true
+			failureReason = "detection failed: " + err.Error()
 		}
 	}
 
 	c.mu.Lock()
 	if failed {
 		b.CyclesFailed++
-		c.writeFailedCycle(b, triggerAt, durationMs, reason)
+		c.writeFailedCycle(b, triggerAt, durationMs, reason, failureReason)
 	} else {
 		b.CyclesTotal++
 	}
@@ -444,19 +447,29 @@ func (c *Center) triggerDaemon(d *Daemon) {
 	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", nil, d.Key)
 }
 
-func (c *Center) mergeOpMetric(b *Business) detector.OpMetric {
+// mergeOpMetric merges only the op_metric reported in the CURRENT round.
+// A daemon whose lastReportAt is before triggerAt had no fresh report this
+// round; it is skipped even if it still holds a cached op_metric from an
+// earlier round, so a failed round can never be detected as a success.
+func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time) (detector.OpMetric, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	merged := make(detector.OpMetric)
+	fresh := 0
 	for _, d := range b.Daemons {
-		if d.lastOpMetric == nil {
+		if d.lastOpMetric != nil && !d.lastReportAt.Before(triggerAt) {
+			fresh++
+			for rank, r := range d.lastOpMetric {
+				merged[rank] = r
+			}
 			continue
 		}
-		for rank, r := range d.lastOpMetric {
-			merged[rank] = r
+		if d.matchState == "healthy" || d.matchState == "report_failed" {
+			c.logf("skip stale/missing op_metric: daemon=%s lastReportAt=%s triggerAt=%s",
+				d.Addr(), d.lastReportAt.UTC().Format(time.RFC3339), triggerAt.UTC().Format(time.RFC3339))
 		}
 	}
-	return merged
+	return merged, fresh
 }
 
 // detectAndStore runs detection on the merged op_metric and stores the result
@@ -632,7 +645,7 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
 }
 
-func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs int64, reason string) {
+func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs int64, triggerReason, failureReason string) {
 	dirRel := startedAt.Format("20060102-150405")
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(base, 0o755); err != nil {
@@ -644,7 +657,8 @@ func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs i
 		"duration_ms":    durationMs,
 		"world_size":     0,
 		"summary":        nil,
-		"trigger_reason": reason,
+		"trigger_reason": triggerReason,
+		"failure_reason": failureReason,
 		"failed":         true,
 	}, "", "  ")
 	_ = os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)

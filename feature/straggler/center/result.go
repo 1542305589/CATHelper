@@ -17,6 +17,7 @@ type cycleInfo struct {
 	WorldSize     int            `json:"world_size"`
 	Summary       map[string]int `json:"summary"`
 	TriggerReason string         `json:"trigger_reason,omitempty"`
+	FailureReason string         `json:"failure_reason,omitempty"`
 	Failed        bool           `json:"failed,omitempty"`
 	Running       bool           `json:"running,omitempty"` // in-flight round, prepended to history
 }
@@ -64,6 +65,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				WorldSize     int            `json:"world_size"`
 				Summary       map[string]int `json:"summary"`
 				TriggerReason string         `json:"trigger_reason"`
+				FailureReason string         `json:"failure_reason"`
 				Failed        bool           `json:"failed"`
 			}
 			if json.Unmarshal(raw, &m) == nil {
@@ -71,6 +73,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				ci.DurationMs = m.DurationMs
 				ci.WorldSize = m.WorldSize
 				ci.TriggerReason = m.TriggerReason
+				ci.FailureReason = m.FailureReason
 				ci.Failed = m.Failed
 				if m.Summary != nil {
 					ci.Summary = m.Summary
