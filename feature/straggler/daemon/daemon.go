@@ -322,14 +322,6 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 	root := d.cfg.ProfilerDir
 	d.progress.step("采集完成")
 
-	// Fail fast when the collector produced no raw dump at all: analyse on an
-	// empty root costs 60-75s and cannot succeed.
-	if !hasMasterDump(root) {
-		d.failCycle(cr, "collect", "no_dump_after_collect",
-			fmt.Errorf("no master_* dump under %s", root))
-		return
-	}
-
 	// 2. Convert the raw dump to .db (torch_npu analyse) over the whole root.
 	d.progress.step("转换 .db (torch_npu analyse)")
 	if err := runAnalyse(root, d.logf); err != nil {
@@ -1121,19 +1113,6 @@ func dynoFailureReason(err error) string {
 		return "no_target_process"
 	}
 	return "dyno_trigger_failed"
-}
-
-func hasMasterDump(root string) bool {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "master_") {
-			return true
-		}
-	}
-	return false
 }
 
 // archiveOpMetric copies <root>/op_metric into the per-cycle archive before the

@@ -129,8 +129,8 @@ func TestMergeOpMetricSkipsFailedReport(t *testing.T) {
 		lastOpMetric:     detector.OpMetric{"0": &detector.OpMetricRank{}},
 		lastReportAt:     triggerAt.Add(time.Second),
 		lastReportStatus: "failed",
-		lastReportReason: "no_dump_after_collect",
-		lastReportStage:  "collect",
+		lastReportReason: "no_db_after_analyse",
+		lastReportStage:  "analyse",
 	}
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{failedDaemon}}

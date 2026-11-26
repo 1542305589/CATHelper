@@ -33,11 +33,11 @@ func TestHandleOpMetricStatuses(t *testing.T) {
 
 	// Explicit failed report: stored, and the cached op_metric is cleared.
 	d.lastOpMetric = detector.OpMetric{"0": &detector.OpMetricRank{}}
-	code, body = post(`{"round_token":"round-1","status":"failed","reason":"no_dump_after_collect","stage":"collect","ranks":null}`)
+	code, body = post(`{"round_token":"round-1","status":"failed","reason":"no_db_after_analyse","stage":"analyse","ranks":null}`)
 	if code != http.StatusOK {
 		t.Fatalf("failed report status = %d body=%s", code, body)
 	}
-	if d.lastReportStatus != "failed" || d.lastReportReason != "no_dump_after_collect" || d.lastReportStage != "collect" {
+	if d.lastReportStatus != "failed" || d.lastReportReason != "no_db_after_analyse" || d.lastReportStage != "analyse" {
 		t.Fatalf("failed report fields = %+v", d)
 	}
 	if d.lastOpMetric != nil {

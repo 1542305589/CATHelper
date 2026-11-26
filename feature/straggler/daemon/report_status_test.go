@@ -39,7 +39,7 @@ func TestReportCycleFailurePayloadAndRetry(t *testing.T) {
 	d.daemonID = "n1"
 
 	cr := &CycleResult{ID: 1, StartedAt: time.Now().Add(-time.Second), RoundToken: "round-1"}
-	d.reportCycle(cr, "failed", "no_dump_after_collect", "collect", "")
+	d.reportCycle(cr, "failed", "no_db_after_analyse", "analyse", "")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -52,13 +52,13 @@ func TestReportCycleFailurePayloadAndRetry(t *testing.T) {
 	if payload["round_token"] != "round-1" || payload["status"] != "failed" {
 		t.Fatalf("payload = %+v", payload)
 	}
-	if payload["reason"] != "no_dump_after_collect" || payload["stage"] != "collect" {
+	if payload["reason"] != "no_db_after_analyse" || payload["stage"] != "analyse" {
 		t.Fatalf("payload reason/stage = %v/%v", payload["reason"], payload["stage"])
 	}
 	if ranks, ok := payload["ranks"]; !ok || ranks != nil {
 		t.Fatalf("failed report ranks = %v, want null", payload["ranks"])
 	}
-	if cr.ReportStatus != "failed" || cr.ReportReason != "no_dump_after_collect" || cr.ReportStage != "collect" {
+	if cr.ReportStatus != "failed" || cr.ReportReason != "no_db_after_analyse" || cr.ReportStage != "analyse" {
 		t.Fatalf("cycle report fields = %+v", cr)
 	}
 }
@@ -289,19 +289,6 @@ func TestDynoFailureReason(t *testing.T) {
 	}
 	if got := dynoFailureReason(errString("dyno processesMatched empty")); got != "no_target_process" {
 		t.Fatalf("no process reason = %q", got)
-	}
-}
-
-func TestHasMasterDump(t *testing.T) {
-	dir := t.TempDir()
-	if hasMasterDump(dir) {
-		t.Fatal("empty dir must not have a master dump")
-	}
-	if err := os.Mkdir(filepath.Join(dir, "master_1_2_ascend_pt"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if !hasMasterDump(dir) {
-		t.Fatal("master_* dir must be detected")
 	}
 }
 
