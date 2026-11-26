@@ -84,6 +84,15 @@ func setFreeDisk(t *testing.T, free uint64, known bool) {
 	t.Cleanup(func() { freeDiskBytesFn = old })
 }
 
+func TestCopyProfilerDataRejectsDestinationInsideSource(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
+	dst := filepath.Join(src, "daemon_results", "20261126-100000", "profiler_data")
+	if _, _, err := copyProfilerData(src, dst, noopLogf); err == nil {
+		t.Fatal("copy inside the profiler root must fail")
+	}
+}
+
 func TestDumpProfilerDataCopiesAndMeta(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
@@ -339,5 +348,16 @@ func TestDumpProfilerDataCopyFailureKeepsDump(t *testing.T) {
 	meta := readDumpMeta(t, archive)
 	if meta.ProfilerDataStatus != "failed" {
 		t.Fatalf("meta status = %q, want failed", meta.ProfilerDataStatus)
+	}
+
+	if err := d.prepareProfilerRoot(); err != nil {
+		t.Fatalf("prepare stale root: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("failed copy's raw root was not moved aside: %v", err)
+	}
+	stale, err := filepath.Glob(src + ".stale-*")
+	if err != nil || len(stale) != 1 {
+		t.Fatalf("stale dirs = %v, %v; want 1", stale, err)
 	}
 }

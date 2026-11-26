@@ -81,6 +81,7 @@ func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) {
 		cr.ProfilerDataError = "no_raw_dump"
 		cr.ProfilerDataBytes = 0
 		cr.ProfilerDataSourceBytes = 0
+		d.logf("cycle %d profiler_data skipped: no raw dump under %s", cr.ID, root)
 		return
 	}
 	if cr.DumpDir == "" {
@@ -126,6 +127,18 @@ func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) {
 // top-level directories that already live in the cycle archive. It returns the
 // bytes copied and the source bytes considered (both excluding skipped data).
 func copyProfilerData(src, dst string, logf func(string, ...any)) (copied, source int64, err error) {
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
+		return 0, 0, err
+	}
+	absDst, err := filepath.Abs(dst)
+	if err != nil {
+		return 0, 0, err
+	}
+	if rel, rerr := filepath.Rel(absSrc, absDst); rerr == nil &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return 0, 0, fmt.Errorf("refusing to copy into a directory inside the profiler root: %s", dst)
+	}
 	source, err = profilerDataSourceBytes(src)
 	if err != nil {
 		return 0, 0, err
