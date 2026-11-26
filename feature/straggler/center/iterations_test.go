@@ -43,7 +43,7 @@ func newFakeControlDaemon(t *testing.T) *fakeControlDaemon {
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.matchBody = body
-			writeJSON(w, map[string]any{"status": "matched", "collect_wait": 60})
+			writeJSON(w, map[string]any{"status": "matched", "collect_wait": 60, "round_token_supported": true})
 		case "/daemon/trigger":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -184,6 +184,25 @@ func TestMatchRequestDoesNotPushIterations(t *testing.T) {
 	}
 	if _, ok := body["iterations"]; ok {
 		t.Fatalf("match body must not push iterations: %v", body["iterations"])
+	}
+}
+
+// Auto-matching (not only the manual matchDaemonLocked path) must learn the
+// daemon's round-token capability.
+func TestTryMatchRestoresTokenCapability(t *testing.T) {
+	f := newFakeControlDaemon(t)
+	host, port := f.addr(t)
+	c := newIterTestCenter(t)
+	d := &Daemon{IP: host, Port: port}
+	b := &Business{Name: "biz", Daemons: []*Daemon{d}}
+	c.biz["biz"] = b
+
+	c.tryMatch(b, d)
+	if !d.tokenCapable {
+		t.Fatalf("auto-matched daemon tokenCapable = false, want true")
+	}
+	if d.matchState != "healthy" {
+		t.Fatalf("matchState = %q, want healthy", d.matchState)
 	}
 }
 

@@ -265,6 +265,7 @@ func (c *Center) applyProbeLocked(p daemonProbe) bool {
 		if p.st.Iterations > 0 {
 			d.reportedIterations = p.st.Iterations
 		}
+		d.tokenCapable = p.st.RoundTokenSupported
 	case p.st.Other:
 		d.matchState = "other"
 		return samePort(p.st.Center, c.cfg.Port)
@@ -289,12 +290,13 @@ func daemonHealth(d *Daemon) bool {
 }
 
 type matchStatusResp struct {
-	State       string `json:"state"`
-	Matched     bool   `json:"matched"`
-	Other       bool   `json:"other"`
-	Center      string `json:"center"`
-	CollectWait int64  `json:"collect_wait"`
-	Iterations  int    `json:"iterations"`
+	State               string `json:"state"`
+	Matched             bool   `json:"matched"`
+	Other               bool   `json:"other"`
+	Center              string `json:"center"`
+	CollectWait         int64  `json:"collect_wait"`
+	Iterations          int    `json:"iterations"`
+	RoundTokenSupported bool   `json:"round_token_supported"`
 }
 
 func samePort(raw string, port int) bool {

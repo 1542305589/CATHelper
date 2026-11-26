@@ -782,6 +782,9 @@ func (c *Center) tryMatch(b *Business, d *Daemon) {
 	}
 	cw, _ := resp["collect_wait"].(float64)
 	d.collectWait = int64(cw)
+	if capable, ok := resp["round_token_supported"].(bool); ok {
+		d.tokenCapable = capable
+	}
 	d.matchState = "healthy"
 	d.healthy = true
 	d.failCount = 0

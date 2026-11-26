@@ -50,13 +50,26 @@ func TestHandleOpMetricStatuses(t *testing.T) {
 		t.Fatalf("ok report not stored: code=%d status=%q op=%v body=%s", code, d.lastReportStatus, d.lastOpMetric, body)
 	}
 
+	// Busy/paused reports also clear cached data and count as reported.
+	d.lastOpMetric = detector.OpMetric{"0": &detector.OpMetricRank{}}
+	code, body = post(`{"round_token":"round-1","status":"busy","reason":"cycle_in_flight","ranks":null}`)
+	if code != http.StatusOK || d.lastReportStatus != "busy" || d.lastOpMetric != nil {
+		t.Fatalf("busy report: code=%d status=%q op=%v body=%s", code, d.lastReportStatus, d.lastOpMetric, body)
+	}
+	d.lastOpMetric = detector.OpMetric{"0": &detector.OpMetricRank{}}
+	code, body = post(`{"round_token":"round-1","status":"paused","reason":"paused","ranks":null}`)
+	if code != http.StatusOK || d.lastReportStatus != "paused" || d.lastOpMetric != nil {
+		t.Fatalf("paused report: code=%d status=%q op=%v body=%s", code, d.lastReportStatus, d.lastOpMetric, body)
+	}
+
 	// A report carrying another round's token is ignored.
+	before := d.lastReportStatus
 	code, body = post(`{"round_token":"old","status":"failed","reason":"x","stage":"collect","ranks":null}`)
 	if code != http.StatusOK || !strings.Contains(body, "ignored") {
 		t.Fatalf("stale token response = %d %s", code, body)
 	}
-	if d.lastReportStatus != "ok" {
-		t.Fatalf("stale report changed status to %q", d.lastReportStatus)
+	if d.lastReportStatus != before {
+		t.Fatalf("stale report changed status from %q to %q", before, d.lastReportStatus)
 	}
 
 	// A report after the round closed is ignored.
@@ -85,6 +98,20 @@ func TestMarkMissingReportsDistinguishesReportedFailure(t *testing.T) {
 	}
 	if missing.matchState != "report_failed" {
 		t.Fatalf("missing state = %q, want report_failed", missing.matchState)
+	}
+}
+
+func TestProbeRestoresTokenCapability(t *testing.T) {
+	d := &Daemon{IP: "10.0.0.1", Port: 8080, Key: "secret", matchState: "healthy"}
+	b := &Business{Name: "biz", Daemons: []*Daemon{d}}
+	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
+	p := daemonProbe{
+		b: b, d: d, key: "secret", healthOK: true,
+		st: &matchStatusResp{Matched: true, RoundTokenSupported: true, CollectWait: 60},
+	}
+	c.applyProbeLocked(p)
+	if !d.tokenCapable {
+		t.Fatalf("probe did not restore tokenCapable")
 	}
 }
 

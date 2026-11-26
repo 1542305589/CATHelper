@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -97,6 +98,61 @@ func TestReportCycleOKPayload(t *testing.T) {
 	ranks, ok := payload["ranks"].(map[string]any)
 	if !ok || len(ranks) != 1 {
 		t.Fatalf("payload ranks = %+v", payload["ranks"])
+	}
+}
+
+// A trigger arriving while a cycle is in flight must report busy immediately so
+// the center does not wait for its full report timeout.
+func TestTriggerBusyReportsBusy(t *testing.T) {
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.centerAddr = srv.URL
+	d.matchKey = "secret"
+	d.business = "biz"
+	d.daemonID = "n1"
+	d.cycleInFlight = true
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/daemon/trigger",
+		strings.NewReader(`{"iterations":3,"round_token":"round-1"}`))
+	req.Header.Set("X-Match-Key", "secret")
+	d.handleDaemonTrigger(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("busy trigger status = %d, want 409", rr.Code)
+	}
+	if payload["status"] != "busy" || payload["reason"] != "cycle_in_flight" {
+		t.Fatalf("busy payload = %+v", payload)
+	}
+	if payload["round_token"] != "round-1" {
+		t.Fatalf("busy round_token = %v", payload["round_token"])
+	}
+	if ranks, ok := payload["ranks"]; !ok || ranks != nil {
+		t.Fatalf("busy ranks = %v, want null", payload["ranks"])
+	}
+}
+
+func TestMatchStatusAdvertisesRoundTokenSupport(t *testing.T) {
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.matchKey = "secret"
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/daemon/match_status", nil)
+	req.Header.Set("X-Match-Key", "secret")
+	d.handleDaemonMatchStatus(rr, req)
+	var m map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode match_status: %v", err)
+	}
+	if m["round_token_supported"] != true {
+		t.Fatalf("match_status round_token_supported = %v, want true", m["round_token_supported"])
 	}
 }
 

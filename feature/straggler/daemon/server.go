@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -500,6 +501,11 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.TriggerWithOptions(req.Iterations, req.RoundToken); err != nil {
+		if errors.Is(err, errCycleInFlight) {
+			// The center already accepts busy; report it immediately so the
+			// round does not wait for the 480s deadline on a busy daemon.
+			d.postReport(req.RoundToken, "busy", "cycle_in_flight", "", nil)
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -575,20 +581,21 @@ func (d *Daemon) handleDaemonUnmatch(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request) {
 	state, center, _ := d.matchState()
 	if state != "managed" {
-		writeJSON(w, map[string]any{"state": state, "matched": false, "iterations": d.Iterations()})
+		writeJSON(w, map[string]any{"state": state, "matched": false, "iterations": d.Iterations(), "round_token_supported": true})
 		return
 	}
 	if d.KeyMatches(r.Header.Get("X-Match-Key")) {
 		writeJSON(w, map[string]any{
-			"state":        state,
-			"matched":      true,
-			"center":       center,
-			"collect_wait": int64(d.cfg.CollectWait.Seconds()),
-			"iterations":   d.Iterations(),
+			"state":                 state,
+			"matched":               true,
+			"center":                center,
+			"collect_wait":          int64(d.cfg.CollectWait.Seconds()),
+			"iterations":            d.Iterations(),
+			"round_token_supported": true,
 		})
 		return
 	}
-	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center, "iterations": d.Iterations()})
+	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center, "iterations": d.Iterations(), "round_token_supported": true})
 }
 
 // requireManagedKey gates a control endpoint: when NOT managed it passes

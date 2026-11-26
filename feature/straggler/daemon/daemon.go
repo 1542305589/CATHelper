@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -622,6 +623,10 @@ func (d *Daemon) SetIterations(n int) error {
 	return nil
 }
 
+// errCycleInFlight is returned by TriggerWithOptions when another cycle is
+// running. The HTTP handler reports status=busy for this case.
+var errCycleInFlight = errors.New("a cycle is already running")
+
 // Trigger runs one cycle immediately with the daemon's saved iterations;
 // returns an error when paused or when a cycle is already in flight (HTTP 409).
 // In "running" the timer is re-anchored so the next automatic cycle is one
@@ -646,7 +651,7 @@ func (d *Daemon) TriggerWithOptions(iterations int, roundToken string) error {
 		return fmt.Errorf("daemon is paused")
 	}
 	if d.cycleInFlight {
-		return fmt.Errorf("a cycle is already running")
+		return errCycleInFlight
 	}
 	d.startCycle(iterations, roundToken)
 	if d.state == "running" {
