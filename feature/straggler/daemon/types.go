@@ -25,6 +25,7 @@ type Config struct {
 	DynologBin         string            // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
 	Thresholds         config.Thresholds // independent detection thresholds (per-daemon, adjustable at runtime)
 	DebugOutput        bool              // --debug-output：结果含所有正常卡的诊断分
+	DumpProfilerData   bool              // --dump-profiler-data：把原始 profiler 数据复制到每轮结果目录
 }
 
 // DefaultConfig returns a Config with sensible defaults (CLI overrides).
@@ -67,6 +68,13 @@ type CycleResult struct {
 	ReportReason   string                    `json:"report_reason,omitempty"`
 	ReportStage    string                    `json:"report_stage,omitempty"`
 	Error          string                    `json:"error,omitempty"`
+
+	DumpProfilerData        bool   `json:"dump_profiler_data"`
+	ProfilerDataStatus      string `json:"profiler_data_status"`
+	ProfilerDataBytes       int64  `json:"profiler_data_bytes"`
+	ProfilerDataSourceBytes int64  `json:"profiler_data_source_bytes"`
+	ProfilerDataError       string `json:"profiler_data_error"`
+	keepRawDump             bool   `json:"-"`
 }
 
 // dynoResponse is the JSON snippet embedded in the dyno trigger command's
@@ -132,6 +140,11 @@ type statusResponse struct {
 	CyclesFailed      int               `json:"cycles_failed"`
 	LastCycle         *cycleSummary     `json:"last_cycle,omitempty"`
 	NextRunAt         *time.Time        `json:"next_run_at,omitempty"`
+
+	DumpProfilerData           bool   `json:"dump_profiler_data"`
+	LastDumpProfilerDataStatus string `json:"last_dump_profiler_data_status,omitempty"`
+	LastDumpProfilerDataBytes  int64  `json:"last_dump_profiler_data_bytes"`
+	LastDumpProfilerDataError  string `json:"last_dump_profiler_data_error,omitempty"`
 }
 
 // cycleSummary is the compact per-cycle entry served by /status and /history

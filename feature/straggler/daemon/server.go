@@ -108,9 +108,13 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		KpiDir:            d.cfg.KpiDir,
 		CyclesTotal:       total,
 		CyclesFailed:      failed,
+		DumpProfilerData:  d.cfg.DumpProfilerData,
 	}
 	if c := d.st.latest(); c != nil {
 		resp.LastCycle = toCycleSummary(c)
+		resp.LastDumpProfilerDataStatus = c.ProfilerDataStatus
+		resp.LastDumpProfilerDataBytes = c.ProfilerDataBytes
+		resp.LastDumpProfilerDataError = c.ProfilerDataError
 	}
 	if state == "running" && !nextRun.IsZero() {
 		t := nextRun

@@ -66,6 +66,32 @@ func TestUnmatchClampsInterval(t *testing.T) {
 	}
 }
 
+func TestStatusExposesDumpProfilerData(t *testing.T) {
+	d := New(Config{DumpProfilerData: true}, nil)
+	d.st.add(&CycleResult{
+		ID: 1, DumpProfilerData: true,
+		ProfilerDataStatus: "ok", ProfilerDataBytes: 1234,
+	})
+	rr := httptest.NewRecorder()
+	d.handleStatus(rr, httptest.NewRequest(http.MethodGet, "/status", nil))
+	var resp statusResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode /status: %v", err)
+	}
+	if !resp.DumpProfilerData {
+		t.Fatal("dump_profiler_data = false, want true")
+	}
+	if resp.LastDumpProfilerDataStatus != "ok" {
+		t.Fatalf("last status = %q, want ok", resp.LastDumpProfilerDataStatus)
+	}
+	if resp.LastDumpProfilerDataBytes != 1234 {
+		t.Fatalf("last bytes = %d, want 1234", resp.LastDumpProfilerDataBytes)
+	}
+	if resp.LastDumpProfilerDataError != "" {
+		t.Fatalf("last error = %q, want empty", resp.LastDumpProfilerDataError)
+	}
+}
+
 func TestQueuePendingOverwritesAndExpires(t *testing.T) {
 	d := New(Config{}, nil)
 	d.queuePending(3, "old", 120)

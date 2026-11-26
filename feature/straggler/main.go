@@ -58,6 +58,7 @@ func main() {
 	collectWait := 60
 	profilerIterations := 3
 	allowLowIterations := false
+	dumpProfilerData := false
 	profilerDir := ""
 	kpiDir := ""
 
@@ -89,6 +90,10 @@ func main() {
 			allowLowIterations = true
 			continue
 		}
+		if arg == "--dump-profiler-data" {
+			dumpProfilerData = true
+			continue
+		}
 		parts := strings.SplitN(arg, "=", 2)
 		if len(parts) != 2 {
 			continue
@@ -97,6 +102,8 @@ func main() {
 		switch key {
 		case "--debug-output":
 			debugOutput = val == "true" || val == "1"
+		case "--dump-profiler-data":
+			dumpProfilerData = val == "true" || val == "1"
 		case "--daemon-port":
 			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
 				daemonPort = parsed
@@ -205,7 +212,7 @@ func main() {
 			os.Exit(1)
 		}
 		if profilerDir == "" {
-			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=3] [--allow-low-iterations]\n")
+			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=3] [--allow-low-iterations] [--dump-profiler-data]\n")
 			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir (--kpi-dir is optional; omit to run profiler-only cycles)\n")
 			os.Exit(1)
 		}
@@ -232,6 +239,7 @@ func main() {
 		cfg.CollectWait = time.Duration(collectWait) * time.Second
 		cfg.Iterations = profilerIterations
 		cfg.AllowLowIterations = allowLowIterations
+		cfg.DumpProfilerData = dumpProfilerData
 		cfg.DynoBin = dynoBin
 		cfg.DynologBin = dynologBin
 		cfg.Thresholds = thresholds
