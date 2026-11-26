@@ -145,7 +145,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	if d.cfg.DumpProfilerData {
 		d.logf("dump profiler data enabled: keep newest %d copies under daemon_results/*/profiler_data", profilerDataKeep)
-		cleanProfilerDataCopies("daemon_results", profilerDataKeep, d.logf)
+		d.cleanProfilerDataCopies()
 		warnStaleProfilerDirs(d.cfg.ProfilerDir, d.logf)
 	}
 
@@ -587,6 +587,7 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 	_ = srv.Shutdown(ctx)
 
 	deadline := time.Now().Add(10 * time.Minute)
+	stillInFlight := false
 	for {
 		d.mu.Lock()
 		inflight := d.cycleInFlight
@@ -596,6 +597,7 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 		}
 		if time.Now().After(deadline) {
 			d.logf("giving up waiting for in-flight cycle")
+			stillInFlight = true
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -604,7 +606,11 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 	// The dynolog child is intentionally NOT killed here — it keeps running so
 	// the user can still collect profiler data after the daemon exits.
 	if d.removeResults {
-		if err := os.RemoveAll("daemon_results"); err != nil {
+		if stillInFlight {
+			// A slow profiler_data copy can outlive the shutdown wait. Do not
+			// delete the result tree underneath it.
+			d.logf("not removing daemon_results: a cycle is still in flight")
+		} else if err := os.RemoveAll("daemon_results"); err != nil {
 			d.logf("remove daemon_results: %v", err)
 		} else {
 			d.logf("removed all daemon_results (dump_dir) files")
@@ -1244,17 +1250,20 @@ func copyDir(src, dst string) error {
 // untouched; RemoveAll on a missing root is a no-op, so this is safe even when
 // the trigger never created a dump. Failures are logged, never fatal.
 func (d *Daemon) cleanupDump(cr *CycleResult) {
-	d.applyProfilerDataPolicy(cr)
+	res := d.applyProfilerDataPolicy(cr)
+	d.st.setProfilerData(cr.ID, res)
 	if cr.DumpDir != "" {
-		if err := os.MkdirAll(cr.DumpDir, 0o755); err == nil {
-			if err := writeMeta(cr.DumpDir, cr); err != nil {
-				d.logf("cycle %d update daemon_meta.json: %v", cr.ID, err)
+		if meta := d.st.get(cr.ID); meta != nil {
+			if err := os.MkdirAll(cr.DumpDir, 0o755); err == nil {
+				if err := writeMeta(cr.DumpDir, meta); err != nil {
+					d.logf("cycle %d update daemon_meta.json: %v", cr.ID, err)
+				}
 			}
 		}
 	}
 	// A failed copy (or a stale-dump rename failure) keeps the raw root as
 	// evidence; the next cycle moves it aside before dyno runs.
-	if cr.keepRawDump || cr.ProfilerDataStatus == "failed" {
+	if res.KeepDump {
 		d.logf("cycle %d kept raw profiler dump for diagnosis: %s", cr.ID, d.cfg.ProfilerDir)
 		return
 	}

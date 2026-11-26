@@ -84,12 +84,76 @@ func setFreeDisk(t *testing.T, free uint64, known bool) {
 	t.Cleanup(func() { freeDiskBytesFn = old })
 }
 
+func TestStoreProfilerDataUpdateUsesCopies(t *testing.T) {
+	s := newStore()
+	cr := &CycleResult{ID: 1, ProfilerDataStatus: "pending"}
+	s.add(cr)
+	snap := s.latest()
+	if snap == cr {
+		t.Fatal("latest must return a copy, not the stored pointer")
+	}
+	s.setProfilerData(1, profilerDataResult{
+		Dump: true, Status: "ok", Bytes: 3, SourceBytes: 4,
+	})
+	if cr.ProfilerDataStatus != "ok" || cr.ProfilerDataBytes != 3 || cr.ProfilerDataSourceBytes != 4 {
+		t.Fatalf("stored cycle not updated: status=%q bytes=%d source=%d",
+			cr.ProfilerDataStatus, cr.ProfilerDataBytes, cr.ProfilerDataSourceBytes)
+	}
+	if snap.ProfilerDataStatus != "pending" {
+		t.Fatalf("old snapshot mutated: status=%q", snap.ProfilerDataStatus)
+	}
+	if got := s.latest(); got.ProfilerDataStatus != "ok" || got.ProfilerDataBytes != 3 {
+		t.Fatalf("new snapshot = %q/%d, want ok/3", got.ProfilerDataStatus, got.ProfilerDataBytes)
+	}
+}
+
 func TestCopyProfilerDataRejectsDestinationInsideSource(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
 	dst := filepath.Join(src, "daemon_results", "20261126-100000", "profiler_data")
 	if _, _, err := copyProfilerData(src, dst, noopLogf); err == nil {
 		t.Fatal("copy inside the profiler root must fail")
+	}
+}
+
+func TestDumpProfilerDataMetaIsPendingDuringCopy(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
+	archive := t.TempDir()
+	setFreeDisk(t, 100<<30, true)
+
+	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
+	d.logf = noopLogf
+	cr := &CycleResult{ID: 1, StartedAt: time.Now(), DumpDir: archive,
+		DumpProfilerData: true, ProfilerDataStatus: "pending"}
+	d.finishCycle(cr)
+
+	oldCopy := copyProfilerDataFn
+	sawPending := false
+	copyProfilerDataFn = func(s, dst string, logf func(string, ...any)) (int64, int64, error) {
+		meta := readDumpMeta(t, archive)
+		sawPending = meta.ProfilerDataStatus == "pending"
+		return oldCopy(s, dst, logf)
+	}
+	t.Cleanup(func() { copyProfilerDataFn = oldCopy })
+
+	d.cleanupDump(cr)
+	if !sawPending {
+		t.Fatal("daemon_meta.json was not pending while the copy ran")
+	}
+}
+
+func TestDumpProfilerDataMissingRootSkipped(t *testing.T) {
+	archive := t.TempDir()
+	d := New(Config{DumpProfilerData: true, ProfilerDir: filepath.Join(t.TempDir(), "missing")}, nil)
+	d.logf = noopLogf
+	cr := &CycleResult{ID: 1, StartedAt: time.Now(), DumpDir: archive,
+		DumpProfilerData: true, ProfilerDataStatus: "pending"}
+	d.finishCycle(cr)
+	d.cleanupDump(cr)
+	if cr.ProfilerDataStatus != "skipped" || cr.ProfilerDataError != "no_raw_dump" {
+		t.Fatalf("status/error = %q/%q, want skipped/no_raw_dump",
+			cr.ProfilerDataStatus, cr.ProfilerDataError)
 	}
 }
 
@@ -139,6 +203,28 @@ func TestDumpProfilerDataEmptyRootSkipped(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(archive, "profiler_data")); !os.IsNotExist(err) {
 		t.Fatal("empty root created profiler_data")
+	}
+}
+
+func TestDumpProfilerDataOnlyExcludedDirsSkipped(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "op_metric", "ignore"), "ignored")
+	archive := t.TempDir()
+	setFreeDisk(t, 100<<30, true)
+
+	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
+	d.logf = noopLogf
+	cr := &CycleResult{ID: 1, StartedAt: time.Now(), DumpDir: archive,
+		DumpProfilerData: true, ProfilerDataStatus: "pending"}
+	d.finishCycle(cr)
+	d.cleanupDump(cr)
+
+	if cr.ProfilerDataStatus != "skipped" || cr.ProfilerDataError != "no_raw_dump" {
+		t.Fatalf("status/error = %q/%q, want skipped/no_raw_dump",
+			cr.ProfilerDataStatus, cr.ProfilerDataError)
+	}
+	if _, err := os.Stat(filepath.Join(archive, "profiler_data")); !os.IsNotExist(err) {
+		t.Fatal("only-excluded source created profiler_data")
 	}
 }
 
@@ -284,7 +370,7 @@ func TestCleanProfilerDataCopiesKeepsFive(t *testing.T) {
 		names = append(names, name)
 		writeTestFile(t, filepath.Join(base, name, "profiler_data", "master_0", "a.db"), "x")
 	}
-	cleanProfilerDataCopies(base, 5, noopLogf)
+	cleanProfilerDataCopies(base, 5, "", noopLogf)
 	for i, name := range names {
 		_, err := os.Stat(filepath.Join(base, name, "profiler_data"))
 		if i < 2 {
@@ -297,6 +383,30 @@ func TestCleanProfilerDataCopiesKeepsFive(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(base, names[0])); err != nil {
 		t.Fatalf("parent cycle dir %s was removed: %v", names[0], err)
+	}
+}
+
+func TestCleanProfilerDataCopiesProtectsCurrentCopy(t *testing.T) {
+	base := t.TempDir()
+	old := filepath.Join(base, "20260101-000000", "profiler_data")
+	writeTestFile(t, filepath.Join(old, "master_0", "a.db"), "x")
+	for i := 0; i < 6; i++ {
+		writeTestFile(t, filepath.Join(base, fmt.Sprintf("20260102-00000%d", i), "profiler_data", "master_0", "a.db"), "x")
+	}
+	cleanProfilerDataCopies(base, 5, old, noopLogf)
+
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("protected current copy was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "20260102-000000", "profiler_data")); !os.IsNotExist(err) {
+		t.Fatal("oldest new copy was not pruned")
+	}
+	if _, err := os.Stat(filepath.Join(base, "20260102-000001", "profiler_data")); !os.IsNotExist(err) {
+		t.Fatal("retention did not make room for the protected copy")
+	}
+	matches, _ := filepath.Glob(filepath.Join(base, "*", "profiler_data"))
+	if len(matches) != 5 {
+		t.Fatalf("retained copies = %d, want 5", len(matches))
 	}
 }
 

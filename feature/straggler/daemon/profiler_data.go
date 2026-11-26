@@ -59,68 +59,85 @@ func (d *Daemon) prepareProfilerRoot() error {
 	return nil
 }
 
+type profilerDataResult struct {
+	Dump        bool
+	Status      string
+	Bytes       int64
+	SourceBytes int64
+	Error       string
+	KeepDump    bool
+}
+
 // applyProfilerDataPolicy copies the raw profiler root before cleanup (when
-// enabled), or records why it was skipped/failed. It never deletes the raw
-// root; cleanupDump decides that after this policy.
-func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) {
-	cr.DumpProfilerData = d.cfg.DumpProfilerData
+// enabled), or records why it was skipped/failed. It does not mutate the
+// published CycleResult; cleanupDump applies the result through the store.
+func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) profilerDataResult {
+	res := profilerDataResult{Dump: d.cfg.DumpProfilerData}
 	if !d.cfg.DumpProfilerData {
-		cr.ProfilerDataStatus = "disabled"
-		return
+		res.Status = "disabled"
+		return res
 	}
 	if cr.keepRawDump {
-		cr.ProfilerDataStatus = "failed"
-		if cr.ProfilerDataError == "" {
-			cr.ProfilerDataError = "stale_dump_present"
+		res.Status = "failed"
+		res.Error = cr.ProfilerDataError
+		if res.Error == "" {
+			res.Error = "stale_dump_present"
 		}
-		return
+		res.KeepDump = true
+		return res
 	}
 	root := d.cfg.ProfilerDir
 	if !fileExistsDir(root) || !dirHasEntries(root) {
-		cr.ProfilerDataStatus = "skipped"
-		cr.ProfilerDataError = "no_raw_dump"
-		cr.ProfilerDataBytes = 0
-		cr.ProfilerDataSourceBytes = 0
+		res.Status = "skipped"
+		res.Error = "no_raw_dump"
 		d.logf("cycle %d profiler_data skipped: no raw dump under %s", cr.ID, root)
-		return
+		return res
 	}
 	if cr.DumpDir == "" {
-		cr.ProfilerDataStatus = "failed"
-		cr.ProfilerDataError = "archive directory is empty"
-		return
+		res.Status = "failed"
+		res.Error = "archive directory is empty"
+		res.KeepDump = true
+		return res
 	}
 	if err := os.MkdirAll(cr.DumpDir, 0o755); err != nil {
-		cr.ProfilerDataStatus = "failed"
-		cr.ProfilerDataError = fmt.Sprintf("mkdir archive: %v", err)
-		return
+		res.Status = "failed"
+		res.Error = fmt.Sprintf("mkdir archive: %v", err)
+		res.KeepDump = true
+		return res
 	}
 	if free, known := freeDiskBytesFn(cr.DumpDir); known && free < minFreeDiskBytes {
-		cr.ProfilerDataStatus = "skipped"
-		cr.ProfilerDataBytes = 0
-		cr.ProfilerDataError = fmt.Sprintf("skipped_low_disk: free=%d < %d", free, minFreeDiskBytes)
+		res.Status = "skipped"
+		res.Error = fmt.Sprintf("skipped_low_disk: free=%d < %d", free, minFreeDiskBytes)
 		d.logf("WARNING: cycle %d skip profiler_data copy: free disk %d < %d", cr.ID, free, minFreeDiskBytes)
-		return
+		return res
 	}
 	dst := filepath.Join(cr.DumpDir, "profiler_data")
 	_ = os.RemoveAll(dst)
 	copied, source, err := copyProfilerDataFn(root, dst, d.logf)
-	cr.ProfilerDataSourceBytes = source
+	res.SourceBytes = source
 	if err != nil {
 		_ = os.RemoveAll(dst)
-		cr.ProfilerDataStatus = "failed"
-		cr.ProfilerDataBytes = 0
-		cr.ProfilerDataError = err.Error()
+		res.Status = "failed"
+		res.Error = err.Error()
+		res.KeepDump = true
 		d.logf("cycle %d profiler_data copy failed: %v; keeping raw dump", cr.ID, err)
-		return
+		return res
 	}
-	cr.ProfilerDataStatus = "ok"
-	cr.ProfilerDataBytes = copied
-	cr.ProfilerDataError = ""
+	if copied == 0 {
+		_ = os.RemoveAll(dst)
+		res.Status = "skipped"
+		res.Error = "no_raw_dump"
+		d.logf("cycle %d profiler_data skipped: no regular files to copy", cr.ID)
+		return res
+	}
+	res.Status = "ok"
+	res.Bytes = copied
 	d.logf("cycle %d profiler_data copied: %d/%d bytes -> %s", cr.ID, copied, source, dst)
 	// Only prune the real daemon_results tree; tests use temp archive roots.
 	if base := filepath.Dir(cr.DumpDir); filepath.Base(base) == "daemon_results" {
-		cleanProfilerDataCopies(base, profilerDataKeep, d.logf)
+		cleanProfilerDataCopies(base, profilerDataKeep, dst, d.logf)
 	}
+	return res
 }
 
 // copyProfilerData copies the raw profiler root into dst, excluding the two
@@ -172,6 +189,10 @@ func copyProfilerData(src, dst string, logf func(string, ...any)) (copied, sourc
 		if fi.IsDir() {
 			return os.MkdirAll(out, 0o755)
 		}
+		if !fi.Mode().IsRegular() {
+			logf("skip non-regular profiler data: %s (%s)", path, fi.Mode())
+			return nil
+		}
 		return copyFileStream(path, out, fi.Mode(), state)
 	})
 	return state.copied, source, err
@@ -198,7 +219,7 @@ func profilerDataSourceBytes(src string) (int64, error) {
 			}
 			return nil
 		}
-		if fi.Mode()&os.ModeSymlink != 0 || fi.IsDir() {
+		if fi.Mode()&os.ModeSymlink != 0 || fi.IsDir() || !fi.Mode().IsRegular() {
 			return nil
 		}
 		total += fi.Size()
@@ -243,10 +264,10 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 // cleanProfilerDataCopies keeps the newest keep profiler_data dirs under
 // base/<timestamp>/profiler_data, ordered by the timestamp directory name.
 func (d *Daemon) cleanProfilerDataCopies() {
-	cleanProfilerDataCopies("daemon_results", profilerDataKeep, d.logf)
+	cleanProfilerDataCopies("daemon_results", profilerDataKeep, "", d.logf)
 }
 
-func cleanProfilerDataCopies(base string, keep int, logf func(string, ...any)) {
+func cleanProfilerDataCopies(base string, keep int, protect string, logf func(string, ...any)) {
 	matches, err := filepath.Glob(filepath.Join(base, "*", "profiler_data"))
 	if err != nil {
 		logf("profiler_data retention glob: %v", err)
@@ -268,12 +289,35 @@ func cleanProfilerDataCopies(base string, keep int, logf func(string, ...any)) {
 	if keep < 0 {
 		keep = 0
 	}
-	for i := keep; i < len(entries); i++ {
-		if err := os.RemoveAll(entries[i].path); err != nil {
-			logf("profiler_data retention remove %s: %v", entries[i].path, err)
+	keepPaths := make(map[string]bool, keep+1)
+	for i := 0; i < len(entries) && i < keep; i++ {
+		keepPaths[entries[i].path] = true
+	}
+	if protect != "" {
+		protect = filepath.Clean(protect)
+		found := false
+		for _, e := range entries {
+			if e.path == protect {
+				found = true
+				break
+			}
+		}
+		if found && !keepPaths[protect] {
+			if keep > 0 && keep <= len(entries) {
+				delete(keepPaths, entries[keep-1].path)
+			}
+			keepPaths[protect] = true
+		}
+	}
+	for _, e := range entries {
+		if keepPaths[e.path] {
 			continue
 		}
-		logf("profiler_data retention removed oldest copy: %s", entries[i].path)
+		if err := os.RemoveAll(e.path); err != nil {
+			logf("profiler_data retention remove %s: %v", e.path, err)
+			continue
+		}
+		logf("profiler_data retention removed oldest copy: %s", e.path)
 	}
 }
 
