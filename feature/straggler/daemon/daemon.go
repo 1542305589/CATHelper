@@ -384,7 +384,7 @@ func (d *Daemon) detectKPI() (*resource.DetectionResult, string) {
 	if d.cfg.KpiDir == "" {
 		return nil, "disabled (no --kpi-dir)"
 	}
-	ts, err := resource.ReadKPIFiles(d.cfg.KpiDir)
+	ts, err := resource.ReadKPIFilesTail(d.cfg.KpiDir, resource.DefaultKPITailBytes)
 	if err != nil {
 		d.logf("KPI read skipped: %v", err)
 		return nil, fmt.Sprintf("skipped: %v", err)
