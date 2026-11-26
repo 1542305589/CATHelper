@@ -212,9 +212,20 @@ func (d *Daemon) startPendingLocked() {
 	if !d.pending {
 		return
 	}
+	if d.state == "paused" {
+		d.logf("drop pending cycle: daemon is paused (token=%q)", d.pendingToken)
+		d.pending = false
+		d.pendingIterations = 0
+		d.pendingToken = ""
+		d.pendingDeadline = time.Time{}
+		return
+	}
 	if !d.pendingDeadline.IsZero() && time.Now().After(d.pendingDeadline) {
 		d.logf("drop expired pending cycle (token=%q deadline=%s)", d.pendingToken, d.pendingDeadline.Format(time.RFC3339))
 		d.pending = false
+		d.pendingIterations = 0
+		d.pendingToken = ""
+		d.pendingDeadline = time.Time{}
 		return
 	}
 	iterations, token := d.pendingIterations, d.pendingToken
@@ -582,10 +593,15 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 func (d *Daemon) Pause() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// A queued center trigger must never start after a pause, even when the
+	// daemon is managed (state stays "managed" while paused by the user).
+	d.pending = false
+	d.pendingIterations = 0
+	d.pendingToken = ""
+	d.pendingDeadline = time.Time{}
 	if d.state == "running" {
 		d.state = "paused"
 		d.nextRun = time.Time{}
-		d.pending = false
 		d.stopTimer()
 	}
 }

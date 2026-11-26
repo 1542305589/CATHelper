@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 )
@@ -90,6 +91,58 @@ func TestPauseClearsPending(t *testing.T) {
 	d.Pause()
 	if d.pending {
 		t.Fatal("Pause must clear the pending trigger")
+	}
+}
+
+func TestPauseClearsPendingWhenManaged(t *testing.T) {
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.centerAddr = "http://center:8080"
+	d.queuePending(3, "tok", 120)
+	d.Pause()
+	if d.pending || d.pendingToken != "" || !d.pendingDeadline.IsZero() {
+		t.Fatalf("managed pause left pending=%v token=%q deadline=%s",
+			d.pending, d.pendingToken, d.pendingDeadline)
+	}
+}
+
+func TestStartPendingDoesNotRunWhenPaused(t *testing.T) {
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+
+	d := New(Config{}, nil)
+	d.state = "paused"
+	d.queuePending(3, "tok", 120)
+	d.mu.Lock()
+	d.startPendingLocked()
+	started := d.cycleID != 0
+	inFlight := d.cycleInFlight
+	d.mu.Unlock()
+
+	// Let a wrongly-started cycle finish before restoring the temp working dir.
+	if started {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			d.mu.Lock()
+			inFlight = d.cycleInFlight
+			d.mu.Unlock()
+			if !inFlight {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if started {
+		t.Fatalf("paused daemon started pending cycle (cycleInFlight=%v)", inFlight)
+	}
+	if d.pending {
+		t.Fatal("paused startPendingLocked left the pending trigger")
 	}
 }
 

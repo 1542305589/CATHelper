@@ -54,27 +54,48 @@ func TestTriggerBusinessModeQueuesBehindRunningRound(t *testing.T) {
 	}
 }
 
-// An earlier trigger while a queued round is waiting for busy daemons absorbs
-// the queued reason and starts one round instead of leaving a second behind.
-func TestTriggerBusinessModeAbsorbsPendingWhenIdle(t *testing.T) {
-	c := &Center{biz: map[string]*Business{}, logf: noopLogf, cfg: Config{DataDir: t.TempDir()}}
+// A queued round is absorbed into an earlier trigger instead of leaving a
+// second round behind once the business is ready.
+func TestAbsorbPendingLockedWhenReady(t *testing.T) {
+	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{
 		Name: "biz", pendingRound: true, pendingReason: "timer",
-		queueIfBusyNext: true, NextTrigger: time.Now().Add(time.Hour),
+		queueIfBusyNext: true,
+		Daemons:         []*Daemon{{IP: "10.0.0.1", Port: 8080, matchState: "healthy"}},
 	}
 	c.biz["biz"] = b
 
-	if c.triggerBusinessMode(b, true, "kpi") {
-		t.Fatal("triggerBusinessMode queued instead of starting the pending round")
+	reason, ok := c.absorbPendingLocked(b, "kpi")
+	if !ok || reason != "timer+kpi" {
+		t.Fatalf("absorb = %q/%v, want timer+kpi/true", reason, ok)
 	}
 	if b.pendingRound || b.pendingReason != "" {
 		t.Fatalf("pending = %v reason=%q, want cleared", b.pendingRound, b.pendingReason)
 	}
-	if b.lastTriggerReason != "timer+kpi" {
-		t.Fatalf("trigger reason = %q, want timer+kpi", b.lastTriggerReason)
+	if !b.queueIfBusyNext {
+		t.Fatal("absorbed pending must keep queue_if_busy for the started round")
+	}
+}
+
+// A pending round must not start while the business is not ready; it stays
+// queued (reason merged) so scheduleLoop can start it after the daemon recovers.
+func TestTriggerBusinessModeKeepsPendingWhenNotReady(t *testing.T) {
+	c := &Center{biz: map[string]*Business{}, logf: noopLogf, cfg: Config{DataDir: t.TempDir()}}
+	b := &Business{
+		Name: "biz", pendingRound: true, pendingReason: "timer",
+		queueIfBusyNext: true, NextTrigger: time.Now().Add(time.Hour),
+		Daemons: []*Daemon{{IP: "10.0.0.1", Port: 8080, matchState: "unmatched"}},
+	}
+	c.biz["biz"] = b
+
+	if !c.triggerBusinessMode(b, true, "kpi") {
+		t.Fatal("triggerBusinessMode started a round while not ready")
+	}
+	if !b.pendingRound || b.pendingReason != "timer+kpi" {
+		t.Fatalf("pending = %v reason=%q, want true/timer+kpi", b.pendingRound, b.pendingReason)
 	}
 	if b.triggering {
-		t.Fatal("round did not finish")
+		t.Fatal("not-ready pending must not start a round")
 	}
 }
 

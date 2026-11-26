@@ -385,12 +385,17 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	}
 	// A queued round is waiting for the daemons to become idle. An earlier
 	// trigger starts it now and absorbs the queued reason instead of leaving a
-	// second round behind.
+	// second round behind. If the business is not ready, keep it queued so
+	// scheduleLoop can start it after the daemons recover.
 	if b.pendingRound {
-		reason = mergeTriggerReason(b.pendingReason, reason)
-		b.pendingRound = false
-		b.pendingReason = ""
-		b.queueIfBusyNext = true
+		merged, ready := c.absorbPendingLocked(b, reason)
+		if !ready {
+			c.logf("business %s: pending round waiting for healthy daemons (reason=%s)", b.Name, b.pendingReason)
+			c.save()
+			c.mu.Unlock()
+			return true
+		}
+		reason = merged
 	}
 	b.triggering = true
 	b.lastTriggerReason = reason
@@ -580,6 +585,22 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	// (the in-memory log only covers the current/last round).
 	_ = prog.save(filepath.Join(c.cfg.DataDir, b.Name, triggerAt.Format("20060102-150405"), "progress.json"))
 	return false
+}
+
+// absorbPendingLocked merges a waiting pending round into an earlier trigger.
+// When the business is not ready it keeps the pending round queued and returns
+// ready=false. Caller holds c.mu.
+func (c *Center) absorbPendingLocked(b *Business, reason string) (string, bool) {
+	if !c.businessReadyLocked(b) {
+		b.pendingReason = mergeTriggerReason(b.pendingReason, reason)
+		b.queueIfBusyNext = true
+		return reason, false
+	}
+	reason = mergeTriggerReason(b.pendingReason, reason)
+	b.pendingRound = false
+	b.pendingReason = ""
+	b.queueIfBusyNext = true
+	return reason, true
 }
 
 // mergeTriggerReason combines queued round reasons without duplicating a part.
