@@ -427,9 +427,8 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 		return
 	}
 	cr.JSONPath = jsonPath
-	if err := writeMeta(archive, cr); err != nil {
-		d.logf("write daemon_meta.json: %v", err)
-	}
+	// daemon_meta.json is written by finishCycle before cleanup, then
+	// overwritten with the profiler_data result after the copy.
 	// Running-dir copy of the latest combined result (same shape as one-shot).
 	if err := copyFile(jsonPath, filepath.Join(".", "straggler_output.json")); err != nil {
 		d.logf("copy result to run dir: %v", err)
@@ -546,6 +545,16 @@ func countKPIFilesIn(dir string) int {
 func (d *Daemon) finishCycle(cr *CycleResult) {
 	d.st.add(cr)
 	d.logf("cycle %d finished: dbs=%d error=%q", cr.ID, cr.DBs, cr.Error)
+	if cr.DumpDir == "" {
+		return
+	}
+	if err := os.MkdirAll(cr.DumpDir, 0o755); err != nil {
+		d.logf("cycle %d mkdir archive for meta: %v", cr.ID, err)
+		return
+	}
+	if err := writeMeta(cr.DumpDir, cr); err != nil {
+		d.logf("cycle %d write daemon_meta.json: %v", cr.ID, err)
+	}
 }
 
 // shutdown stops the HTTP server and waits for an in-flight cycle (max 10 min).
@@ -1213,6 +1222,20 @@ func copyDir(src, dst string) error {
 // untouched; RemoveAll on a missing root is a no-op, so this is safe even when
 // the trigger never created a dump. Failures are logged, never fatal.
 func (d *Daemon) cleanupDump(cr *CycleResult) {
+	d.applyProfilerDataPolicy(cr)
+	if cr.DumpDir != "" {
+		if err := os.MkdirAll(cr.DumpDir, 0o755); err == nil {
+			if err := writeMeta(cr.DumpDir, cr); err != nil {
+				d.logf("cycle %d update daemon_meta.json: %v", cr.ID, err)
+			}
+		}
+	}
+	// A failed copy (or a stale-dump rename failure) keeps the raw root as
+	// evidence; the next cycle moves it aside before dyno runs.
+	if cr.keepRawDump || cr.ProfilerDataStatus == "failed" {
+		d.logf("cycle %d kept raw profiler dump for diagnosis: %s", cr.ID, d.cfg.ProfilerDir)
+		return
+	}
 	if _, err := os.Stat(d.cfg.ProfilerDir); err != nil {
 		return // nothing was written this cycle; nothing to clean
 	}

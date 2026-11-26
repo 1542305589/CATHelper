@@ -5,9 +5,82 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
+
+const (
+	profilerDataKeep = 5
+	minFreeDiskBytes = 50 * 1024 * 1024 * 1024
+)
+
+// freeDiskBytesFn and copyProfilerDataFn are test seams for the build-tagged
+// disk check and the copy loop.
+var (
+	freeDiskBytesFn    = freeDiskBytes
+	copyProfilerDataFn = copyProfilerData
+)
+
+// applyProfilerDataPolicy copies the raw profiler root before cleanup (when
+// enabled), or records why it was skipped/failed. It never deletes the raw
+// root; cleanupDump decides that after this policy.
+func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) {
+	cr.DumpProfilerData = d.cfg.DumpProfilerData
+	if !d.cfg.DumpProfilerData {
+		cr.ProfilerDataStatus = "disabled"
+		return
+	}
+	if cr.keepRawDump {
+		cr.ProfilerDataStatus = "failed"
+		if cr.ProfilerDataError == "" {
+			cr.ProfilerDataError = "stale_dump_present"
+		}
+		return
+	}
+	root := d.cfg.ProfilerDir
+	if !fileExistsDir(root) {
+		cr.ProfilerDataStatus = "skipped"
+		cr.ProfilerDataError = "no_raw_dump"
+		cr.ProfilerDataBytes = 0
+		cr.ProfilerDataSourceBytes = 0
+		return
+	}
+	if cr.DumpDir == "" {
+		cr.ProfilerDataStatus = "failed"
+		cr.ProfilerDataError = "archive directory is empty"
+		return
+	}
+	if err := os.MkdirAll(cr.DumpDir, 0o755); err != nil {
+		cr.ProfilerDataStatus = "failed"
+		cr.ProfilerDataError = fmt.Sprintf("mkdir archive: %v", err)
+		return
+	}
+	if free, known := freeDiskBytesFn(cr.DumpDir); known && free < minFreeDiskBytes {
+		cr.ProfilerDataStatus = "skipped"
+		cr.ProfilerDataBytes = 0
+		cr.ProfilerDataError = fmt.Sprintf("skipped_low_disk: free=%d < %d", free, minFreeDiskBytes)
+		d.logf("WARNING: cycle %d skip profiler_data copy: free disk %d < %d", cr.ID, free, minFreeDiskBytes)
+		return
+	}
+	dst := filepath.Join(cr.DumpDir, "profiler_data")
+	_ = os.RemoveAll(dst)
+	copied, source, err := copyProfilerDataFn(root, dst, d.logf)
+	cr.ProfilerDataSourceBytes = source
+	if err != nil {
+		_ = os.RemoveAll(dst)
+		cr.ProfilerDataStatus = "failed"
+		cr.ProfilerDataBytes = 0
+		cr.ProfilerDataError = err.Error()
+		d.logf("cycle %d profiler_data copy failed: %v; keeping raw dump", cr.ID, err)
+		return
+	}
+	cr.ProfilerDataStatus = "ok"
+	cr.ProfilerDataBytes = copied
+	cr.ProfilerDataError = ""
+	d.logf("cycle %d profiler_data copied: %d/%d bytes -> %s", cr.ID, copied, source, dst)
+	d.cleanProfilerDataCopies()
+}
 
 // copyProfilerData copies the raw profiler root into dst, excluding the two
 // top-level directories that already live in the cycle archive. It returns the
@@ -112,6 +185,82 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		w.state.last = time.Now()
 	}
 	return n, err
+}
+
+// cleanProfilerDataCopies keeps the newest keep profiler_data dirs under
+// base/<timestamp>/profiler_data, ordered by the timestamp directory name.
+func (d *Daemon) cleanProfilerDataCopies() {
+	cleanProfilerDataCopies("daemon_results", profilerDataKeep, d.logf)
+}
+
+func cleanProfilerDataCopies(base string, keep int, logf func(string, ...any)) {
+	matches, err := filepath.Glob(filepath.Join(base, "*", "profiler_data"))
+	if err != nil {
+		logf("profiler_data retention glob: %v", err)
+		return
+	}
+	type entry struct {
+		path string
+		name string
+	}
+	entries := make([]entry, 0, len(matches))
+	for _, path := range matches {
+		fi, err := os.Stat(path)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		entries = append(entries, entry{path: path, name: filepath.Base(filepath.Dir(path))})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].name > entries[j].name })
+	if keep < 0 {
+		keep = 0
+	}
+	for i := keep; i < len(entries); i++ {
+		if err := os.RemoveAll(entries[i].path); err != nil {
+			logf("profiler_data retention remove %s: %v", entries[i].path, err)
+			continue
+		}
+		logf("profiler_data retention removed oldest copy: %s", entries[i].path)
+	}
+}
+
+// warnStaleProfilerDirs logs stale raw dumps but never deletes them.
+func warnStaleProfilerDirs(root string, logf func(string, ...any)) {
+	matches, err := filepath.Glob(root + ".stale-*")
+	if err != nil {
+		logf("stale profiler_data glob %s: %v", root, err)
+		return
+	}
+	for _, path := range matches {
+		logf("stale profiler data present: %s (%s)", path, humanBytes(dirSize(path)))
+	}
+	if len(matches) > profilerDataKeep {
+		logf("WARNING: %d stale profiler dirs (> %d), manual cleanup recommended", len(matches), profilerDataKeep)
+	}
+}
+
+func dirSize(path string) int64 {
+	var total int64
+	_ = filepath.Walk(path, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && fi.Mode().IsRegular() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func copyFileStream(src, dst string, mode os.FileMode, state *copyState) error {
