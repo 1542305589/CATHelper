@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,6 +168,47 @@ func TestDumpProfilerDataDefaultDisabled(t *testing.T) {
 	meta := readDumpMeta(t, archive)
 	if meta.DumpProfilerData || meta.ProfilerDataStatus != "disabled" {
 		t.Fatalf("meta = %+v, want dump=false/disabled", meta)
+	}
+}
+
+func TestCleanProfilerDataCopiesKeepsFive(t *testing.T) {
+	base := t.TempDir()
+	var names []string
+	for i := 0; i < 7; i++ {
+		name := fmt.Sprintf("20261126-10000%d", i)
+		names = append(names, name)
+		writeTestFile(t, filepath.Join(base, name, "profiler_data", "master_0", "a.db"), "x")
+	}
+	cleanProfilerDataCopies(base, 5, noopLogf)
+	for i, name := range names {
+		_, err := os.Stat(filepath.Join(base, name, "profiler_data"))
+		if i < 2 {
+			if !os.IsNotExist(err) {
+				t.Fatalf("old copy %s still exists", name)
+			}
+		} else if err != nil {
+			t.Fatalf("new copy %s missing: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, names[0])); err != nil {
+		t.Fatalf("parent cycle dir %s was removed: %v", names[0], err)
+	}
+}
+
+func TestWarnStaleProfilerDirsKeepsThem(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "profiler")
+	stale := root + ".stale-20261126-100000"
+	writeTestFile(t, filepath.Join(stale, "master_0", "a.db"), "abc")
+	var logs []string
+	warnStaleProfilerDirs(root, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("stale dir was removed: %v", err)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "stale profiler data present") || !strings.Contains(joined, "3 B") {
+		t.Fatalf("warn logs = %q, want path and size", joined)
 	}
 }
 

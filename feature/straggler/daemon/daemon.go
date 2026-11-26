@@ -143,6 +143,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
+	if d.cfg.DumpProfilerData {
+		d.logf("dump profiler data enabled: keep newest %d copies under daemon_results/*/profiler_data", profilerDataKeep)
+		cleanProfilerDataCopies("daemon_results", profilerDataKeep, d.logf)
+		warnStaleProfilerDirs(d.cfg.ProfilerDir, d.logf)
+	}
+
 	// First cycle runs after the first interval tick, not immediately at
 	// startup. nextRun is set so /status shows the scheduled first run; use
 	// POST /daemon/trigger for an immediate cycle.
