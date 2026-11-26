@@ -108,6 +108,23 @@ func (c *Center) scheduleLoop() {
 			if b.Paused {
 				continue
 			}
+			if b.pendingRound {
+				if b.NextTrigger.IsZero() {
+					b.NextTrigger = time.Now()
+					changed = true
+				}
+				if time.Now().Before(b.NextTrigger) || b.triggering || !c.businessReadyLocked(b) {
+					continue
+				}
+				reason := b.pendingReason
+				b.pendingRound = false
+				b.pendingReason = ""
+				b.queueIfBusyNext = true
+				changed = true
+				c.logf("business %s: starting queued round (reason=%s)", b.Name, reason)
+				go c.triggerBusinessMode(b, true, reason)
+				continue
+			}
 			interval := c.businessInterval(b)
 			if b.NextTrigger.IsZero() {
 				b.NextTrigger = time.Now().Add(interval)
@@ -120,7 +137,13 @@ func (c *Center) scheduleLoop() {
 			// Deadline elapsed (normal tick or restart catch-up): fire once and
 			// re-anchor. When the business is not ready yet, keep the expired
 			// deadline so the single catch-up happens as soon as daemons re-match.
-			if b.triggering || !c.businessReadyLocked(b) {
+			if !c.businessReadyLocked(b) {
+				continue
+			}
+			if b.triggering {
+				// The timer fired while a round is in flight: queue a next round
+				// instead of dropping this tick.
+				go c.triggerBusinessMode(b, true, "timer")
 				continue
 			}
 			b.NextTrigger = time.Now().Add(interval)
@@ -329,27 +352,50 @@ func daemonMatchStatus(d *Daemon, key string) (*matchStatusResp, error) {
 // triggerBusiness triggers every healthy daemon, waits for their reports (or
 // the max-collect-wait+60s timeout), merges and re-runs detection. It tracks the
 // business's cycle counters and next trigger, and re-anchors the schedule.
-// Single-flight: a concurrent trigger for the same business is a no-op.
-func (c *Center) triggerBusiness(b *Business) {
-	c.triggerBusinessMode(b, true, "timer")
+// Single-flight: a concurrent trigger for the same business queues one next
+// round (reason merged) and returns true.
+func (c *Center) triggerBusiness(b *Business) bool {
+	return c.triggerBusinessMode(b, true, "timer")
 }
 
 // triggerBusinessFromKPI runs a KPI-triggered profiler round and refreshes the
 // business's normal profiler schedule so the timer does not fire immediately after.
-func (c *Center) triggerBusinessFromKPI(b *Business) {
-	c.triggerBusinessMode(b, true, "kpi")
+func (c *Center) triggerBusinessFromKPI(b *Business) bool {
+	return c.triggerBusinessMode(b, true, "kpi")
 }
 
-func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string) {
+func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string) bool {
 	triggerAt := time.Now()
 
 	c.mu.Lock()
 	if b.triggering {
+		b.pendingRound = true
+		b.pendingReason = mergeTriggerReason(b.pendingReason, reason)
+		b.queueIfBusyNext = true
+		if b.NextTrigger.IsZero() || b.NextTrigger.After(time.Now()) {
+			b.NextTrigger = time.Now()
+		}
+		c.logf("business %s: round in flight; queued next round (reason=%s)", b.Name, b.pendingReason)
+		c.save()
 		c.mu.Unlock()
-		return
+		return true
+	}
+	// A queued round is waiting for the daemons to become idle. An earlier
+	// trigger starts it now and absorbs the queued reason instead of leaving a
+	// second round behind.
+	if b.pendingRound {
+		reason = mergeTriggerReason(b.pendingReason, reason)
+		b.pendingRound = false
+		b.pendingReason = ""
+		b.queueIfBusyNext = true
 	}
 	b.triggering = true
 	b.lastTriggerReason = reason
+	if strings.Contains(reason, "kpi") {
+		// Cooldown starts when the KPI-triggered round actually starts, not when
+		// the anomaly was recorded (it may be queued behind another round).
+		b.kpiProfilerCooldownUntil = triggerAt.Add(10 * time.Minute)
+	}
 	// Round token: daemons echo it back with their report so a late report from
 	// an older round can never be mistaken for this round's data.
 	b.pendingToken = strconv.FormatInt(triggerAt.UnixNano(), 10)
@@ -376,11 +422,20 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 		d.lastReportReason = ""
 		d.lastReportStage = ""
 		d.lastOpMetric = nil
+		d.lastBusyEtaMs = 0
 	}
 	healthy := len(expected)
-	// Automatic collection window: max(report_eta)+60s (120..1800), persisted
-	// across restarts and refreshed by the 5s probes.
+	// queue_if_busy is consumed per round; the next round after a busy report
+	// asks daemons to queue instead of reporting busy. Its timeout must include
+	// the previous round's remaining busy time.
+	queueIfBusy := b.queueIfBusyNext
+	b.queueIfBusyNext = false
+	busyEtaPrev := b.lastBusyEtaMs
 	timeoutSec := c.reportTimeoutLocked(b, expected)
+	if queueIfBusy {
+		timeoutSec = queueBusyTimeout(timeoutSec, busyEtaPrev)
+		c.logf("business %s: next round queue_if_busy (timeout=%ds, prev busy eta=%dms)", b.Name, timeoutSec, busyEtaPrev)
+	}
 	b.LastReportTimeoutSec = timeoutSec
 	timeout := time.Duration(timeoutSec) * time.Second
 	c.mu.Unlock()
@@ -390,12 +445,13 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	prog.step("触发守护进程: %s", strings.Join(addrs, ", "))
 
 	for _, d := range expected {
-		go c.triggerDaemon(d, token, iterations)
+		go c.triggerDaemon(d, token, iterations, queueIfBusy, timeoutSec)
 	}
 
 	prog.step("等待 op_metric 回传（超时 %s）", timeout)
 	deadline := time.Now().Add(timeout)
 	reported := -1
+	collected := false
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
 		done := true
@@ -413,14 +469,16 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 			prog.step("已回传 op_metric: %d/%d", n, healthy)
 		}
 		if done {
+			collected = true
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+	timedOut := !collected
 
 	c.markMissingReports(expected, triggerAt, token)
 
-	merged, okCount, failedDaemons, missingDaemons, reportedDaemons, reportLatencyMs := c.mergeOpMetric(expected, triggerAt, token)
+	merged, okCount, failedDaemons, missingDaemons, reportedDaemons, reportLatencyMs, maxBusyEtaMs := c.mergeOpMetric(expected, triggerAt, token)
 	meta := roundMeta{
 		ReportTimeoutSec: timeoutSec,
 		ReportedDaemons:  reportedDaemons,
@@ -428,6 +486,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 		MissingDaemons:   missingDaemons,
 		Partial:          okCount > 0 && (len(failedDaemons) > 0 || len(missingDaemons) > 0),
 		ReportLatencyMs:  reportLatencyMs,
+		BusyEtaMs:        maxBusyEtaMs,
 	}
 	durationMs := time.Since(triggerAt).Milliseconds()
 	prog.step("合并本轮上报的 op_metric: %d 个 rank（%d/%d 个守护进程成功）", len(merged), okCount, healthy)
@@ -462,11 +521,47 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	} else {
 		b.CyclesTotal++
 	}
-	// Anchor the next scheduled trigger to THIS round's start (not its end), so the
-	// cadence stays a fixed interval and does not drift by the detection duration.
-	// KPI-triggered rounds must not shift the normal profiler schedule.
-	if reschedule {
-		b.NextTrigger = triggerAt.Add(c.businessInterval(b))
+	b.lastBusyEtaMs = maxBusyEtaMs
+	sawBusy := maxBusyEtaMs > 0
+	for _, d := range expected {
+		if d.lastReportStatus == "busy" {
+			sawBusy = true
+			break
+		}
+	}
+	if sawBusy || b.pendingRound {
+		b.queueIfBusyNext = true
+	}
+	now := time.Now()
+	// busy_eta_ms was measured relative to the round start; the daemon is idle
+	// at triggerAt+busy_eta (plus a small buffer). Detection may finish much
+	// later, so compute the absolute idle time instead of now+busy_eta.
+	busyUntil := triggerAt.Add(time.Duration(maxBusyEtaMs)*time.Millisecond + 5*time.Second)
+	if maxBusyEtaMs > 0 && busyUntil.Before(now) {
+		busyUntil = now
+	}
+	if b.pendingRound {
+		// The pending round starts via scheduleLoop once the busy daemon is idle.
+		if maxBusyEtaMs > 0 {
+			b.NextTrigger = busyUntil
+		} else {
+			b.NextTrigger = now
+		}
+	} else {
+		next := time.Time{}
+		if timedOut {
+			next = now.Add(c.businessInterval(b))
+		} else if reschedule {
+			next = triggerAt.Add(c.businessInterval(b))
+		}
+		if maxBusyEtaMs > 0 {
+			if next.IsZero() || busyUntil.After(next) {
+				next = busyUntil
+			}
+		}
+		if !next.IsZero() {
+			b.NextTrigger = next
+		}
 	}
 	b.triggering = false
 	c.save()
@@ -481,6 +576,23 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	// Persist this round's stage log under its result dir so history can show it
 	// (the in-memory log only covers the current/last round).
 	_ = prog.save(filepath.Join(c.cfg.DataDir, b.Name, triggerAt.Format("20060102-150405"), "progress.json"))
+	return false
+}
+
+// mergeTriggerReason combines queued round reasons without duplicating a part.
+func mergeTriggerReason(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" || a == b {
+		return a
+	}
+	for _, part := range strings.Split(a, "+") {
+		if part == b {
+			return a
+		}
+	}
+	return a + "+" + b
 }
 
 // markMissingReports flags daemons that failed to report within the round's
@@ -514,8 +626,13 @@ func roundReported(d *Daemon, triggerAt time.Time, token string) bool {
 	return true
 }
 
-func (c *Center) triggerDaemon(d *Daemon, token string, iterations int) {
-	body := map[string]any{"round_token": token, "iterations": iterations}
+func (c *Center) triggerDaemon(d *Daemon, token string, iterations int, queueIfBusy bool, timeoutSec int) {
+	body := map[string]any{
+		"round_token":        token,
+		"iterations":         iterations,
+		"queue_if_busy":      queueIfBusy,
+		"report_timeout_sec": timeoutSec,
+	}
 	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", body, d.Key)
 }
 
@@ -567,6 +684,15 @@ func (c *Center) reportTimeoutLocked(b *Business, daemons []*Daemon) int {
 	return defaultReportTimeoutSec
 }
 
+// queueBusyTimeout enlarges the current round's window for a next round that
+// must wait for a busy daemon to finish: base + remaining busy time, clamped.
+func queueBusyTimeout(base int, busyEtaMs int64) int {
+	if busyEtaMs <= 0 {
+		return clampReportTimeout(base)
+	}
+	return clampReportTimeout(base + int(busyEtaMs/1000))
+}
+
 func clampReportTimeout(v int) int {
 	if v < minReportTimeoutSec {
 		return minReportTimeoutSec
@@ -595,8 +721,9 @@ func allDaemonsFailed(okCount, healthy, missingCount int) bool {
 // mergeOpMetric merges only the OK reports from the round's expected daemons.
 // A daemon that reported failed/busy/paused (or did not report at all) is
 // skipped and returned in failed, so its cached op_metric can never be reused.
-// It returns (merged, okCount, failedAddrs, reportedCount, maxReportLatencyMs).
-func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token string) (detector.OpMetric, int, []string, []string, int, int64) {
+// It returns (merged, okCount, failedAddrs, missingAddrs, reportedCount,
+// maxReportLatencyMs, maxBusyEtaMs).
+func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token string) (detector.OpMetric, int, []string, []string, int, int64, int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	merged := make(detector.OpMetric)
@@ -605,6 +732,7 @@ func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token st
 	var failed []string
 	var missing []string
 	var maxLatencyMs int64
+	var maxBusyEtaMs int64
 	for _, d := range expected {
 		if !roundReported(d, triggerAt, token) {
 			missing = append(missing, d.Addr())
@@ -622,6 +750,9 @@ func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token st
 		}
 		if status != "ok" || d.lastOpMetric == nil {
 			failed = append(failed, d.Addr())
+			if status == "busy" && d.lastBusyEtaMs > maxBusyEtaMs {
+				maxBusyEtaMs = d.lastBusyEtaMs
+			}
 			c.logf("skip non-ok op_metric: daemon=%s status=%s reason=%s stage=%s token=%q",
 				d.Addr(), status, d.lastReportReason, d.lastReportStage, d.lastRoundToken)
 			continue
@@ -631,7 +762,7 @@ func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token st
 			merged[rank] = r
 		}
 	}
-	return merged, okCount, failed, missing, reported, maxLatencyMs
+	return merged, okCount, failed, missing, reported, maxLatencyMs, maxBusyEtaMs
 }
 
 // detectAndStore runs detection on the merged op_metric and stores the result
@@ -812,6 +943,7 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		"missing_daemons":    meta.MissingDaemons,
 		"partial":            meta.Partial,
 		"report_latency_ms":  meta.ReportLatencyMs,
+		"busy_eta_ms":        meta.BusyEtaMs,
 		"trigger_reason":     b.lastTriggerReason,
 		"failed":             false,
 	}, "", "  ")
@@ -837,6 +969,7 @@ func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs i
 		"missing_daemons":    meta.MissingDaemons,
 		"partial":            meta.Partial,
 		"report_latency_ms":  meta.ReportLatencyMs,
+		"busy_eta_ms":        meta.BusyEtaMs,
 		"trigger_reason":     triggerReason,
 		"failure_reason":     failureReason,
 		"failed":             true,

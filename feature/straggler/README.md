@@ -328,7 +328,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改；中心触发以中心下发为准） | `{"iterations": 3}`（3–100；<3 需 daemon 启动时加 `--allow-low-iterations`） |
 | `GET /daemon/thresholds` | 读取当前检测阈值 | — |
 | `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
-| `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；已有周期在跑 → 409） | `{"iterations": 3, "round_token": "..."}` |
+| `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；`queue_if_busy=true` 且已有周期在跑 → 202 排队；否则 409 + `busy_eta_ms`） | `{"iterations":3,"round_token":"...","queue_if_busy":true,"report_timeout_sec":372}` |
 | `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon","interval_sec"}` |
 | `POST /daemon/unmatch` | 解除托管（回到 running，需 `X-Match-Key`） | — |
 | `GET /daemon/match_status` | 查询匹配状态（`X-Match-Key` 匹配则确认归属） | — |
@@ -462,7 +462,7 @@ curl -s -X POST localhost:8080/daemon/stop
 | `DELETE /center/business/{name}/daemon?ip=&port=` | 删除守护进程 |
 | `POST /center/business/{name}/daemon/match` | 手动匹配（重连）`{"ip","port"}` |
 | `POST /center/business/{name}/daemon/unmatch` | 手动解除匹配 `{"ip","port"}` |
-| `POST /center/business/{name}/trigger` | 立即触发业务检测 |
+| `POST /center/business/{name}/trigger` | 立即触发业务检测（本轮进行中 → 202 排队，本轮结束后执行） |
 | `POST /center/business/{name}/pause` | 暂停业务调度 |
 | `POST /center/business/{name}/start` | 恢复业务调度 |
 | `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |

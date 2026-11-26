@@ -1042,8 +1042,11 @@ const controlMsg = { trigger:'已触发检测', pause:'已暂停', start:'已启
 async function control(kind) {
   try {
     const body = kind === 'interval' ? { interval_sec: parseInt($('intervalInput').value, 10) } : undefined;
-    await post('/center/business/' + encodeURIComponent(BIZ) + '/' + kind, body);
-    toast(controlMsg[kind] || '操作成功', true);
+    const res = await post('/center/business/' + encodeURIComponent(BIZ) + '/' + kind, body);
+    const msg = kind === 'trigger' && res && res.status === 'queued'
+      ? '已排队（本轮结束后执行）'
+      : (controlMsg[kind] || '操作成功');
+    toast(msg, true);
     setTimeout(refresh, 400);
   } catch(e) { toast('操作失败：' + e.message, false); }
 }

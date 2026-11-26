@@ -390,7 +390,8 @@ async function control(kind) {
     }
     // /daemon/trigger now requires the per-cycle iteration count.
     const body = kind === 'trigger'
-      ? { iterations: parseInt($('iterationsInput').value, 10) || 3 }
+      ? { iterations: parseInt($('iterationsInput').value, 10) || 3,
+          queue_if_busy: true, report_timeout_sec: 480 }
       : undefined;
     await post('/daemon/' + kind, body);
     toast('已发送：' + kind, true);

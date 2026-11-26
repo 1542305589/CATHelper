@@ -24,6 +24,7 @@ type cycleInfo struct {
 	MissingDaemons   []string          `json:"missing_daemons,omitempty"`
 	Partial          bool              `json:"partial,omitempty"`
 	ReportLatencyMs  int64             `json:"report_latency_ms,omitempty"`
+	BusyEtaMs        int64             `json:"busy_eta_ms,omitempty"`
 	TriggerReason    string            `json:"trigger_reason,omitempty"`
 	FailureReason    string            `json:"failure_reason,omitempty"`
 	Failed           bool              `json:"failed,omitempty"`
@@ -80,6 +81,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				MissingDaemons   []string          `json:"missing_daemons"`
 				Partial          bool              `json:"partial"`
 				ReportLatencyMs  int64             `json:"report_latency_ms"`
+				BusyEtaMs        int64             `json:"busy_eta_ms"`
 				TriggerReason    string            `json:"trigger_reason"`
 				FailureReason    string            `json:"failure_reason"`
 				Failed           bool              `json:"failed"`
@@ -102,6 +104,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				ci.MissingDaemons = m.MissingDaemons
 				ci.Partial = m.Partial
 				ci.ReportLatencyMs = m.ReportLatencyMs
+				ci.BusyEtaMs = m.BusyEtaMs
 			}
 		}
 		out = append(out, ci)

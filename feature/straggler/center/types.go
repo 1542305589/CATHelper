@@ -34,6 +34,7 @@ type Daemon struct {
 	reportedIterations int               // daemon-reported self-run iterations (0 = unknown / old build)
 	reportEtaMs        int64             // last successful report ETA (ms) from the daemon
 	reportEtaAt        time.Time         // when reportEtaMs was last refreshed
+	lastBusyEtaMs      int64             // busy_eta_ms from the last busy report
 	lastReportStatus   string            // ok / failed / busy / paused ("" = legacy bare map)
 	lastReportReason   string
 	lastReportStage    string
@@ -66,6 +67,10 @@ type Business struct {
 	NextTrigger              time.Time    `json:"next_trigger,omitempty"` // next scheduled profiler trigger (persisted)
 	triggering               bool         // a profiler trigger round is currently in flight (in-memory, single-flight)
 	pendingToken             string       // round token issued to daemons for the in-flight round (in-memory)
+	pendingRound             bool         // one queued next round (timer/KPI/manual merged, in-memory)
+	pendingReason            string       // merged reason for the queued round
+	queueIfBusyNext          bool         // next trigger asks busy daemons to queue (202) instead of reporting busy
+	lastBusyEtaMs            int64        // max busy_eta_ms from the last round (delays next trigger)
 	NextKPIDetect            time.Time    `json:"next_kpi_detect,omitempty"` // next scheduled KPI detection (persisted)
 	kpiDetecting             bool         // a KPI detection round is currently in flight (in-memory, single-flight)
 	kpiAnomalyStreak         int          // consecutive KPI detection runs with any anomaly (in-memory)
@@ -123,6 +128,7 @@ type roundMeta struct {
 	MissingDaemons   []string
 	Partial          bool
 	ReportLatencyMs  int64
+	BusyEtaMs        int64
 }
 
 // NormalizedKPIReferenceAdmitRatio fills invalid values with the default.

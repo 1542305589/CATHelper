@@ -42,6 +42,11 @@ type Daemon struct {
 	nextRun            time.Time         // when the next cycle starts (zero when paused)
 	cycleID            int               // per-process id, starting from 1
 	cycleInFlight      bool
+	cycleStartedAt     time.Time // start of the in-flight cycle (busy_eta_ms)
+	pending            bool      // one queued next-cycle trigger
+	pendingIterations  int
+	pendingToken       string
+	pendingDeadline    time.Time
 	timer              *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
 	dynolog            *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
 	dynologPort        int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
@@ -188,6 +193,7 @@ func (d *Daemon) startCycle(iterations int, roundToken string) {
 		return
 	}
 	d.cycleInFlight = true
+	d.cycleStartedAt = time.Now()
 	d.cycleID++
 	id := d.cycleID
 	d.nextRun = time.Now().Add(d.interval)
@@ -195,8 +201,47 @@ func (d *Daemon) startCycle(iterations int, roundToken string) {
 		d.runCycle(id, iterations, roundToken)
 		d.mu.Lock()
 		d.cycleInFlight = false
+		d.startPendingLocked()
 		d.mu.Unlock()
 	}()
+}
+
+// startPendingLocked launches the single queued trigger after the current cycle
+// finishes. Caller holds d.mu.
+func (d *Daemon) startPendingLocked() {
+	if !d.pending {
+		return
+	}
+	if !d.pendingDeadline.IsZero() && time.Now().After(d.pendingDeadline) {
+		d.logf("drop expired pending cycle (token=%q deadline=%s)", d.pendingToken, d.pendingDeadline.Format(time.RFC3339))
+		d.pending = false
+		return
+	}
+	iterations, token := d.pendingIterations, d.pendingToken
+	d.pending = false
+	d.logf("start queued pending cycle: iterations=%d token=%q", iterations, token)
+	d.startCycle(iterations, token)
+}
+
+// queuePending records at most one queued next-cycle trigger; a newer trigger
+// overwrites the older one. The deadline bounds how late it may start.
+func (d *Daemon) queuePending(iterations int, roundToken string, reportTimeoutSec int) {
+	if reportTimeoutSec <= 0 {
+		reportTimeoutSec = 480
+	}
+	if reportTimeoutSec < 120 {
+		reportTimeoutSec = 120
+	}
+	if reportTimeoutSec > 1800 {
+		reportTimeoutSec = 1800
+	}
+	d.mu.Lock()
+	d.pending = true
+	d.pendingIterations = iterations
+	d.pendingToken = roundToken
+	d.pendingDeadline = time.Now().Add(time.Duration(reportTimeoutSec) * time.Second)
+	d.mu.Unlock()
+	d.logf("cycle pending queued: iterations=%d token=%q timeout=%ds", iterations, roundToken, reportTimeoutSec)
 }
 
 // runCycle executes one collect→convert→parse→analyse pass and records the
@@ -540,6 +585,7 @@ func (d *Daemon) Pause() {
 	if d.state == "running" {
 		d.state = "paused"
 		d.nextRun = time.Time{}
+		d.pending = false
 		d.stopTimer()
 	}
 }
@@ -738,6 +784,7 @@ func (d *Daemon) Unmatch() {
 	d.business = ""
 	d.daemonID = ""
 	d.state = "running"
+	d.pending = false
 	// Align the self-trigger cadence with the center's business interval and
 	// schedule the first self-trigger one FULL interval out: losing the center
 	// must not replay the rounds it missed (no catch-up burst).
@@ -832,7 +879,7 @@ func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage, fallbackRoo
 		}
 	}
 	start := time.Now()
-	if err := d.postReport(cr.RoundToken, status, reason, stage, ranks); err != nil {
+	if err := d.postReport(cr.RoundToken, status, reason, stage, ranks, nil); err != nil {
 		cr.ReportStatus = "undelivered"
 		d.logf("cycle %d report (%s/%s): %v", cr.ID, status, stage, err)
 		return
@@ -846,7 +893,7 @@ func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage, fallbackRoo
 
 // postReport posts one report (5s timeout, one retry). It is a no-op when the
 // daemon is not managed or has no round token (self-run).
-func (d *Daemon) postReport(roundToken, status, reason, stage string, ranks any) error {
+func (d *Daemon) postReport(roundToken, status, reason, stage string, ranks any, extra map[string]any) error {
 	d.mu.Lock()
 	if d.state != "managed" || d.centerAddr == "" || roundToken == "" {
 		d.mu.Unlock()
@@ -868,6 +915,9 @@ func (d *Daemon) postReport(roundToken, status, reason, stage string, ranks any)
 	}
 	if stage != "" {
 		payload["stage"] = stage
+	}
+	for k, v := range extra {
+		payload[k] = v
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -966,6 +1016,27 @@ func (d *Daemon) minIntervalSecLocked() int64 {
 		}
 	}
 	return min
+}
+
+// daemonPostProcessEtaMs is the fallback post-processing allowance used when
+// estimating how much of the in-flight cycle remains.
+const daemonPostProcessEtaMs = 70_000
+
+// busyEtaMsLocked estimates how long the in-flight cycle still needs, including
+// a fixed post-processing allowance. Caller holds d.mu.
+func (d *Daemon) busyEtaMsLocked() int64 {
+	if !d.cycleInFlight || d.cycleStartedAt.IsZero() {
+		return 0
+	}
+	eta := d.reportEtaP90Locked()
+	if eta <= 0 {
+		return 0
+	}
+	remaining := eta + daemonPostProcessEtaMs - time.Since(d.cycleStartedAt).Milliseconds()
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // failCycle records the local failure and reports it to the center immediately,

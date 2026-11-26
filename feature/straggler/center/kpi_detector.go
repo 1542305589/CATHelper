@@ -574,11 +574,10 @@ func (c *Center) recordKPIAnomaly(business string, hadAnomaly bool, loadState st
 		c.mu.Unlock()
 		return
 	}
-	if b.Paused || b.triggering || time.Now().Before(b.kpiProfilerCooldownUntil) {
+	if b.Paused || time.Now().Before(b.kpiProfilerCooldownUntil) {
 		c.mu.Unlock()
 		return
 	}
-	b.kpiProfilerCooldownUntil = time.Now().Add(10 * time.Minute)
 	b.kpiAnomalyStreak = 0
 	c.mu.Unlock()
 	c.logf("business %s: 3 consecutive KPI anomaly runs; triggering profiler (cooldown 10m)", business)

@@ -402,6 +402,7 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 			Status     string            `json:"status"`
 			Reason     string            `json:"reason"`
 			Stage      string            `json:"stage"`
+			BusyEtaMs  int64             `json:"busy_eta_ms"`
 			Ranks      detector.OpMetric `json:"ranks"`
 		}
 		var op detector.OpMetric
@@ -443,6 +444,11 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 		d.lastReportStatus = status
 		d.lastReportReason = reason
 		d.lastReportStage = stage
+		d.lastBusyEtaMs = 0
+		if status == "busy" {
+			d.lastBusyEtaMs = env.BusyEtaMs
+			c.logf("op_metric busy: business=%q daemon=%q busy_eta_ms=%d", business, daemon, env.BusyEtaMs)
+		}
 		if status == "ok" {
 			d.lastOpMetric = op
 		} else {
@@ -560,8 +566,17 @@ func (c *Center) handleBusinessTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.triggering {
+		b.pendingRound = true
+		b.pendingReason = mergeTriggerReason(b.pendingReason, "manual")
+		b.queueIfBusyNext = true
+		if b.NextTrigger.IsZero() || b.NextTrigger.After(time.Now()) {
+			b.NextTrigger = time.Now()
+		}
+		c.logf("business %s: round in flight; queued manual round", b.Name)
+		c.save()
 		c.mu.Unlock()
-		http.Error(w, "业务正在等待守护进程回传 op_metric，请稍后再触发", http.StatusConflict)
+		w.WriteHeader(http.StatusAccepted)
+		writeJSON(w, map[string]string{"status": "queued"})
 		return
 	}
 	ready := c.businessReadyLocked(b)
@@ -584,6 +599,9 @@ func (c *Center) handleBusinessPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.Paused = true
+	b.pendingRound = false
+	b.pendingReason = ""
+	b.queueIfBusyNext = false
 	c.save()
 	writeJSON(w, map[string]string{"status": "paused"})
 }
@@ -598,6 +616,9 @@ func (c *Center) handleBusinessStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.Paused = false
+	b.pendingRound = false
+	b.pendingReason = ""
+	b.queueIfBusyNext = false
 	b.NextTrigger = time.Now().Add(c.businessInterval(b))
 	c.save()
 	writeJSON(w, map[string]string{"status": "started"})

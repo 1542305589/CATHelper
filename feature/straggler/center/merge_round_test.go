@@ -32,7 +32,7 @@ func TestMergeOpMetricSkipsUnreportedDaemons(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{unreported, reported}}
 
-	merged, okCount, failed, missing, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "")
+	merged, okCount, failed, missing, reportedDaemons, _, _ := c.mergeOpMetric(b.Daemons, triggerAt, "")
 	if reportedDaemons != 1 {
 		t.Fatalf("reported daemons = %d, want 1", reportedDaemons)
 	}
@@ -69,7 +69,7 @@ func TestMergeOpMetricNoReportReturnsEmpty(t *testing.T) {
 			lastOpMetric: nil, lastReportAt: time.Time{}},
 	}}
 
-	merged, okCount, failed, missing, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "")
+	merged, okCount, failed, missing, reportedDaemons, _, _ := c.mergeOpMetric(b.Daemons, triggerAt, "")
 	if reportedDaemons != 0 {
 		t.Fatalf("reported daemons = %d, want 0", reportedDaemons)
 	}
@@ -95,7 +95,7 @@ func TestMergeOpMetricRejectsStaleRoundToken(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{stale}}
 
-	merged, okCount, failed, missing, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "new-round")
+	merged, okCount, failed, missing, reportedDaemons, _, _ := c.mergeOpMetric(b.Daemons, triggerAt, "new-round")
 	if reportedDaemons != 0 || okCount != 0 || len(failed) != 0 || len(missing) != 1 {
 		t.Fatalf("stale token: reported=%d ok=%d failed=%v missing=%v, want 0/0/0/1", reportedDaemons, okCount, failed, missing)
 	}
@@ -115,7 +115,7 @@ func TestMergeOpMetricAcceptsLegacyNoToken(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{legacy}}
 
-	merged, okCount, failed, missing, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "new-round")
+	merged, okCount, failed, missing, reportedDaemons, _, _ := c.mergeOpMetric(b.Daemons, triggerAt, "new-round")
 	if reportedDaemons != 1 || okCount != 1 || len(merged) != 1 || len(failed) != 0 || len(missing) != 0 {
 		t.Fatalf("legacy report dropped: reported=%d ok=%d merged=%d failed=%v missing=%v", reportedDaemons, okCount, len(merged), failed, missing)
 	}
@@ -135,7 +135,7 @@ func TestMergeOpMetricSkipsFailedReport(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{failedDaemon}}
 
-	merged, okCount, failed, missing, reported, _ := c.mergeOpMetric(b.Daemons, triggerAt, "round-1")
+	merged, okCount, failed, missing, reported, _, _ := c.mergeOpMetric(b.Daemons, triggerAt, "round-1")
 	if reported != 1 {
 		t.Fatalf("reported = %d, want 1 (failed still counts as reported)", reported)
 	}

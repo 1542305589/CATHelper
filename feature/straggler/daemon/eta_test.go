@@ -65,6 +65,45 @@ func TestUnmatchClampsInterval(t *testing.T) {
 	}
 }
 
+func TestQueuePendingOverwritesAndExpires(t *testing.T) {
+	d := New(Config{}, nil)
+	d.queuePending(3, "old", 120)
+	d.queuePending(5, "new", 120)
+	if !d.pending || d.pendingIterations != 5 || d.pendingToken != "new" {
+		t.Fatalf("pending = %v/%d/%q, want true/5/new", d.pending, d.pendingIterations, d.pendingToken)
+	}
+	d.mu.Lock()
+	d.pendingDeadline = time.Now().Add(-time.Second)
+	d.startPendingLocked()
+	d.mu.Unlock()
+	if d.pending {
+		t.Fatal("expired pending must be dropped")
+	}
+	if d.cycleInFlight {
+		t.Fatal("expired pending must not start a cycle")
+	}
+}
+
+func TestPauseClearsPending(t *testing.T) {
+	d := New(Config{}, nil)
+	d.queuePending(3, "tok", 120)
+	d.Pause()
+	if d.pending {
+		t.Fatal("Pause must clear the pending trigger")
+	}
+}
+
+func TestUnmatchClearsPending(t *testing.T) {
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.centerAddr = "http://center:8080"
+	d.queuePending(3, "tok", 120)
+	d.Unmatch()
+	if d.pending {
+		t.Fatal("Unmatch must clear the pending trigger")
+	}
+}
+
 func TestStatusExposesReportEtaAndMinInterval(t *testing.T) {
 	d := New(Config{Iterations: 3}, nil)
 	d.reportEtas = []int64{156_000}

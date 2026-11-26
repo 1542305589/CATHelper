@@ -472,8 +472,10 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 	// Required body: {"iterations": N, "round_token": "..."}. The iteration
 	// count is per-cycle: it does not change the daemon's saved self-run value.
 	var req struct {
-		Iterations int    `json:"iterations"`
-		RoundToken string `json:"round_token"`
+		Iterations       int    `json:"iterations"`
+		RoundToken       string `json:"round_token"`
+		QueueIfBusy      bool   `json:"queue_if_busy"`
+		ReportTimeoutSec int    `json:"report_timeout_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `invalid body: {"iterations": 3, "round_token": "..."}`, http.StatusBadRequest)
@@ -502,16 +504,28 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 	if paused {
 		if req.RoundToken != "" {
-			d.postReport(req.RoundToken, "paused", "paused", "", nil)
+			d.postReport(req.RoundToken, "paused", "paused", "", nil, nil)
 		}
 		http.Error(w, "daemon is paused", http.StatusConflict)
 		return
 	}
 	if err := d.TriggerWithOptions(req.Iterations, req.RoundToken); err != nil {
 		if errors.Is(err, errCycleInFlight) {
-			// The center already accepts busy; report it immediately so the
-			// round does not wait for the 480s deadline on a busy daemon.
-			d.postReport(req.RoundToken, "busy", "cycle_in_flight", "", nil)
+			if req.QueueIfBusy {
+				// The next round queues instead of reporting busy; the center
+				// waits for this pending report with the enlarged timeout.
+				d.queuePending(req.Iterations, req.RoundToken, req.ReportTimeoutSec)
+				w.WriteHeader(http.StatusAccepted)
+				writeJSON(w, map[string]string{"status": "queued"})
+				return
+			}
+			d.mu.Lock()
+			busyEtaMs := d.busyEtaMsLocked()
+			d.mu.Unlock()
+			// Current round: report busy + remaining time so the center does
+			// not wait for a pending report that cannot make this round.
+			d.postReport(req.RoundToken, "busy", "cycle_in_flight", "", nil,
+				map[string]any{"busy_eta_ms": busyEtaMs})
 		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return

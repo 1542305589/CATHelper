@@ -216,7 +216,7 @@ func TestTriggerDaemonCarriesIterations(t *testing.T) {
 	host, port := f.addr(t)
 	c := newIterTestCenter(t)
 	d := &Daemon{IP: host, Port: port, Key: "secret"}
-	c.triggerDaemon(d, "round-1", 5)
+	c.triggerDaemon(d, "round-1", 5, false, 216)
 
 	body, key := f.triggerSnapshot()
 	if body == nil {
@@ -227,6 +227,12 @@ func TestTriggerDaemonCarriesIterations(t *testing.T) {
 	}
 	if got, _ := body["round_token"].(string); got != "round-1" {
 		t.Fatalf("trigger round_token = %q, want round-1", body["round_token"])
+	}
+	if got, _ := body["queue_if_busy"].(bool); got {
+		t.Fatalf("trigger queue_if_busy = true, want false")
+	}
+	if got, _ := body["report_timeout_sec"].(float64); int(got) != 216 {
+		t.Fatalf("trigger report_timeout_sec = %v, want 216", body["report_timeout_sec"])
 	}
 	if key != "secret" {
 		t.Fatalf("trigger key = %q, want secret", key)

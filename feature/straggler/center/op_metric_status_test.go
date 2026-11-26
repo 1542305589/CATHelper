@@ -52,9 +52,12 @@ func TestHandleOpMetricStatuses(t *testing.T) {
 
 	// Busy/paused reports also clear cached data and count as reported.
 	d.lastOpMetric = detector.OpMetric{"0": &detector.OpMetricRank{}}
-	code, body = post(`{"round_token":"round-1","status":"busy","reason":"cycle_in_flight","ranks":null}`)
+	code, body = post(`{"round_token":"round-1","status":"busy","reason":"cycle_in_flight","busy_eta_ms":216000,"ranks":null}`)
 	if code != http.StatusOK || d.lastReportStatus != "busy" || d.lastOpMetric != nil {
 		t.Fatalf("busy report: code=%d status=%q op=%v body=%s", code, d.lastReportStatus, d.lastOpMetric, body)
+	}
+	if d.lastBusyEtaMs != 216000 {
+		t.Fatalf("busy_eta_ms = %d, want 216000", d.lastBusyEtaMs)
 	}
 	d.lastOpMetric = detector.OpMetric{"0": &detector.OpMetricRank{}}
 	code, body = post(`{"round_token":"round-1","status":"paused","reason":"paused","ranks":null}`)

@@ -118,6 +118,8 @@ func TestTriggerBusyReportsBusy(t *testing.T) {
 	d.business = "biz"
 	d.daemonID = "n1"
 	d.cycleInFlight = true
+	d.cycleStartedAt = time.Now().Add(-10 * time.Second)
+	d.reportEtas = []int64{156_000}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/daemon/trigger",
@@ -136,6 +138,45 @@ func TestTriggerBusyReportsBusy(t *testing.T) {
 	}
 	if ranks, ok := payload["ranks"]; !ok || ranks != nil {
 		t.Fatalf("busy ranks = %v, want null", payload["ranks"])
+	}
+	if eta, _ := payload["busy_eta_ms"].(float64); eta <= 0 {
+		t.Fatalf("busy_eta_ms = %v, want > 0", payload["busy_eta_ms"])
+	}
+}
+
+func TestTriggerBusyQueuesWhenRequested(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.centerAddr = srv.URL
+	d.matchKey = "secret"
+	d.business = "biz"
+	d.daemonID = "n1"
+	d.cycleInFlight = true
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/daemon/trigger",
+		strings.NewReader(`{"iterations":3,"round_token":"round-1","queue_if_busy":true,"report_timeout_sec":216}`))
+	req.Header.Set("X-Match-Key", "secret")
+	d.handleDaemonTrigger(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("queued trigger status = %d, want 202 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if requests != 0 {
+		t.Fatalf("queued trigger sent %d busy reports, want 0", requests)
+	}
+	if !d.pending || d.pendingIterations != 3 || d.pendingToken != "round-1" {
+		t.Fatalf("pending = %v/%d/%q, want true/3/round-1", d.pending, d.pendingIterations, d.pendingToken)
+	}
+	if time.Until(d.pendingDeadline) <= 0 {
+		t.Fatalf("pending deadline is not in the future: %s", d.pendingDeadline)
 	}
 }
 
