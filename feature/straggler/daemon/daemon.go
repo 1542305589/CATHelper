@@ -144,8 +144,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	if d.cfg.DumpProfilerData {
-		d.logf("dump profiler data enabled: keep newest %d copies under daemon_results/*/profiler_data", profilerDataKeep)
-		d.cleanProfilerDataCopies()
+		d.logf("dump profiler data enabled: copy each cycle to daemon_results/<start>/profiler_data (no retention, no disk check)")
 		warnStaleProfilerDirs(d.cfg.ProfilerDir, d.logf)
 	}
 
@@ -579,6 +578,29 @@ func (d *Daemon) finishCycle(cr *CycleResult) {
 	}
 }
 
+// removeResultsOnStop deletes daemon_results on Stop unless a dump is enabled
+// (debug evidence must survive) or a cycle is still in flight.
+func (d *Daemon) removeResultsOnStop(stillInFlight bool) {
+	if !d.removeResults {
+		return
+	}
+	if d.cfg.DumpProfilerData {
+		d.logf("preserving daemon_results because --dump-profiler-data is enabled; remove manually when done")
+		return
+	}
+	if stillInFlight {
+		// A slow cycle can outlive the shutdown wait. Do not delete the result
+		// tree underneath it.
+		d.logf("not removing daemon_results: a cycle is still in flight")
+		return
+	}
+	if err := os.RemoveAll("daemon_results"); err != nil {
+		d.logf("remove daemon_results: %v", err)
+		return
+	}
+	d.logf("removed all daemon_results (dump_dir) files")
+}
+
 // shutdown stops the HTTP server and waits for an in-flight cycle (max 10 min).
 // The dynolog child is left running so collection can continue after exit.
 func (d *Daemon) shutdown(srv *http.Server) error {
@@ -605,17 +627,7 @@ func (d *Daemon) shutdown(srv *http.Server) error {
 
 	// The dynolog child is intentionally NOT killed here — it keeps running so
 	// the user can still collect profiler data after the daemon exits.
-	if d.removeResults {
-		if stillInFlight {
-			// A slow profiler_data copy can outlive the shutdown wait. Do not
-			// delete the result tree underneath it.
-			d.logf("not removing daemon_results: a cycle is still in flight")
-		} else if err := os.RemoveAll("daemon_results"); err != nil {
-			d.logf("remove daemon_results: %v", err)
-		} else {
-			d.logf("removed all daemon_results (dump_dir) files")
-		}
-	}
+	d.removeResultsOnStop(stillInFlight)
 	d.logf("daemon stopped")
 	return nil
 }

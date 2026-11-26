@@ -77,13 +77,6 @@ func readDumpMeta(t *testing.T, archive string) CycleResult {
 	return meta
 }
 
-func setFreeDisk(t *testing.T, free uint64, known bool) {
-	t.Helper()
-	old := freeDiskBytesFn
-	freeDiskBytesFn = func(string) (uint64, bool) { return free, known }
-	t.Cleanup(func() { freeDiskBytesFn = old })
-}
-
 func TestStoreProfilerDataUpdateUsesCopies(t *testing.T) {
 	s := newStore()
 	cr := &CycleResult{ID: 1, ProfilerDataStatus: "pending"}
@@ -107,6 +100,54 @@ func TestStoreProfilerDataUpdateUsesCopies(t *testing.T) {
 	}
 }
 
+func TestStopPreservesDaemonResultsWhenDumpEnabled(t *testing.T) {
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+
+	prof := filepath.Join("daemon_results", "20261126-100000", "profiler_data", "master_0", "a.db")
+	writeTestFile(t, prof, "abc")
+	writeTestFile(t, filepath.Join("daemon_results", "20261126-100000", "straggler_output.json"), "{}")
+
+	d := New(Config{DumpProfilerData: true}, nil)
+	d.logf = noopLogf
+	d.removeResults = true
+	d.removeResultsOnStop(false)
+
+	if _, err := os.Stat(prof); err != nil {
+		t.Fatalf("Stop removed profiler_data: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join("daemon_results", "20261126-100000", "straggler_output.json")); err != nil {
+		t.Fatalf("Stop removed result metadata while dump is enabled: %v", err)
+	}
+}
+
+func TestStopRemovesDaemonResultsWhenDumpDisabled(t *testing.T) {
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+
+	writeTestFile(t, filepath.Join("daemon_results", "20261126-100000", "straggler_output.json"), "{}")
+	d := New(Config{}, nil)
+	d.logf = noopLogf
+	d.removeResults = true
+	d.removeResultsOnStop(false)
+
+	if _, err := os.Stat("daemon_results"); !os.IsNotExist(err) {
+		t.Fatalf("Stop did not remove daemon_results when dump is disabled: %v", err)
+	}
+}
+
 func TestCopyProfilerDataRejectsDestinationInsideSource(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
@@ -120,7 +161,6 @@ func TestDumpProfilerDataMetaIsPendingDuringCopy(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
 	archive := t.TempDir()
-	setFreeDisk(t, 100<<30, true)
 
 	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
 	d.logf = noopLogf
@@ -162,7 +202,6 @@ func TestDumpProfilerDataCopiesAndMeta(t *testing.T) {
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
 	writeTestFile(t, filepath.Join(src, "op_metric", "ignore"), "ignored")
 	archive := t.TempDir()
-	setFreeDisk(t, 100<<30, true)
 
 	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
 	d.logf = noopLogf
@@ -210,7 +249,6 @@ func TestDumpProfilerDataOnlyExcludedDirsSkipped(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "op_metric", "ignore"), "ignored")
 	archive := t.TempDir()
-	setFreeDisk(t, 100<<30, true)
 
 	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
 	d.logf = noopLogf
@@ -232,7 +270,6 @@ func TestDumpProfilerDataCopiesFailedCycle(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
 	archive := t.TempDir()
-	setFreeDisk(t, 100<<30, true)
 
 	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
 	d.logf = noopLogf
@@ -246,37 +283,6 @@ func TestDumpProfilerDataCopiesFailedCycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(archive, "profiler_data", "master_0", "a.db")); err != nil {
 		t.Fatalf("failed cycle profiler_data missing: %v", err)
-	}
-}
-
-func TestDumpProfilerDataLowDiskSkipsAndDeletes(t *testing.T) {
-	src := t.TempDir()
-	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
-	archive := t.TempDir()
-	setFreeDisk(t, 49<<30, true)
-
-	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
-	d.logf = noopLogf
-	cr := &CycleResult{ID: 1, StartedAt: time.Now(), DumpDir: archive,
-		DumpProfilerData: true, ProfilerDataStatus: "pending"}
-	d.finishCycle(cr)
-	d.cleanupDump(cr)
-
-	if cr.ProfilerDataStatus != "skipped" || cr.ProfilerDataBytes != 0 {
-		t.Fatalf("status/bytes = %q/%d, want skipped/0", cr.ProfilerDataStatus, cr.ProfilerDataBytes)
-	}
-	if !strings.Contains(cr.ProfilerDataError, "skipped_low_disk") {
-		t.Fatalf("error = %q, want skipped_low_disk", cr.ProfilerDataError)
-	}
-	if _, err := os.Stat(src); !os.IsNotExist(err) {
-		t.Fatalf("low-disk skip must delete the raw dump: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(archive, "profiler_data")); !os.IsNotExist(err) {
-		t.Fatalf("low-disk skip created profiler_data")
-	}
-	meta := readDumpMeta(t, archive)
-	if meta.ProfilerDataStatus != "skipped" {
-		t.Fatalf("meta status = %q, want skipped", meta.ProfilerDataStatus)
 	}
 }
 
@@ -362,54 +368,6 @@ func TestStaleRenameFailureFailsCycle(t *testing.T) {
 	}
 }
 
-func TestCleanProfilerDataCopiesKeepsFive(t *testing.T) {
-	base := t.TempDir()
-	var names []string
-	for i := 0; i < 7; i++ {
-		name := fmt.Sprintf("20261126-10000%d", i)
-		names = append(names, name)
-		writeTestFile(t, filepath.Join(base, name, "profiler_data", "master_0", "a.db"), "x")
-	}
-	cleanProfilerDataCopies(base, 5, "", noopLogf)
-	for i, name := range names {
-		_, err := os.Stat(filepath.Join(base, name, "profiler_data"))
-		if i < 2 {
-			if !os.IsNotExist(err) {
-				t.Fatalf("old copy %s still exists", name)
-			}
-		} else if err != nil {
-			t.Fatalf("new copy %s missing: %v", name, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(base, names[0])); err != nil {
-		t.Fatalf("parent cycle dir %s was removed: %v", names[0], err)
-	}
-}
-
-func TestCleanProfilerDataCopiesProtectsCurrentCopy(t *testing.T) {
-	base := t.TempDir()
-	old := filepath.Join(base, "20260101-000000", "profiler_data")
-	writeTestFile(t, filepath.Join(old, "master_0", "a.db"), "x")
-	for i := 0; i < 6; i++ {
-		writeTestFile(t, filepath.Join(base, fmt.Sprintf("20260102-00000%d", i), "profiler_data", "master_0", "a.db"), "x")
-	}
-	cleanProfilerDataCopies(base, 5, old, noopLogf)
-
-	if _, err := os.Stat(old); err != nil {
-		t.Fatalf("protected current copy was removed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(base, "20260102-000000", "profiler_data")); !os.IsNotExist(err) {
-		t.Fatal("oldest new copy was not pruned")
-	}
-	if _, err := os.Stat(filepath.Join(base, "20260102-000001", "profiler_data")); !os.IsNotExist(err) {
-		t.Fatal("retention did not make room for the protected copy")
-	}
-	matches, _ := filepath.Glob(filepath.Join(base, "*", "profiler_data"))
-	if len(matches) != 5 {
-		t.Fatalf("retained copies = %d, want 5", len(matches))
-	}
-}
-
 func TestWarnStaleProfilerDirsKeepsThem(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "profiler")
 	stale := root + ".stale-20261126-100000"
@@ -422,8 +380,8 @@ func TestWarnStaleProfilerDirsKeepsThem(t *testing.T) {
 		t.Fatalf("stale dir was removed: %v", err)
 	}
 	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "stale profiler data present") || !strings.Contains(joined, "3 B") {
-		t.Fatalf("warn logs = %q, want path and size", joined)
+	if !strings.Contains(joined, "stale profiler data present") || !strings.Contains(joined, stale) {
+		t.Fatalf("warn logs = %q, want stale path", joined)
 	}
 }
 
@@ -431,7 +389,6 @@ func TestDumpProfilerDataCopyFailureKeepsDump(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
 	archive := t.TempDir()
-	setFreeDisk(t, 100<<30, true)
 	oldCopy := copyProfilerDataFn
 	copyProfilerDataFn = func(string, string, func(string, ...any)) (int64, int64, error) {
 		return 0, 3, errors.New("copy boom")

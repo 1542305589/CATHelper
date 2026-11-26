@@ -109,7 +109,7 @@ cd feature/straggler
 | `--interval` | 否 | 600 | 检测周期（秒，≥60） |
 | `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
 | `--profiler-iterations` | 否 | 3 | dyno nputrace 每轮采集迭代数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
-| `--dump-profiler-data` | 否 | 假 | 把原始 profiler 数据复制到 `daemon_results/<start>/profiler_data/`；保留最近 5 份，目标盘 <50GiB 时跳过；仅 daemon 模式、启动时生效 |
+| `--dump-profiler-data` | 否 | 假 | debug 功能：把每轮原始 profiler 数据复制到 `daemon_results/<start>/profiler_data/`；不设保留份数、不做磁盘检查、不自动删除；仅 daemon 模式、启动时生效 |
 | `--daemon-port` | 否 | 8080 | HTTP 端口 |
 | `--cal-threshold` | 否 | 1.3 | 慢计算阈值 |
 | `--cpu-threshold` | 否 | 2.5 | 慢CPU 阈值 |
@@ -121,6 +121,7 @@ cd feature/straggler
 - 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
 - 匹配到中心节点后，高频检测 `--kpi-dir` 最新文件的追加内容，只把带 `vals` 的 NPU 样本事件驱动上报到 `POST /center/kpi/{business}/{daemon}`（不再暴露 Prometheus `/kpi/metrics`）。未匹配时只推进 offset 并丢弃新增行，不缓存；匹配后从当前时刻开始上报，不会补发历史。
 - 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。开启 `--dump-profiler-data` 时，会在删除前把原始数据复制到结果目录；复制失败会保留原目录，下一轮采集前改名为 `<profiler-dir>.stale-<时间戳>` 供人工分析，`.stale-*` 不会自动删除。`--profiler-dir` 不应是挂载点。
+- `--dump-profiler-data` 是 debug 开关：不设保留份数、不做磁盘检查、不自动清理，可能很快占满磁盘；需要人工清理。开启时 `POST /daemon/stop` 不会删除 `daemon_results`，避免丢掉证据。
 - `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
 
 **HTTP 查询与控制**（完整接口见[四、HTTP 接口（守护进程）](#四http-接口守护进程)）：
