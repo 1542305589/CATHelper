@@ -108,6 +108,7 @@ func (c *Center) scheduleLoop() {
 			if b.Paused {
 				continue
 			}
+			interval := c.businessInterval(b)
 			if b.pendingRound {
 				if b.NextTrigger.IsZero() {
 					b.NextTrigger = time.Now()
@@ -120,12 +121,14 @@ func (c *Center) scheduleLoop() {
 				b.pendingRound = false
 				b.pendingReason = ""
 				b.queueIfBusyNext = true
+				// Guard against the next tick starting a second round before the
+				// goroutine marks triggering; the round end re-anchors this.
+				b.NextTrigger = time.Now().Add(interval)
 				changed = true
 				c.logf("business %s: starting queued round (reason=%s)", b.Name, reason)
 				go c.triggerBusinessMode(b, true, reason)
 				continue
 			}
-			interval := c.businessInterval(b)
 			if b.NextTrigger.IsZero() {
 				b.NextTrigger = time.Now().Add(interval)
 				changed = true
