@@ -20,7 +20,44 @@ const (
 var (
 	freeDiskBytesFn    = freeDiskBytes
 	copyProfilerDataFn = copyProfilerData
+	renameFn           = os.Rename
 )
+
+// prepareProfilerRoot moves a leftover raw dump aside before dyno runs. A
+// rename failure must fail the cycle rather than letting dyno write into a
+// dirty root.
+func (d *Daemon) prepareProfilerRoot() error {
+	if !d.cfg.DumpProfilerData {
+		return nil
+	}
+	root := d.cfg.ProfilerDir
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	base := root + ".stale-" + time.Now().Format("20060102-150405")
+	target := base
+	for i := 1; ; i++ {
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			break
+		} else if err != nil {
+			return err
+		}
+		target = fmt.Sprintf("%s-%d", base, i)
+	}
+	if err := renameFn(root, target); err != nil {
+		return err
+	}
+	d.logf("moved stale profiler data: %s -> %s", root, target)
+	warnStaleProfilerDirs(root, d.logf)
+	return nil
+}
 
 // applyProfilerDataPolicy copies the raw profiler root before cleanup (when
 // enabled), or records why it was skipped/failed. It never deletes the raw

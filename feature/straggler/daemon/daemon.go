@@ -265,6 +265,12 @@ func (d *Daemon) queuePending(iterations int, roundToken string, reportTimeoutSe
 // CycleResult (success or error) into the store.
 func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 	cr := &CycleResult{ID: id, StartedAt: time.Now(), Iterations: iterations, RoundToken: roundToken}
+	cr.DumpProfilerData = d.cfg.DumpProfilerData
+	if d.cfg.DumpProfilerData {
+		cr.ProfilerDataStatus = "pending"
+	} else {
+		cr.ProfilerDataStatus = "disabled"
+	}
 	d.progress.begin(id)
 	d.progress.step("触发采集 (dyno)")
 	// This cycle's analysed results (combined JSON, meta, report) are written
@@ -296,6 +302,16 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 		d.finishCycle(cr)
 		d.cleanupDump(cr)
 	}()
+
+	// A raw dump left by a failed profiler_data copy must be moved aside before
+	// dyno writes into the root. If it cannot be moved, fail without collecting.
+	if err := d.prepareProfilerRoot(); err != nil {
+		cr.keepRawDump = true
+		cr.ProfilerDataStatus = "failed"
+		cr.ProfilerDataError = fmt.Sprintf("stale_dump_present: %v", err)
+		d.failCycle(cr, "collect", "stale_dump_present", err)
+		return
+	}
 
 	// 1. Collect: dyno trigger -> verify commandStatus -> wait for the dump.
 	if err := d.triggerCollection(cr.Iterations); err != nil {

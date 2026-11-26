@@ -171,6 +171,62 @@ func TestDumpProfilerDataDefaultDisabled(t *testing.T) {
 	}
 }
 
+func TestPrepareProfilerRootRenamesLeftover(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "profiler")
+	writeTestFile(t, filepath.Join(root, "master_0", "a.db"), "abc")
+	d := New(Config{DumpProfilerData: true, ProfilerDir: root}, nil)
+	d.logf = noopLogf
+
+	if err := d.prepareProfilerRoot(); err != nil {
+		t.Fatalf("prepareProfilerRoot: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("raw root still exists: %v", err)
+	}
+	stale, err := filepath.Glob(root + ".stale-*")
+	if err != nil || len(stale) != 1 {
+		t.Fatalf("stale dirs = %v, %v; want 1", stale, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(stale[0], "master_0", "a.db")); err != nil || string(got) != "abc" {
+		t.Fatalf("stale data = %q, %v", got, err)
+	}
+}
+
+func TestStaleRenameFailureFailsCycle(t *testing.T) {
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+
+	root := filepath.Join(t.TempDir(), "profiler")
+	writeTestFile(t, filepath.Join(root, "master_0", "a.db"), "abc")
+	oldRename := renameFn
+	renameFn = func(string, string) error { return errors.New("rename boom") }
+	t.Cleanup(func() { renameFn = oldRename })
+
+	d := New(Config{DumpProfilerData: true, ProfilerDir: root}, nil)
+	d.logf = noopLogf
+	d.runCycle(1, 3, "")
+
+	cr := d.st.latest()
+	if cr == nil {
+		t.Fatal("no cycle stored")
+	}
+	if !strings.Contains(cr.Error, "stale_dump_present") {
+		t.Fatalf("cycle error = %q, want stale_dump_present", cr.Error)
+	}
+	if cr.ProfilerDataStatus != "failed" || !cr.keepRawDump {
+		t.Fatalf("status/keep = %q/%v, want failed/true", cr.ProfilerDataStatus, cr.keepRawDump)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("raw root must remain for manual cleanup: %v", err)
+	}
+}
+
 func TestCleanProfilerDataCopiesKeepsFive(t *testing.T) {
 	base := t.TempDir()
 	var names []string
