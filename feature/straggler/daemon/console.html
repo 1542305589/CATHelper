@@ -81,6 +81,8 @@
       <div class="body">
         <dl class="kv">
           <dt>检测周期</dt><dd id="vInterval">—</dd>
+          <dt>上报 ETA</dt><dd id="vReportEta">—</dd>
+          <dt>最小周期</dt><dd id="vMinInterval">—</dd>
           <dt>采集迭代数</dt><dd id="vIterations">—</dd>
           <dt>阈值</dt><dd id="vThresholds">—</dd>
           <dt>已运行周期</dt><dd id="vTotal">—</dd>
@@ -178,6 +180,7 @@ let selectedId = null;
 let selectedRunning = false;
 let latestThresholds = {};
 let latestDefaults = {};
+let latestMinIntervalSec = 300;
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function fmtNs(us) { return us + 'us'; }
@@ -227,6 +230,10 @@ function renderStatus(s) {
   $('stateBadge').textContent = (s.state || '—').toUpperCase();
   $('stateBadge').className = 'badge ' + (s.state === 'running' ? 'running' : 'paused');
   $('vInterval').textContent = s.interval_sec != null ? s.interval_sec + ' s' : '—';
+  latestMinIntervalSec = s.min_interval_sec || 300;
+  $('vReportEta').textContent = s.report_eta_ms ? (s.report_eta_ms / 1000).toFixed(0) + ' s' : '未知';
+  $('vMinInterval').textContent = latestMinIntervalSec + ' s';
+  $('intervalInput').min = latestMinIntervalSec;
   $('vIterations').textContent = s.iterations != null ? s.iterations : '—';
   const th = s.thresholds || {};
   $('vThresholds').textContent = th.cal != null
@@ -399,7 +406,7 @@ $('btnTrigger').onclick = () => control('trigger');
 $('btnStop').onclick = () => control('stop');
 $('btnInterval').onclick = async () => {
   const v = parseInt($('intervalInput').value, 10);
-  if (!v || v < 60 || v > 86400) { toast('周期需在 [60, 86400] 秒之间', false); return; }
+  if (!v || v < latestMinIntervalSec || v > 86400) { toast(`周期需在 [${latestMinIntervalSec}, 86400] 秒之间`, false); return; }
   try {
     await post('/daemon/interval', { interval_sec: v });
     toast('周期已更新为 ' + v + 's', true);

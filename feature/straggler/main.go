@@ -104,10 +104,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --daemon-port value, using default 8080\n")
 			}
 		case "--interval":
-			if parsed, err := strconv.Atoi(val); err == nil && parsed >= 60 {
+			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
 				intervalSec = parsed
 			} else {
-				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --interval value (>=60), using default 600\n")
+				fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: invalid --interval value, using default 600\n")
 			}
 		case "--collect-wait":
 			if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
@@ -199,6 +199,10 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: --profiler-iterations=%d (<3) allowed by --allow-low-iterations; results may be unreliable\n", profilerIterations)
+		}
+		if intervalSec < 300 {
+			fmt.Fprintf(os.Stderr, "ERROR: --interval=%d below minimum 300s (report_eta + 130s)\n", intervalSec)
+			os.Exit(1)
 		}
 		if profilerDir == "" {
 			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=3] [--allow-low-iterations]\n")

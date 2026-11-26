@@ -107,28 +107,60 @@ func TestProbeRestoresTokenCapability(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	p := daemonProbe{
 		b: b, d: d, key: "secret", healthOK: true,
-		st: &matchStatusResp{Matched: true, RoundTokenSupported: true, CollectWait: 60},
+		st: &matchStatusResp{Matched: true, ReportEtaMs: 156000, RoundTokenSupported: true, CollectWait: 60},
 	}
 	c.applyProbeLocked(p)
 	if !d.tokenCapable {
 		t.Fatalf("probe did not restore tokenCapable")
 	}
+	if d.reportEtaMs != 156000 {
+		t.Fatalf("probe reportEtaMs = %d, want 156000", d.reportEtaMs)
+	}
 }
 
-func TestP0ReportTimeoutConstant(t *testing.T) {
-	if p0ReportTimeout != 480*time.Second {
-		t.Fatalf("p0ReportTimeout = %s, want 480s", p0ReportTimeout)
+func TestReportTimeoutAuto(t *testing.T) {
+	now := time.Now()
+	c := &Center{}
+	b := &Business{}
+
+	d := &Daemon{reportEtaMs: 156000, reportEtaAt: now}
+	if got := c.reportTimeoutLocked(b, []*Daemon{d}); got != 216 {
+		t.Fatalf("eta 156s timeout = %d, want 216", got)
+	}
+
+	// Stale ETA falls back to the business's persisted value.
+	d.reportEtaAt = now.Add(-2 * time.Hour)
+	b.LastReportTimeoutSec = 300
+	if got := c.reportTimeoutLocked(b, []*Daemon{d}); got != 300 {
+		t.Fatalf("stale eta timeout = %d, want 300", got)
+	}
+
+	// No ETA and no persisted value -> 360 default.
+	b.LastReportTimeoutSec = 0
+	if got := c.reportTimeoutLocked(b, []*Daemon{d}); got != 360 {
+		t.Fatalf("default timeout = %d, want 360", got)
+	}
+
+	// Clamp lower/upper bounds.
+	d.reportEtaAt = now
+	d.reportEtaMs = 1000
+	if got := c.reportTimeoutLocked(b, []*Daemon{d}); got != 120 {
+		t.Fatalf("low clamp = %d, want 120", got)
+	}
+	d.reportEtaMs = 5_000_000
+	if got := c.reportTimeoutLocked(b, []*Daemon{d}); got != 1800 {
+		t.Fatalf("high clamp = %d, want 1800", got)
 	}
 }
 
 func TestAllDaemonsFailed(t *testing.T) {
-	if !allDaemonsFailed(0, 3, 3) {
+	if !allDaemonsFailed(0, 3, 0) {
 		t.Fatal("all non-ok reports must count as all-failed")
 	}
-	if allDaemonsFailed(1, 3, 3) {
+	if allDaemonsFailed(1, 3, 0) {
 		t.Fatal("one ok report must not count as all-failed")
 	}
-	if allDaemonsFailed(0, 2, 3) {
+	if allDaemonsFailed(0, 3, 1) {
 		t.Fatal("a missing daemon must not count as all-reported failure")
 	}
 	if allDaemonsFailed(0, 0, 0) {

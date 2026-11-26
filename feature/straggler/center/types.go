@@ -32,6 +32,8 @@ type Daemon struct {
 	lastRoundToken     string            // round token that came with lastOpMetric ("" = legacy daemon)
 	tokenCapable       bool              // daemon echoes the round token (declared at match time)
 	reportedIterations int               // daemon-reported self-run iterations (0 = unknown / old build)
+	reportEtaMs        int64             // last successful report ETA (ms) from the daemon
+	reportEtaAt        time.Time         // when reportEtaMs was last refreshed
 	lastReportStatus   string            // ok / failed / busy / paused ("" = legacy bare map)
 	lastReportReason   string
 	lastReportStage    string
@@ -57,6 +59,7 @@ type Business struct {
 	Thresholds             config.Thresholds `json:"thresholds"`                          // merged-detection thresholds (zero = inherit center default)
 	KPIDetectIntervalSec   int64             `json:"kpi_interval_sec,omitempty"`          // KPI detection period (independent of profiler)
 	Iterations             int               `json:"iterations,omitempty"`                // center trigger iterations, sent with every /daemon/trigger
+	LastReportTimeoutSec   int               `json:"last_report_timeout_sec,omitempty"`   // last auto report timeout (restart fallback)
 	KPINSigma              KPINSigma         `json:"kpi_nsigma,omitempty"`                // per-metric KPI n-sigma thresholds
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio,omitempty"` // anomaly points admitted into reference (0..1)
 
@@ -99,16 +102,25 @@ const (
 	maxBusinessIterations = 100
 )
 
-// p0ReportTimeout is the fixed P0 wait for all daemon reports. It covers the
-// .87 (156s) and .88 stage-A latency. P1 replaces this with the daemon-measured
-// report ETA + 60s (120..1800, default 300).
-const p0ReportTimeout = 480 * time.Second
+// defaultReportTimeoutSec is the fallback collection window when no daemon has
+// a fresh report ETA (360s covers .85/.88 stage A; .87 reports ~156s).
+// P1 auto timeout = max(eta)+60, clamped to [120, 1800]; the persisted
+// Business.LastReportTimeoutSec is used across a center restart until a probe
+// refreshes the ETA.
+const (
+	defaultReportTimeoutSec = 360
+	minReportTimeoutSec     = 120
+	maxReportTimeoutSec     = 1800
+	reportEtaBufferSec      = 60
+	businessPostProcessSec  = 120
+)
 
 // roundMeta is the per-round collection summary written to cycle.json/history.
 type roundMeta struct {
 	ReportTimeoutSec int
 	ReportedDaemons  int
 	FailedDaemons    []string
+	MissingDaemons   []string
 	Partial          bool
 	ReportLatencyMs  int64
 }

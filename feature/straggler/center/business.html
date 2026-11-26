@@ -119,6 +119,10 @@
           <dt>失败周期</dt><dd id="vFailed">—</dd>
           <dt>下次运行</dt><dd id="vNext">—</dd>
           <dt>等待完成采集时间</dt><dd id="vCollectWait">—</dd>
+          <dt>实测上报 ETA</dt><dd id="vReportEta">—</dd>
+          <dt>自动上报超时</dt><dd id="vReportTimeout">—</dd>
+          <dt>最小业务周期</dt><dd id="vMinInterval">—</dd>
+          <dt>周期校验</dt><dd id="vIntervalWarning">—</dd>
         </dl>
       </div>
     </div>
@@ -219,7 +223,7 @@
       <h2>节点列表</h2>
       <div class="body">
         <table>
-          <thead><tr><th>节点</th><th>状态</th><th>等待完成采集时间</th><th>自运行迭代数</th></tr></thead>
+          <thead><tr><th>节点</th><th>状态</th><th>等待完成采集时间</th><th>自运行迭代数</th><th>上报 ETA</th></tr></thead>
           <tbody id="daemonBody"></tbody>
         </table>
       </div>
@@ -307,6 +311,7 @@ let latestThresholds = {};
 let latestDefaults = {};
 let latestProfilerCycles = [];
 let latestKPIIntervalSec = 60;
+let latestMinIntervalSec = 300;
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function stateLabel(s) {
@@ -394,6 +399,14 @@ function renderStatus(b) {
   $('vFailed').textContent = b.cycles_failed != null ? b.cycles_failed : '—';
   $('vNext').textContent = timeFmt(b.next_trigger);
   $('vCollectWait').textContent = b.collect_wait ? b.collect_wait + ' s' : '—';
+  const etaMs = b.report_eta_ms || 0;
+  latestMinIntervalSec = b.min_interval_sec || 300;
+  $('vReportEta').textContent = etaMs > 0 ? (etaMs / 1000).toFixed(0) + ' s' : '未知';
+  $('vReportTimeout').textContent = b.report_timeout_sec
+    ? `自动 ${b.report_timeout_sec} s（${etaMs > 0 ? '实测 ' + (etaMs / 1000).toFixed(0) + 's + 余量 60s' : '默认 360s'}）`
+    : '—';
+  $('vMinInterval').textContent = b.min_interval_sec ? b.min_interval_sec + ' s' : '—';
+  $('vIntervalWarning').textContent = b.interval_warning || 'ok';
   if (!$('intervalInput').value) $('intervalInput').value = b.interval_sec || 600;
   if (!$('iterationsInput').value) $('iterationsInput').value = b.iterations || 3;
   if (!$('kpiIntervalInput').value) $('kpiIntervalInput').value = b.kpi_interval_sec || 10;
@@ -407,11 +420,13 @@ function renderDaemons(b) {
   tb.innerHTML = '';
   for (const d of b.daemons || []) {
     const iter = d.iterations ? d.iterations : '—';
+    const eta = d.report_eta_ms ? (d.report_eta_ms / 1000).toFixed(0) + 's' : '—';
     tb.innerHTML += `<tr>
       <td><a class="daemon-link" href="http://${d.ip}:${d.port}/" target="_blank">${d.ip}:${d.port}</a></td>
       <td><span class="badge ${d.state}">${stateLabel(d.state)}</span></td>
       <td>${d.collect_wait ? d.collect_wait + 's' : '—'}</td>
       <td>${iter}</td>
+      <td>${eta}</td>
     </tr>`;
   }
 }
@@ -1038,7 +1053,8 @@ $('btnPause').onclick = () => control('pause');
 $('btnStart').onclick = () => control('start');
 $('btnInterval').onclick = () => {
   const v = parseInt($('intervalInput').value, 10);
-  if (!v || v < 60 || v > 86400) { toast('Profiler 周期需在 [60, 86400] 秒之间', false); return; }
+  const min = latestMinIntervalSec || 60;
+  if (!v || v < min || v > 86400) { toast(`Profiler 周期需在 [${min}, 86400] 秒之间`, false); return; }
   control('interval');
 };
 $('btnIterations').onclick = async () => {

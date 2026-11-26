@@ -76,6 +76,7 @@ type daemonStatus struct {
 	State       string `json:"state"` // healthy / unmatched / other / disconnected
 	CollectWait int64  `json:"collect_wait"`
 	Iterations  int    `json:"iterations,omitempty"` // daemon's saved self-run value (0 = unknown / old build)
+	ReportEtaMs int64  `json:"report_eta_ms,omitempty"`
 }
 
 // businessStatus is the web-visible view of one business.
@@ -83,6 +84,10 @@ type businessStatus struct {
 	Name                   string            `json:"name"`
 	IntervalSec            int64             `json:"interval_sec"`
 	Iterations             int               `json:"iterations"` // center trigger iterations for this business
+	ReportEtaMs            int64             `json:"report_eta_ms"`
+	ReportTimeoutSec       int               `json:"report_timeout_sec"`
+	MinIntervalSec         int64             `json:"min_interval_sec"`
+	IntervalWarning        string            `json:"interval_warning,omitempty"`
 	KPIDetectIntervalSec   int64             `json:"kpi_interval_sec"`
 	KPINSigma              KPINSigma         `json:"kpi_nsigma"`
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio"`
@@ -117,7 +122,7 @@ func daemonState(d *Daemon) string {
 func (c *Center) statusViewLocked() []businessStatus {
 	out := make([]businessStatus, 0, len(c.biz))
 	for _, b := range c.biz {
-		out = append(out, businessStatusOfLocked(b))
+		out = append(out, c.businessStatusOfLocked(b))
 	}
 	// Stable ordering: c.biz is a map whose iteration order is random, so sort
 	// by name to keep the console from reshuffling businesses on every poll.
@@ -127,11 +132,21 @@ func (c *Center) statusViewLocked() []businessStatus {
 
 // businessStatusOfLocked builds the web-safe status view for one business
 // (never exposing the daemons' match keys).
-func businessStatusOfLocked(b *Business) businessStatus {
+func (c *Center) businessStatusOfLocked(b *Business) businessStatus {
+	timeout := c.reportTimeoutLocked(b, b.Daemons)
+	minInterval := int64(timeout + businessPostProcessSec)
+	warning := ""
+	if b.IntervalSec > 0 && b.IntervalSec < minInterval {
+		warning = fmt.Sprintf("interval_sec %d below current minimum %d (report_timeout + 120s)", b.IntervalSec, minInterval)
+	}
 	bs := businessStatus{
 		Name:                   b.Name,
 		IntervalSec:            b.IntervalSec,
 		Iterations:             businessIterations(b),
+		ReportEtaMs:            c.maxReportEtaLocked(b.Daemons),
+		ReportTimeoutSec:       timeout,
+		MinIntervalSec:         minInterval,
+		IntervalWarning:        warning,
 		KPIDetectIntervalSec:   b.KPIDetectIntervalSec,
 		KPINSigma:              b.KPINSigma.Normalized(),
 		KPIReferenceAdmitRatio: b.NormalizedKPIReferenceAdmitRatio(),
@@ -147,7 +162,10 @@ func businessStatusOfLocked(b *Business) businessStatus {
 		bs.NextTrigger = b.NextTrigger.Format(time.RFC3339)
 	}
 	for _, d := range b.Daemons {
-		bs.Daemons = append(bs.Daemons, daemonStatus{IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait, Iterations: d.reportedIterations})
+		bs.Daemons = append(bs.Daemons, daemonStatus{
+			IP: d.IP, Port: d.Port, State: daemonState(d), CollectWait: d.collectWait,
+			Iterations: d.reportedIterations, ReportEtaMs: c.daemonReportEtaLocked(d),
+		})
 		if d.collectWait > bs.CollectWait {
 			bs.CollectWait = d.collectWait
 		}
@@ -168,6 +186,12 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IntervalSec <= 0 {
 		req.IntervalSec = int64(c.cfg.Interval.Seconds())
+	}
+	newBusinessMinInterval := int64(defaultReportTimeoutSec + businessPostProcessSec)
+	if req.IntervalSec < newBusinessMinInterval {
+		http.Error(w, fmt.Sprintf("interval_sec %d below minimum %d (default report_timeout %d + 120s)",
+			req.IntervalSec, newBusinessMinInterval, defaultReportTimeoutSec), http.StatusBadRequest)
+		return
 	}
 	if req.KPIDetectIntervalSec <= 0 {
 		req.KPIDetectIntervalSec = int64(c.cfg.KPIDetectInterval.Seconds())
@@ -194,7 +218,7 @@ func (c *Center) handleAddBusiness(w http.ResponseWriter, r *http.Request) {
 	b.progress = newProgressLog()
 	c.biz[req.Name] = b
 	c.save()
-	view := businessStatusOfLocked(b)
+	view := c.businessStatusOfLocked(b)
 	c.mu.Unlock()
 
 	// Attempt to match the newly added daemons (async; the probe loop will
@@ -257,7 +281,7 @@ func (c *Center) handleAddDaemon(w http.ResponseWriter, r *http.Request) {
 	d := &Daemon{IP: req.IP, Port: req.Port}
 	b.Daemons = append(b.Daemons, d)
 	c.save()
-	view := businessStatusOfLocked(b)
+	view := c.businessStatusOfLocked(b)
 	c.mu.Unlock()
 
 	go c.tryMatch(b, d)
@@ -594,6 +618,11 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "business not found", http.StatusNotFound)
 		return
 	}
+	minInterval := int64(c.reportTimeoutLocked(b, b.Daemons) + businessPostProcessSec)
+	if req.IntervalSec < minInterval {
+		http.Error(w, fmt.Sprintf("interval_sec %d below minimum %d (report_timeout + 120s)", req.IntervalSec, minInterval), http.StatusBadRequest)
+		return
+	}
 	b.IntervalSec = req.IntervalSec
 	b.NextTrigger = time.Now().Add(time.Duration(req.IntervalSec) * time.Second)
 	c.save()
@@ -762,10 +791,11 @@ func (c *Center) tryMatch(b *Business, d *Daemon) {
 	c.mu.Unlock()
 
 	body := map[string]any{
-		"center_addr": c.selfURL(),
-		"key":         key,
-		"business":    b.Name,
-		"daemon":      d.Addr(),
+		"center_addr":  c.selfURL(),
+		"key":          key,
+		"business":     b.Name,
+		"daemon":       d.Addr(),
+		"interval_sec": int64(c.businessInterval(b).Seconds()),
 	}
 	resp, err := doJSON(http.MethodPost, d.BaseURL()+"/daemon/match", body, "")
 
@@ -784,6 +814,10 @@ func (c *Center) tryMatch(b *Business, d *Daemon) {
 	d.collectWait = int64(cw)
 	if capable, ok := resp["round_token_supported"].(bool); ok {
 		d.tokenCapable = capable
+	}
+	if eta, ok := resp["report_eta_ms"].(float64); ok && eta > 0 {
+		d.reportEtaMs = int64(eta)
+		d.reportEtaAt = time.Now()
 	}
 	d.matchState = "healthy"
 	d.healthy = true

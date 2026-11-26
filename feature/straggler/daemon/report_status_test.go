@@ -39,7 +39,7 @@ func TestReportCycleFailurePayloadAndRetry(t *testing.T) {
 	d.daemonID = "n1"
 
 	cr := &CycleResult{ID: 1, StartedAt: time.Now().Add(-time.Second), RoundToken: "round-1"}
-	d.reportCycle(cr, "failed", "no_dump_after_collect", "collect")
+	d.reportCycle(cr, "failed", "no_dump_after_collect", "collect", "")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -87,7 +87,7 @@ func TestReportCycleOKPayload(t *testing.T) {
 	d.business = "biz"
 	d.daemonID = "n1"
 	cr := &CycleResult{ID: 1, StartedAt: time.Now().Add(-time.Second), DumpDir: archive, RoundToken: "round-1"}
-	d.reportCycle(cr, "ok", "", "")
+	d.reportCycle(cr, "ok", "", "", "")
 
 	if cr.ReportStatus != "ok" || cr.ReportEtaMs <= 0 {
 		t.Fatalf("cycle report fields = status=%q eta=%d", cr.ReportStatus, cr.ReportEtaMs)
@@ -156,6 +156,65 @@ func TestMatchStatusAdvertisesRoundTokenSupport(t *testing.T) {
 	}
 }
 
+// If the archive op_metric copy failed, the report still falls back to the raw
+// root/op_metric instead of turning a successful cycle into a failed report.
+func TestReportCycleFallsBackToRootOpMetric(t *testing.T) {
+	archive := t.TempDir()
+	root := t.TempDir()
+	opDir := filepath.Join(root, "op_metric")
+	if err := os.MkdirAll(opDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opDir, "global_rank_0.csv"),
+		[]byte("StepIndex,ZP_Kernel\n0,100\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.centerAddr = srv.URL
+	d.matchKey = "secret"
+	d.business = "biz"
+	d.daemonID = "n1"
+	cr := &CycleResult{ID: 1, StartedAt: time.Now().Add(-time.Second), DumpDir: archive, RoundToken: "round-1"}
+	d.reportCycle(cr, "ok", "", "", root)
+
+	if cr.ReportStatus != "ok" {
+		t.Fatalf("fallback report status = %q, want ok", cr.ReportStatus)
+	}
+	if payload["status"] != "ok" {
+		t.Fatalf("payload status = %v", payload["status"])
+	}
+	if ranks, ok := payload["ranks"].(map[string]any); !ok || len(ranks) != 1 {
+		t.Fatalf("fallback ranks = %+v", payload["ranks"])
+	}
+}
+
+func TestReportCycleUndelivered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := New(Config{}, nil)
+	d.state = "managed"
+	d.centerAddr = srv.URL
+	d.matchKey = "secret"
+	d.business = "biz"
+	d.daemonID = "n1"
+	cr := &CycleResult{ID: 1, StartedAt: time.Now(), RoundToken: "round-1"}
+	d.reportCycle(cr, "failed", "parse_failed", "parse", "")
+	if cr.ReportStatus != "undelivered" {
+		t.Fatalf("ReportStatus = %q, want undelivered", cr.ReportStatus)
+	}
+}
+
 func TestReportCycleSkippedWhenUnmanaged(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +229,7 @@ func TestReportCycleSkippedWhenUnmanaged(t *testing.T) {
 	d.daemonID = "n1"
 
 	cr := &CycleResult{ID: 1, StartedAt: time.Now(), RoundToken: "round-1"}
-	d.reportCycle(cr, "failed", "parse_failed", "parse")
+	d.reportCycle(cr, "failed", "parse_failed", "parse", "")
 
 	if requests != 0 {
 		t.Fatalf("unmanaged daemon sent %d reports, want 0", requests)

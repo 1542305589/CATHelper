@@ -120,6 +120,8 @@ type statusResponse struct {
 	IntervalSec       int64             `json:"interval_sec"`
 	CollectWait       int64             `json:"collect_wait"`
 	Iterations        int               `json:"iterations"`
+	ReportEtaMs       int64             `json:"report_eta_ms"`
+	MinIntervalSec    int64             `json:"min_interval_sec"`
 	Thresholds        config.Thresholds `json:"thresholds"`
 	DefaultThresholds config.Thresholds `json:"default_thresholds"`
 	Managed           bool              `json:"managed"`

@@ -193,6 +193,10 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 	if capable, ok := resp["round_token_supported"].(bool); ok {
 		d.tokenCapable = capable
 	}
+	if eta, ok := resp["report_eta_ms"].(float64); ok && eta > 0 {
+		d.reportEtaMs = int64(eta)
+		d.reportEtaAt = time.Now()
+	}
 	d.matchState = "healthy"
 	d.healthy = true
 	d.failCount = 0
@@ -265,6 +269,10 @@ func (c *Center) applyProbeLocked(p daemonProbe) bool {
 		if p.st.Iterations > 0 {
 			d.reportedIterations = p.st.Iterations
 		}
+		if p.st.ReportEtaMs > 0 {
+			d.reportEtaMs = p.st.ReportEtaMs
+			d.reportEtaAt = time.Now()
+		}
 		d.tokenCapable = p.st.RoundTokenSupported
 	case p.st.Other:
 		d.matchState = "other"
@@ -296,6 +304,7 @@ type matchStatusResp struct {
 	Center              string `json:"center"`
 	CollectWait         int64  `json:"collect_wait"`
 	Iterations          int    `json:"iterations"`
+	ReportEtaMs         int64  `json:"report_eta_ms"`
 	RoundTokenSupported bool   `json:"round_token_supported"`
 }
 
@@ -369,9 +378,11 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 		d.lastOpMetric = nil
 	}
 	healthy := len(expected)
-	// P0 uses a fixed 480s collection window; P1 replaces it with the
-	// daemon-measured report ETA + 60s.
-	timeout := p0ReportTimeout
+	// Automatic collection window: max(report_eta)+60s (120..1800), persisted
+	// across restarts and refreshed by the 5s probes.
+	timeoutSec := c.reportTimeoutLocked(b, expected)
+	b.LastReportTimeoutSec = timeoutSec
+	timeout := time.Duration(timeoutSec) * time.Second
 	c.mu.Unlock()
 
 	prog.begin(round, triggerAt)
@@ -409,12 +420,13 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 
 	c.markMissingReports(expected, triggerAt, token)
 
-	merged, okCount, failedDaemons, reportedDaemons, reportLatencyMs := c.mergeOpMetric(expected, triggerAt, token)
+	merged, okCount, failedDaemons, missingDaemons, reportedDaemons, reportLatencyMs := c.mergeOpMetric(expected, triggerAt, token)
 	meta := roundMeta{
-		ReportTimeoutSec: int(p0ReportTimeout.Seconds()),
+		ReportTimeoutSec: timeoutSec,
 		ReportedDaemons:  reportedDaemons,
 		FailedDaemons:    failedDaemons,
-		Partial:          okCount > 0 && len(failedDaemons) > 0,
+		MissingDaemons:   missingDaemons,
+		Partial:          okCount > 0 && (len(failedDaemons) > 0 || len(missingDaemons) > 0),
 		ReportLatencyMs:  reportLatencyMs,
 	}
 	durationMs := time.Since(triggerAt).Milliseconds()
@@ -423,7 +435,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	var failed bool
 	failureReason := ""
 	if okCount == 0 {
-		if allDaemonsFailed(okCount, reportedDaemons, healthy) {
+		if allDaemonsFailed(okCount, healthy, len(missingDaemons)) {
 			c.logf("business %s: all daemons reported failure", b.Name)
 			prog.step("本轮全部守护进程上报失败，判定本轮失败")
 			failureReason = "all daemons reported failure"
@@ -507,6 +519,52 @@ func (c *Center) triggerDaemon(d *Daemon, token string, iterations int) {
 	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", body, d.Key)
 }
 
+// daemonReportEtaLocked returns a daemon's fresh report ETA (0 if unknown/stale).
+func (c *Center) daemonReportEtaLocked(d *Daemon) int64 {
+	if d.reportEtaMs <= 0 {
+		return 0
+	}
+	if !d.reportEtaAt.IsZero() && time.Since(d.reportEtaAt) > time.Hour {
+		return 0
+	}
+	return d.reportEtaMs
+}
+
+// maxReportEtaLocked returns the largest fresh successful report ETA (ms) across
+// daemons; a value older than one hour is treated as unknown. Caller holds c.mu.
+func (c *Center) maxReportEtaLocked(daemons []*Daemon) int64 {
+	maxEta := int64(0)
+	for _, d := range daemons {
+		if eta := c.daemonReportEtaLocked(d); eta > maxEta {
+			maxEta = eta
+		}
+	}
+	return maxEta
+}
+
+// reportTimeoutLocked computes the automatic collection window:
+// max(eta)+60s, clamped to [120, 1800], falling back to the business's persisted
+// value and then to the 360s default. Caller holds c.mu.
+func (c *Center) reportTimeoutLocked(b *Business, daemons []*Daemon) int {
+	if eta := c.maxReportEtaLocked(daemons); eta > 0 {
+		return clampReportTimeout(int(eta/1000) + reportEtaBufferSec)
+	}
+	if b != nil && b.LastReportTimeoutSec > 0 {
+		return clampReportTimeout(b.LastReportTimeoutSec)
+	}
+	return defaultReportTimeoutSec
+}
+
+func clampReportTimeout(v int) int {
+	if v < minReportTimeoutSec {
+		return minReportTimeoutSec
+	}
+	if v > maxReportTimeoutSec {
+		return maxReportTimeoutSec
+	}
+	return v
+}
+
 // businessIterations normalizes a business's iterations (0 = legacy/default).
 func businessIterations(b *Business) int {
 	if b.Iterations > 0 {
@@ -516,26 +574,28 @@ func businessIterations(b *Business) int {
 }
 
 // allDaemonsFailed reports whether every expected daemon answered this round
-// with a non-ok status (failed/busy/paused), i.e. no op_metric is available.
-func allDaemonsFailed(okCount, reportedCount, healthy int) bool {
-	return healthy > 0 && okCount == 0 && reportedCount == healthy
+// with a non-ok status (failed/busy/paused), i.e. no op_metric is available and
+// no daemon is missing.
+func allDaemonsFailed(okCount, healthy, missingCount int) bool {
+	return healthy > 0 && okCount == 0 && missingCount == 0
 }
 
 // mergeOpMetric merges only the OK reports from the round's expected daemons.
 // A daemon that reported failed/busy/paused (or did not report at all) is
 // skipped and returned in failed, so its cached op_metric can never be reused.
 // It returns (merged, okCount, failedAddrs, reportedCount, maxReportLatencyMs).
-func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token string) (detector.OpMetric, int, []string, int, int64) {
+func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token string) (detector.OpMetric, int, []string, []string, int, int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	merged := make(detector.OpMetric)
 	okCount := 0
 	reported := 0
 	var failed []string
+	var missing []string
 	var maxLatencyMs int64
 	for _, d := range expected {
 		if !roundReported(d, triggerAt, token) {
-			failed = append(failed, d.Addr())
+			missing = append(missing, d.Addr())
 			c.logf("skip missing op_metric: daemon=%s lastReportAt=%s triggerAt=%s token=%q",
 				d.Addr(), d.lastReportAt.UTC().Format(time.RFC3339), triggerAt.UTC().Format(time.RFC3339), d.lastRoundToken)
 			continue
@@ -559,7 +619,7 @@ func (c *Center) mergeOpMetric(expected []*Daemon, triggerAt time.Time, token st
 			merged[rank] = r
 		}
 	}
-	return merged, okCount, failed, reported, maxLatencyMs
+	return merged, okCount, failed, missing, reported, maxLatencyMs
 }
 
 // detectAndStore runs detection on the merged op_metric and stores the result
@@ -737,6 +797,7 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		"report_timeout_sec": meta.ReportTimeoutSec,
 		"reported_daemons":   meta.ReportedDaemons,
 		"failed_daemons":     meta.FailedDaemons,
+		"missing_daemons":    meta.MissingDaemons,
 		"partial":            meta.Partial,
 		"report_latency_ms":  meta.ReportLatencyMs,
 		"trigger_reason":     b.lastTriggerReason,
@@ -761,6 +822,7 @@ func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs i
 		"report_timeout_sec": meta.ReportTimeoutSec,
 		"reported_daemons":   meta.ReportedDaemons,
 		"failed_daemons":     meta.FailedDaemons,
+		"missing_daemons":    meta.MissingDaemons,
 		"partial":            meta.Partial,
 		"report_latency_ms":  meta.ReportLatencyMs,
 		"trigger_reason":     triggerReason,

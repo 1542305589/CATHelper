@@ -21,6 +21,7 @@ type cycleInfo struct {
 	ReportTimeoutSec int               `json:"report_timeout_sec,omitempty"`
 	ReportedDaemons  int               `json:"reported_daemons,omitempty"`
 	FailedDaemons    []string          `json:"failed_daemons,omitempty"`
+	MissingDaemons   []string          `json:"missing_daemons,omitempty"`
 	Partial          bool              `json:"partial,omitempty"`
 	ReportLatencyMs  int64             `json:"report_latency_ms,omitempty"`
 	TriggerReason    string            `json:"trigger_reason,omitempty"`
@@ -76,6 +77,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				ReportTimeoutSec int               `json:"report_timeout_sec"`
 				ReportedDaemons  int               `json:"reported_daemons"`
 				FailedDaemons    []string          `json:"failed_daemons"`
+				MissingDaemons   []string          `json:"missing_daemons"`
 				Partial          bool              `json:"partial"`
 				ReportLatencyMs  int64             `json:"report_latency_ms"`
 				TriggerReason    string            `json:"trigger_reason"`
@@ -97,6 +99,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				ci.ReportTimeoutSec = m.ReportTimeoutSec
 				ci.ReportedDaemons = m.ReportedDaemons
 				ci.FailedDaemons = m.FailedDaemons
+				ci.MissingDaemons = m.MissingDaemons
 				ci.Partial = m.Partial
 				ci.ReportLatencyMs = m.ReportLatencyMs
 			}
@@ -110,8 +113,10 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 	var snap progressSnapshot
 	haveProgress := false
 	inflightIterations := 0
+	inflightTimeout := 0
 	if b := c.biz[name]; b != nil {
 		inflightIterations = businessIterations(b)
+		inflightTimeout = c.reportTimeoutLocked(b, b.Daemons)
 		if b.progress != nil {
 			snap = b.progress.snapshot()
 			haveProgress = true
@@ -125,7 +130,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 			Running:          true,
 			Summary:          map[string]int{},
 			Iterations:       inflightIterations,
-			ReportTimeoutSec: int(p0ReportTimeout.Seconds()),
+			ReportTimeoutSec: inflightTimeout,
 		}}, out...)
 	}
 	return out

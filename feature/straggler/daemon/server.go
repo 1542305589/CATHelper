@@ -98,6 +98,8 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		IntervalSec:       int64(interval.Seconds()),
 		CollectWait:       int64(d.cfg.CollectWait.Seconds()),
 		Iterations:        d.Iterations(),
+		ReportEtaMs:       d.reportEtaP90(),
+		MinIntervalSec:    d.minIntervalSec(),
 		Thresholds:        d.Thresholds(),
 		DefaultThresholds: config.DefaultThresholds(),
 		Managed:           managed,
@@ -254,12 +256,17 @@ func (d *Daemon) handleOpMetricView(w http.ResponseWriter, r *http.Request) {
 //	  }
 //	}
 func buildOpMetricView(c *CycleResult) (*opMetricViewResponse, error) {
-	dir := filepath.Join(c.DumpDir, "op_metric")
+	return buildOpMetricViewAt(filepath.Join(c.DumpDir, "op_metric"), c.ID)
+}
+
+// buildOpMetricViewAt reads an op_metric directory directly. reportCycle uses it
+// as a fallback when the archive copy failed but <root>/op_metric is intact.
+func buildOpMetricViewAt(dir string, cycleID int) (*opMetricViewResponse, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	resp := &opMetricViewResponse{Cycle: c.ID, Dir: dir, Ranks: make(map[string]opMetricRank)}
+	resp := &opMetricViewResponse{Cycle: cycleID, Dir: dir, Ranks: make(map[string]opMetricRank)}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -546,6 +553,7 @@ func (d *Daemon) handleDaemonMatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"status":                "matched",
 		"collect_wait":          int64(d.cfg.CollectWait.Seconds()),
+		"report_eta_ms":         d.reportEtaP90(),
 		"round_token_supported": true,
 	})
 }
@@ -581,7 +589,7 @@ func (d *Daemon) handleDaemonUnmatch(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request) {
 	state, center, _ := d.matchState()
 	if state != "managed" {
-		writeJSON(w, map[string]any{"state": state, "matched": false, "iterations": d.Iterations(), "round_token_supported": true})
+		writeJSON(w, map[string]any{"state": state, "matched": false, "iterations": d.Iterations(), "report_eta_ms": d.reportEtaP90(), "round_token_supported": true})
 		return
 	}
 	if d.KeyMatches(r.Header.Get("X-Match-Key")) {
@@ -591,11 +599,12 @@ func (d *Daemon) handleDaemonMatchStatus(w http.ResponseWriter, r *http.Request)
 			"center":                center,
 			"collect_wait":          int64(d.cfg.CollectWait.Seconds()),
 			"iterations":            d.Iterations(),
+			"report_eta_ms":         d.reportEtaP90(),
 			"round_token_supported": true,
 		})
 		return
 	}
-	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center, "iterations": d.Iterations(), "round_token_supported": true})
+	writeJSON(w, map[string]any{"state": state, "matched": false, "other": true, "center": center, "iterations": d.Iterations(), "report_eta_ms": d.reportEtaP90(), "round_token_supported": true})
 }
 
 // requireManagedKey gates a control endpoint: when NOT managed it passes

@@ -43,7 +43,7 @@ func newFakeControlDaemon(t *testing.T) *fakeControlDaemon {
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.matchBody = body
-			writeJSON(w, map[string]any{"status": "matched", "collect_wait": 60, "round_token_supported": true})
+			writeJSON(w, map[string]any{"status": "matched", "collect_wait": 60, "report_eta_ms": 156000, "round_token_supported": true})
 		case "/daemon/trigger":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -97,7 +97,7 @@ func newIterTestCenter(t *testing.T) *Center {
 
 func TestAddBusinessDefaultsIterations(t *testing.T) {
 	c := newIterTestCenter(t)
-	rr := serveCenter(c, http.MethodPost, "/center/business", `{"name":"b2","interval_sec":60,"kpi_interval_sec":60}`, nil)
+	rr := serveCenter(c, http.MethodPost, "/center/business", `{"name":"b2","interval_sec":600,"kpi_interval_sec":60}`, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("add business status = %d, body = %s", rr.Code, rr.Body.String())
 	}
@@ -200,6 +200,9 @@ func TestTryMatchRestoresTokenCapability(t *testing.T) {
 	c.tryMatch(b, d)
 	if !d.tokenCapable {
 		t.Fatalf("auto-matched daemon tokenCapable = false, want true")
+	}
+	if d.reportEtaMs != 156000 {
+		t.Fatalf("auto-matched daemon reportEtaMs = %d, want 156000", d.reportEtaMs)
 	}
 	if d.matchState != "healthy" {
 		t.Fatalf("matchState = %q, want healthy", d.matchState)

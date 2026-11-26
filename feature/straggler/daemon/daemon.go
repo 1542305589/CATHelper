@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -298,7 +300,7 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 		d.logf("cycle %d archive op_metric: %v", cr.ID, err)
 	}
 	d.progress.step("上报 op_metric 到中心")
-	d.reportCycle(cr, "ok", "", "")
+	d.reportCycle(cr, "ok", "", "", root)
 
 	// 6. Stage B2: KPI and Profiler detection are independent post-processing;
 	//    run them in parallel after the report. config.Apply happens once before
@@ -572,8 +574,12 @@ func (d *Daemon) SetThresholds(t config.Thresholds) {
 // SetInterval updates the cycle period, validating [60, 86400] seconds. The
 // running timer is re-armed so the new period takes effect immediately.
 func (d *Daemon) SetInterval(sec int64) error {
-	if sec < 60 || sec > 86400 {
-		return fmt.Errorf("interval_sec out of range [60, 86400]")
+	min := d.minIntervalSec()
+	if sec < min {
+		return fmt.Errorf("interval_sec %d below minimum %d (report_eta + 130s)", sec, min)
+	}
+	if sec > 86400 {
+		return fmt.Errorf("interval_sec out of range [%d, 86400]", min)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -682,6 +688,11 @@ func (d *Daemon) Stop() {
 // self-scheduling (state=managed), records the center/key/business/daemon and
 // starts the reverse heartbeat. Returns an error if already managed.
 func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time.Duration) error {
+	if interval > 0 {
+		if min := d.minIntervalSec(); int64(interval.Seconds()) < min {
+			return fmt.Errorf("interval_sec %d below minimum %d (report_eta + 130s)", int64(interval.Seconds()), min)
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "managed" {
@@ -791,7 +802,7 @@ func (d *Daemon) heartbeatLoop() {
 // is ok (ranks filled from the archived op_metric), or failed with reason/stage.
 // Best-effort: the center's timeout is the final fallback. Self-run cycles are
 // not reported (ReportStatus=skipped).
-func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage string) {
+func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage, fallbackRoot string) {
 	cr.ReportStatus = status
 	cr.ReportReason = reason
 	cr.ReportStage = stage
@@ -802,6 +813,9 @@ func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage string) {
 	var ranks any
 	if status == "ok" {
 		view, err := buildOpMetricView(cr)
+		if err != nil && fallbackRoot != "" {
+			view, err = buildOpMetricViewAt(filepath.Join(fallbackRoot, "op_metric"), cr.ID)
+		}
 		if err != nil || len(view.Ranks) == 0 {
 			if err != nil {
 				d.logf("cycle %d op_metric view: %v", cr.ID, err)
@@ -816,6 +830,7 @@ func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage string) {
 	}
 	start := time.Now()
 	if err := d.postReport(cr.RoundToken, status, reason, stage, ranks); err != nil {
+		cr.ReportStatus = "undelivered"
 		d.logf("cycle %d report (%s/%s): %v", cr.ID, status, stage, err)
 		return
 	}
@@ -898,6 +913,48 @@ func (d *Daemon) recordReportEta(ms int64) {
 	}
 }
 
+// reportEtaP90 returns the 90th-percentile successful report latency (ms) over
+// the last 10 successful cycles; with fewer than 3 samples it returns the max.
+func (d *Daemon) reportEtaP90() int64 {
+	d.mu.Lock()
+	vals := append([]int64(nil), d.reportEtas...)
+	d.mu.Unlock()
+	n := len(vals)
+	if n == 0 {
+		return 0
+	}
+	if n < 3 {
+		max := vals[0]
+		for _, v := range vals {
+			if v > max {
+				max = v
+			}
+		}
+		return max
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+	idx := int(math.Ceil(0.9*float64(n))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= n {
+		idx = n - 1
+	}
+	return vals[idx]
+}
+
+// minIntervalSec is the minimum safe self-run interval: 300s, or
+// reportEta + 130s when a report ETA is known.
+func (d *Daemon) minIntervalSec() int64 {
+	min := int64(300)
+	if eta := d.reportEtaP90(); eta > 0 {
+		if v := eta/1000 + 130; v > min {
+			min = v
+		}
+	}
+	return min
+}
+
 // failCycle records the local failure and reports it to the center immediately,
 // then returns (the caller skips all later stages).
 func (d *Daemon) failCycle(cr *CycleResult, stage, reason string, cause error) {
@@ -907,7 +964,7 @@ func (d *Daemon) failCycle(cr *CycleResult, stage, reason string, cause error) {
 		cr.Error = reason
 	}
 	d.progress.step("上报失败到中心 (%s/%s)", stage, reason)
-	d.reportCycle(cr, "failed", reason, stage)
+	d.reportCycle(cr, "failed", reason, stage, "")
 }
 
 func dynoFailureReason(err error) string {

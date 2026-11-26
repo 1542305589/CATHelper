@@ -130,6 +130,10 @@ func (c *Center) load() {
 				b.Thresholds = b.Thresholds.Normalized()
 			}
 			b.progress = newProgressLog()
+			minInterval := int64(c.reportTimeoutLocked(b, b.Daemons) + businessPostProcessSec)
+			if b.IntervalSec > 0 && b.IntervalSec < minInterval {
+				c.logf("business %s: interval_sec %d below current minimum %d; keeping (grandfather)", b.Name, b.IntervalSec, minInterval)
+			}
 			c.biz[b.Name] = b
 		}
 	}
