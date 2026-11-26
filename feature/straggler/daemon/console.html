@@ -90,6 +90,8 @@
           <dt>下次运行</dt><dd id="vNext">—</dd>
           <dt>Profiler 目录</dt><dd id="vProfilerDir">—</dd>
           <dt>KPI 目录</dt><dd id="vKpiDir">—</dd>
+          <dt>Profiler 数据</dt><dd id="vDumpProfiler">—</dd>
+          <dt>最近复制</dt><dd id="vDumpResult">—</dd>
         </dl>
       </div>
     </div>
@@ -226,6 +228,15 @@ function msFmt(ms) {
   return (ms / 1000).toFixed(1) + 's';
 }
 
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  const units = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+  return n.toFixed(1) + ' ' + units[i];
+}
+
 function renderStatus(s) {
   $('stateBadge').textContent = (s.state || '—').toUpperCase();
   $('stateBadge').className = 'badge ' + (s.state === 'running' ? 'running' : 'paused');
@@ -247,6 +258,15 @@ function renderStatus(s) {
   $('vNext').textContent = timeFmt(s.next_run_at);
   $('vProfilerDir').textContent = s.profiler_dir || '—';
   $('vKpiDir').textContent = s.kpi_dir || '（未启用）';
+  $('vDumpProfiler').textContent = s.dump_profiler_data ? 'on' : 'off';
+  if (!s.dump_profiler_data) {
+    $('vDumpResult').textContent = '—';
+  } else {
+    let dump = s.last_dump_profiler_data_status || 'pending';
+    if (s.last_dump_profiler_data_bytes) dump += ' · ' + fmtBytes(s.last_dump_profiler_data_bytes);
+    if (s.last_dump_profiler_data_error) dump += ' · ' + s.last_dump_profiler_data_error;
+    $('vDumpResult').textContent = dump;
+  }
   if (!$('intervalInput').value) $('intervalInput').value = s.interval_sec || 600;
   if (!$('iterationsInput').value) $('iterationsInput').value = s.iterations || 3;
   $('iterationsInput').disabled = false;

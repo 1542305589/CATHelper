@@ -76,7 +76,7 @@ func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) {
 		return
 	}
 	root := d.cfg.ProfilerDir
-	if !fileExistsDir(root) {
+	if !fileExistsDir(root) || !dirHasEntries(root) {
 		cr.ProfilerDataStatus = "skipped"
 		cr.ProfilerDataError = "no_raw_dump"
 		cr.ProfilerDataBytes = 0
@@ -116,7 +116,10 @@ func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) {
 	cr.ProfilerDataBytes = copied
 	cr.ProfilerDataError = ""
 	d.logf("cycle %d profiler_data copied: %d/%d bytes -> %s", cr.ID, copied, source, dst)
-	d.cleanProfilerDataCopies()
+	// Only prune the real daemon_results tree; tests use temp archive roots.
+	if base := filepath.Dir(cr.DumpDir); filepath.Base(base) == "daemon_results" {
+		cleanProfilerDataCopies(base, profilerDataKeep, d.logf)
+	}
 }
 
 // copyProfilerData copies the raw profiler root into dst, excluding the two
@@ -274,6 +277,11 @@ func warnStaleProfilerDirs(root string, logf func(string, ...any)) {
 	if len(matches) > profilerDataKeep {
 		logf("WARNING: %d stale profiler dirs (> %d), manual cleanup recommended", len(matches), profilerDataKeep)
 	}
+}
+
+func dirHasEntries(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
 }
 
 func dirSize(path string) int64 {

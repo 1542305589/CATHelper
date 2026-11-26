@@ -114,6 +114,46 @@ func TestDumpProfilerDataCopiesAndMeta(t *testing.T) {
 	}
 }
 
+func TestDumpProfilerDataEmptyRootSkipped(t *testing.T) {
+	src := t.TempDir()
+	archive := t.TempDir()
+	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
+	d.logf = noopLogf
+	cr := &CycleResult{ID: 1, StartedAt: time.Now(), DumpDir: archive,
+		DumpProfilerData: true, ProfilerDataStatus: "pending"}
+	d.finishCycle(cr)
+	d.cleanupDump(cr)
+
+	if cr.ProfilerDataStatus != "skipped" || cr.ProfilerDataError != "no_raw_dump" {
+		t.Fatalf("status/error = %q/%q, want skipped/no_raw_dump",
+			cr.ProfilerDataStatus, cr.ProfilerDataError)
+	}
+	if _, err := os.Stat(filepath.Join(archive, "profiler_data")); !os.IsNotExist(err) {
+		t.Fatal("empty root created profiler_data")
+	}
+}
+
+func TestDumpProfilerDataCopiesFailedCycle(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
+	archive := t.TempDir()
+	setFreeDisk(t, 100<<30, true)
+
+	d := New(Config{DumpProfilerData: true, ProfilerDir: src}, nil)
+	d.logf = noopLogf
+	cr := &CycleResult{ID: 1, StartedAt: time.Now(), DumpDir: archive,
+		DumpProfilerData: true, ProfilerDataStatus: "pending", Error: "parse_failed"}
+	d.finishCycle(cr)
+	d.cleanupDump(cr)
+
+	if cr.ProfilerDataStatus != "ok" {
+		t.Fatalf("failed cycle profiler_data status = %q, want ok", cr.ProfilerDataStatus)
+	}
+	if _, err := os.Stat(filepath.Join(archive, "profiler_data", "master_0", "a.db")); err != nil {
+		t.Fatalf("failed cycle profiler_data missing: %v", err)
+	}
+}
+
 func TestDumpProfilerDataLowDiskSkipsAndDeletes(t *testing.T) {
 	src := t.TempDir()
 	writeTestFile(t, filepath.Join(src, "master_0", "a.db"), "abc")
