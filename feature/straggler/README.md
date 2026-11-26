@@ -134,7 +134,7 @@ cd feature/straggler
 | `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告 |
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） |
 | `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；已有周期在跑 → 409） |
-| `POST /daemon/stop` | 优雅关闭守护进程（删除全部落盘结果） |
+| `POST /daemon/stop` | 优雅关闭守护进程（默认删除全部落盘结果；`--dump-profiler-data` 开启时保留 `daemon_results`） |
 
 ```bash
 curl -s localhost:8080/status | jq
@@ -325,7 +325,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `GET /straggler/op_metric/{id}/{file}` | 下载该周期 `op_metric` 原始文件（如 `global_rank_0.csv`） | — |
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） | — |
-| `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
+| `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog；默认删除全部落盘结果，`--dump-profiler-data` 开启时保留 `daemon_results`） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
 | `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改；中心触发以中心下发为准） | `{"iterations": 3}`（3–100；<3 需 daemon 启动时加 `--allow-low-iterations`） |
 | `GET /daemon/thresholds` | 读取当前检测阈值 | — |
@@ -538,7 +538,7 @@ daemon_results/<start>/
 运行目录另有一份最新的 `straggler_output.json`（覆盖写，与一次性模式同形状）。
 
 - 查询接口读**进程内 store**（本次会话），daemon 重启后清空，不读磁盘历史；历史无条数上限，可用 `?limit=N` 截断。
-- `POST /daemon/stop` 会在优雅关闭后**删除整个 `daemon_results/`**（所有落盘结果一并清掉）。
+- `POST /daemon/stop` 默认在优雅关闭后**删除整个 `daemon_results/`**；开启 `--dump-profiler-data` 时保留 `daemon_results` 并 warning，避免丢掉 profiler_data 证据。
 
 **`--debug-output` 调试输出**（排查"某卡为什么没被判异常"时使用；不额外生成文件，直接在现有结果里展示全量）：
 - KPI：`anomaly_metrics` 对全部 11 个指标列出其 `cards`（含正常的，`abnormal` 区分），正常卡 `score` 约 1.0。
