@@ -53,6 +53,18 @@ func TestMatchRejectsShortInterval(t *testing.T) {
 	}
 }
 
+func TestUnmatchClampsInterval(t *testing.T) {
+	d := New(Config{Iterations: 3}, nil)
+	d.reportEtas = []int64{300_000} // minimum 430s
+	d.state = "managed"
+	d.centerInterval = 400 * time.Second
+	d.interval = 400 * time.Second
+	d.Unmatch()
+	if d.interval < 430*time.Second {
+		t.Fatalf("unmatched interval = %s, want >= 430s", d.interval)
+	}
+}
+
 func TestStatusExposesReportEtaAndMinInterval(t *testing.T) {
 	d := New(Config{Iterations: 3}, nil)
 	d.reportEtas = []int64{156_000}

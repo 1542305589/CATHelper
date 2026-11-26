@@ -744,6 +744,9 @@ func (d *Daemon) Unmatch() {
 	if d.centerInterval > 0 {
 		d.interval = d.centerInterval
 	}
+	if min := time.Duration(d.minIntervalSecLocked()) * time.Second; d.interval < min {
+		d.interval = min
+	}
 	d.nextRun = time.Now().Add(d.interval)
 	d.resetTimer()
 	d.logf("unmatched, back to running (interval=%s)", d.interval)
@@ -917,8 +920,12 @@ func (d *Daemon) recordReportEta(ms int64) {
 // the last 10 successful cycles; with fewer than 3 samples it returns the max.
 func (d *Daemon) reportEtaP90() int64 {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.reportEtaP90Locked()
+}
+
+func (d *Daemon) reportEtaP90Locked() int64 {
 	vals := append([]int64(nil), d.reportEtas...)
-	d.mu.Unlock()
 	n := len(vals)
 	if n == 0 {
 		return 0
@@ -946,8 +953,14 @@ func (d *Daemon) reportEtaP90() int64 {
 // minIntervalSec is the minimum safe self-run interval: 300s, or
 // reportEta + 130s when a report ETA is known.
 func (d *Daemon) minIntervalSec() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.minIntervalSecLocked()
+}
+
+func (d *Daemon) minIntervalSecLocked() int64 {
 	min := int64(300)
-	if eta := d.reportEtaP90(); eta > 0 {
+	if eta := d.reportEtaP90Locked(); eta > 0 {
 		if v := eta/1000 + 130; v > min {
 			min = v
 		}

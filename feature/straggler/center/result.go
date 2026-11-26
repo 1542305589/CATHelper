@@ -116,7 +116,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 	inflightTimeout := 0
 	if b := c.biz[name]; b != nil {
 		inflightIterations = businessIterations(b)
-		inflightTimeout = c.reportTimeoutLocked(b, b.Daemons)
+		inflightTimeout = c.reportTimeoutLocked(b, healthyDaemons(b.Daemons))
 		if b.progress != nil {
 			snap = b.progress.snapshot()
 			haveProgress = true

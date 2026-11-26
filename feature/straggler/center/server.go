@@ -133,7 +133,8 @@ func (c *Center) statusViewLocked() []businessStatus {
 // businessStatusOfLocked builds the web-safe status view for one business
 // (never exposing the daemons' match keys).
 func (c *Center) businessStatusOfLocked(b *Business) businessStatus {
-	timeout := c.reportTimeoutLocked(b, b.Daemons)
+	healthy := healthyDaemons(b.Daemons)
+	timeout := c.reportTimeoutLocked(b, healthy)
 	minInterval := int64(timeout + businessPostProcessSec)
 	warning := ""
 	if b.IntervalSec > 0 && b.IntervalSec < minInterval {
@@ -143,7 +144,7 @@ func (c *Center) businessStatusOfLocked(b *Business) businessStatus {
 		Name:                   b.Name,
 		IntervalSec:            b.IntervalSec,
 		Iterations:             businessIterations(b),
-		ReportEtaMs:            c.maxReportEtaLocked(b.Daemons),
+		ReportEtaMs:            c.maxReportEtaLocked(healthy),
 		ReportTimeoutSec:       timeout,
 		MinIntervalSec:         minInterval,
 		IntervalWarning:        warning,
@@ -618,7 +619,7 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "business not found", http.StatusNotFound)
 		return
 	}
-	minInterval := int64(c.reportTimeoutLocked(b, b.Daemons) + businessPostProcessSec)
+	minInterval := int64(c.reportTimeoutLocked(b, healthyDaemons(b.Daemons)) + businessPostProcessSec)
 	if req.IntervalSec < minInterval {
 		http.Error(w, fmt.Sprintf("interval_sec %d below minimum %d (report_timeout + 120s)", req.IntervalSec, minInterval), http.StatusBadRequest)
 		return

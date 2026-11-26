@@ -530,6 +530,18 @@ func (c *Center) daemonReportEtaLocked(d *Daemon) int64 {
 	return d.reportEtaMs
 }
 
+// healthyDaemons filters the trigger/status candidate set. Status and interval
+// validation use the same healthy set as the actual trigger snapshot.
+func healthyDaemons(daemons []*Daemon) []*Daemon {
+	out := make([]*Daemon, 0, len(daemons))
+	for _, d := range daemons {
+		if d.matchState == "healthy" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // maxReportEtaLocked returns the largest fresh successful report ETA (ms) across
 // daemons; a value older than one hour is treated as unknown. Caller holds c.mu.
 func (c *Center) maxReportEtaLocked(daemons []*Daemon) int64 {

@@ -9,6 +9,7 @@ import (
 func TestBusinessIntervalMinimum(t *testing.T) {
 	c := newKPITestCenter(t)
 	b := c.biz["biz"]
+	b.Daemons[0].matchState = "healthy"
 	b.Daemons[0].reportEtaMs = 156_000
 	b.Daemons[0].reportEtaAt = time.Now()
 
@@ -23,6 +24,28 @@ func TestBusinessIntervalMinimum(t *testing.T) {
 	}
 	if b.IntervalSec != 400 {
 		t.Fatalf("business interval = %d, want 400", b.IntervalSec)
+	}
+}
+
+func TestBusinessStatusIntervalWarning(t *testing.T) {
+	c := newKPITestCenter(t)
+	b := c.biz["biz"]
+	b.IntervalSec = 600
+	d := b.Daemons[0]
+	d.matchState = "healthy"
+	d.reportEtaMs = 500_000
+	d.reportEtaAt = time.Now()
+
+	view := c.businessStatusOfLocked(b)
+	// eta 500s -> timeout 560s -> minimum 680s; 600 is below.
+	if view.ReportTimeoutSec != 560 {
+		t.Fatalf("report_timeout_sec = %d, want 560", view.ReportTimeoutSec)
+	}
+	if view.MinIntervalSec != 680 {
+		t.Fatalf("min_interval_sec = %d, want 680", view.MinIntervalSec)
+	}
+	if view.IntervalWarning == "" {
+		t.Fatal("expected an interval warning for 600 < 680")
 	}
 }
 
