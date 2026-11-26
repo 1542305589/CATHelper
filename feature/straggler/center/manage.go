@@ -181,7 +181,6 @@ func (c *Center) matchDaemonLocked(b *Business, d *Daemon) error {
 		"business":     b.Name,
 		"daemon":       d.Addr(),
 		"interval_sec": int64(c.businessInterval(b).Seconds()),
-		"iterations":   businessIterations(b),
 	}
 	resp, err := doJSON(http.MethodPost, d.BaseURL()+"/daemon/match", body, "")
 	if err != nil {
@@ -344,6 +343,9 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	// an older round can never be mistaken for this round's data.
 	b.pendingToken = strconv.FormatInt(triggerAt.UnixNano(), 10)
 	token := b.pendingToken
+	// The center's business iteration count is sent with EVERY trigger; it does
+	// not depend on (and does not modify) the daemon's saved self-run value.
+	iterations := businessIterations(b)
 	if b.progress == nil {
 		b.progress = newProgressLog()
 	}
@@ -373,7 +375,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 
 	for _, d := range b.Daemons {
 		if d.matchState == "healthy" {
-			go c.triggerDaemon(d, token)
+			go c.triggerDaemon(d, token, iterations)
 		}
 	}
 
@@ -420,7 +422,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 		failureReason = "no op_metric reported in round"
 	} else {
 		prog.step("跨节点合并检测中 ...")
-		if err := c.detectAndStore(b, merged, triggerAt, durationMs); err != nil {
+		if err := c.detectAndStore(b, merged, triggerAt, durationMs, iterations); err != nil {
 			c.logf("business %s: detect failed: %v", b.Name, err)
 			prog.step("检测失败: %v", err)
 			failed = true
@@ -431,7 +433,7 @@ func (c *Center) triggerBusinessMode(b *Business, reschedule bool, reason string
 	c.mu.Lock()
 	if failed {
 		b.CyclesFailed++
-		c.writeFailedCycle(b, triggerAt, durationMs, reason, failureReason)
+		c.writeFailedCycle(b, triggerAt, durationMs, reason, failureReason, iterations)
 	} else {
 		b.CyclesTotal++
 	}
@@ -482,8 +484,8 @@ func roundReported(d *Daemon, triggerAt time.Time, token string) bool {
 	return true
 }
 
-func (c *Center) triggerDaemon(d *Daemon, token string) {
-	body := map[string]string{"round_token": token}
+func (c *Center) triggerDaemon(d *Daemon, token string, iterations int) {
+	body := map[string]any{"round_token": token, "iterations": iterations}
 	_, _ = doJSON(http.MethodPost, d.BaseURL()+"/daemon/trigger", body, d.Key)
 }
 
@@ -493,37 +495,6 @@ func businessIterations(b *Business) int {
 		return b.Iterations
 	}
 	return defaultBusinessIterations
-}
-
-// iterationsTarget is a snapshot of a daemon's control endpoint + key, taken
-// under c.mu so the fan-out does not race with matching/mutating the daemon.
-type iterationsTarget struct {
-	url string
-	key string
-}
-
-// pushIterations fans the value out to the given daemons concurrently. A daemon
-// that is offline counts as failed; it receives the value again on its next
-// match (the match request carries the business iterations).
-func pushIterations(targets []iterationsTarget, iterations int) (pushed, failed int) {
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, t := range targets {
-		wg.Add(1)
-		go func(t iterationsTarget) {
-			defer wg.Done()
-			_, err := doJSON(http.MethodPost, t.url, map[string]int{"iterations": iterations}, t.key)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				failed++
-			} else {
-				pushed++
-			}
-		}(t)
-	}
-	wg.Wait()
-	return pushed, failed
 }
 
 // mergeOpMetric merges only the op_metric reported in the CURRENT round.
@@ -557,7 +528,7 @@ func (c *Center) mergeOpMetric(b *Business, triggerAt time.Time, token string) (
 // op_metric is materialized to a temp dir and re-used through the existing
 // file-backed detection path, so host-level (slow-CPU / cross-node) detection
 // and the report's cross-node sections work exactly as in a daemon.
-func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt time.Time, durationMs int64) error {
+func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt time.Time, durationMs int64, iterations int) error {
 	// Detection uses process-wide config globals (FilePath + thresholds), so
 	// serialize it across businesses to avoid cross-business races.
 	c.detectMu.Lock()
@@ -606,7 +577,7 @@ func (c *Center) detectAndStore(b *Business, op detector.OpMetric, startedAt tim
 	}
 
 	dir := startedAt.Format("20060102-150405")
-	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, status, startedAt, durationMs, len(op)); err != nil {
+	if err := c.writeBusinessResult(b, dir, nodeOut, reportText, op, summary, status, iterations, startedAt, durationMs, len(op)); err != nil {
 		return fmt.Errorf("store result: %w", err)
 	}
 	c.logf("business %s: detection done (%d ranks, %d cal anomalies)", b.Name, len(validRanks), len(result["cal"]))
@@ -700,7 +671,7 @@ func writeGlobalRankCSV(path string, g any) error {
 // results dir, mirroring a single daemon's per-cycle archive shape: result JSON,
 // text report, the merged op_metric JSON, plus a cycle.json (ts + trigger time +
 // duration + per-category anomaly counts) for the per-business history.
-func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, status map[string]string, startedAt time.Time, durationMs int64, worldSize int) error {
+func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.NodeOutput, reportText string, op detector.OpMetric, summary map[string]int, status map[string]string, iterations int, startedAt time.Time, durationMs int64, worldSize int) error {
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(filepath.Join(base, "analysis_result"), 0o755); err != nil {
 		return err
@@ -723,13 +694,14 @@ func (c *Center) writeBusinessResult(b *Business, dirRel string, nodeOut *utils.
 		"world_size":      worldSize,
 		"summary":         summary,
 		"category_status": status,
+		"iterations":      iterations,
 		"trigger_reason":  b.lastTriggerReason,
 		"failed":          false,
 	}, "", "  ")
 	return os.WriteFile(filepath.Join(base, "cycle.json"), meta, 0o644)
 }
 
-func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs int64, triggerReason, failureReason string) {
+func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs int64, triggerReason, failureReason string, iterations int) {
 	dirRel := startedAt.Format("20060102-150405")
 	base := filepath.Join(c.cfg.DataDir, b.Name, dirRel)
 	if err := os.MkdirAll(base, 0o755); err != nil {
@@ -741,6 +713,7 @@ func (c *Center) writeFailedCycle(b *Business, startedAt time.Time, durationMs i
 		"duration_ms":    durationMs,
 		"world_size":     0,
 		"summary":        nil,
+		"iterations":     iterations,
 		"trigger_reason": triggerReason,
 		"failure_reason": failureReason,
 		"failed":         true,

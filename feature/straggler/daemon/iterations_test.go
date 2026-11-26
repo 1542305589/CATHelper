@@ -48,7 +48,7 @@ func TestNewDefaultsIterations(t *testing.T) {
 	}
 }
 
-func TestIterationsManagedLocalEditRejected(t *testing.T) {
+func TestIterationsManagedLocalEditAllowedForSelfRun(t *testing.T) {
 	d := New(Config{Iterations: 3}, nil)
 	d.state = "managed"
 	d.matchKey = "secret"
@@ -56,23 +56,11 @@ func TestIterationsManagedLocalEditRejected(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/daemon/iterations", strings.NewReader(`{"iterations":5}`))
 	d.handleDaemonSetIterations(rr, req)
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("local edit while managed status = %d, want 409 (body=%s)", rr.Code, rr.Body.String())
-	}
-	if got := d.Iterations(); got != 3 {
-		t.Fatalf("iterations = %d after rejected edit, want 3", got)
-	}
-
-	// The matched center (correct key) may still change it.
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/daemon/iterations", strings.NewReader(`{"iterations":5}`))
-	req.Header.Set("X-Match-Key", "secret")
-	d.handleDaemonSetIterations(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("center edit status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+		t.Fatalf("local edit while managed status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
 	}
 	if got := d.Iterations(); got != 5 {
-		t.Fatalf("iterations = %d after center edit, want 5", got)
+		t.Fatalf("saved self-run iterations = %d, want 5", got)
 	}
 }
 
@@ -89,13 +77,45 @@ func TestIterationsUnmanagedLocalEditAllowed(t *testing.T) {
 	}
 }
 
-func TestMatchAppliesCenterIterations(t *testing.T) {
-	d := New(Config{Iterations: 3}, nil)
-	if err := d.Match("http://center:8080", "secret", "biz", "n1", 10*time.Minute, 6); err != nil {
+func TestMatchKeepsLocalIterations(t *testing.T) {
+	d := New(Config{Iterations: 5}, nil)
+	if err := d.Match("http://center:8080", "secret", "biz", "n1", 10*time.Minute); err != nil {
 		t.Fatalf("Match: %v", err)
 	}
-	if got := d.Iterations(); got != 6 {
-		t.Fatalf("iterations after match = %d, want 6", got)
+	if got := d.Iterations(); got != 5 {
+		t.Fatalf("match must not overwrite the saved self-run value: got %d, want 5", got)
+	}
+}
+
+// /daemon/trigger must carry an explicit per-cycle iteration count.
+func TestTriggerRejectsMissingOrInvalidIterations(t *testing.T) {
+	for _, body := range []string{
+		`{"round_token":"t"}`,
+		`{"iterations":0}`,
+		`{"iterations":-1}`,
+		`{"iterations":101}`,
+		`{"iterations":2}`, // <3 without --allow-low-iterations
+	} {
+		d := New(Config{Iterations: 3}, nil)
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/daemon/trigger", strings.NewReader(body))
+		d.handleDaemonTrigger(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, want 400 (resp=%s)", body, rr.Code, rr.Body.String())
+		}
+		d.mu.Lock()
+		started := d.cycleInFlight
+		d.mu.Unlock()
+		if started {
+			t.Fatalf("body %s started a cycle, want rejection", body)
+		}
+	}
+}
+
+func TestCycleSummaryIncludesIterations(t *testing.T) {
+	summary := toCycleSummary(&CycleResult{ID: 1, Iterations: 7})
+	if summary == nil || summary.Iterations != 7 {
+		t.Fatalf("cycle summary iterations = %+v, want 7", summary)
 	}
 }
 

@@ -33,7 +33,7 @@ type Daemon struct {
 	mu                 sync.Mutex
 	state              string            // "running" | "paused" | "managed"
 	interval           time.Duration     // current cycle period (POST /daemon/interval updates it)
-	iterations         int               // dyno nputrace iterations for the NEXT cycle (POST /daemon/iterations updates it)
+	iterations         int               // saved self-run iterations (POST /daemon/iterations updates it); center triggers carry their own value
 	allowLowIterations bool              // --allow-low-iterations: permit iterations <3 at runtime (debug-only)
 	thresholds         config.Thresholds // current detection thresholds (CLI initial, POST /daemon/thresholds updates them)
 	nextRun            time.Time         // when the next cycle starts (zero when paused)
@@ -159,7 +159,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-d.timer.C:
 			d.mu.Lock()
 			if d.state == "running" {
-				d.startCycle("")
+				d.startCycle(d.iterations, "")
 				// Re-anchor both the display and the actual timer to the next
 				// interval. (startCycle already sets nextRun unless a cycle
 				// was in flight and this tick was skipped.)
@@ -176,8 +176,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 // startCycle launches one cycle if none is in flight (single-flight: a long
-// cycle skips the ticks that land while it runs). Caller holds d.mu.
-func (d *Daemon) startCycle(roundToken string) {
+// cycle skips the ticks that land while it runs) using iterations for THIS
+// cycle. Caller holds d.mu.
+func (d *Daemon) startCycle(iterations int, roundToken string) {
 	if d.cycleInFlight {
 		return
 	}
@@ -186,7 +187,7 @@ func (d *Daemon) startCycle(roundToken string) {
 	id := d.cycleID
 	d.nextRun = time.Now().Add(d.interval)
 	go func() {
-		d.runCycle(id, roundToken)
+		d.runCycle(id, iterations, roundToken)
 		d.mu.Lock()
 		d.cycleInFlight = false
 		d.mu.Unlock()
@@ -195,8 +196,8 @@ func (d *Daemon) startCycle(roundToken string) {
 
 // runCycle executes one collect→convert→parse→analyse pass and records the
 // CycleResult (success or error) into the store.
-func (d *Daemon) runCycle(id int, roundToken string) {
-	cr := &CycleResult{ID: id, StartedAt: time.Now(), RoundToken: roundToken}
+func (d *Daemon) runCycle(id, iterations int, roundToken string) {
+	cr := &CycleResult{ID: id, StartedAt: time.Now(), Iterations: iterations, RoundToken: roundToken}
 	d.progress.begin(id)
 	d.progress.step("触发采集 (dyno)")
 	// This cycle's analysed results (combined JSON, meta, report) are written
@@ -230,7 +231,7 @@ func (d *Daemon) runCycle(id int, roundToken string) {
 	}()
 
 	// 1. Collect: dyno trigger -> verify commandStatus -> wait for the dump.
-	if err := d.triggerCollection(); err != nil {
+	if err := d.triggerCollection(cr.Iterations); err != nil {
 		cr.Error = err.Error()
 		return
 	}
@@ -568,24 +569,34 @@ func (d *Daemon) SetInterval(sec int64) error {
 	return nil
 }
 
-// Iterations returns the dyno nputrace iteration count used by the next cycle.
+// Iterations returns the saved self-run iteration count (used by the daemon's
+// own timer/manual trigger when it is not managed by a center).
 func (d *Daemon) Iterations() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.iterations
 }
 
-// SetIterations updates the dyno nputrace iteration count for subsequent cycles,
-// validating [1, 100]. Values below 3 are only accepted when the daemon was
-// started with --allow-low-iterations (a single idle step can make a round look
-// normal); they are logged as a warning. The currently running cycle keeps the
-// value it captured at cycle start.
-func (d *Daemon) SetIterations(n int) error {
+// validateIterations enforces the iteration range and the low-iteration
+// debug guardrail shared by the saved value and per-trigger overrides.
+func (d *Daemon) validateIterations(n int) error {
 	if n < 1 || n > 100 {
 		return fmt.Errorf("iterations out of range [1, 100]")
 	}
 	if n < 3 && !d.allowLowIterations {
 		return fmt.Errorf("iterations below 3 require --allow-low-iterations at daemon startup")
+	}
+	return nil
+}
+
+// SetIterations updates the daemon's saved self-run iteration count, validating
+// [1, 100]. Values below 3 are only accepted when the daemon was started with
+// --allow-low-iterations. This value is used by the daemon's own timer/manual
+// trigger when it is not managed by a center; a center-triggered cycle uses the
+// value carried by the trigger request instead.
+func (d *Daemon) SetIterations(n int) error {
+	if err := d.validateIterations(n); err != nil {
+		return err
 	}
 	d.mu.Lock()
 	d.iterations = n
@@ -596,32 +607,24 @@ func (d *Daemon) SetIterations(n int) error {
 	return nil
 }
 
-// applyCenterIterations applies a center-provided value; the caller holds d.mu.
-// Values below 3 are ignored unless this daemon was started with
-// --allow-low-iterations, so a custom/legacy center cannot bypass the guardrail.
-func (d *Daemon) applyCenterIterations(n int) {
-	if n < 1 || n > 100 {
-		return
-	}
-	if n < 3 && !d.allowLowIterations {
-		d.logf("WARNING: ignoring center iterations=%d (<3) without --allow-low-iterations", n)
-		return
-	}
-	d.iterations = n
-}
-
-// Trigger runs one cycle immediately; returns an error when paused or when a
-// cycle is already in flight (HTTP 409). In "running" the timer is re-anchored
-// so the next automatic cycle is one interval after this manual one; in
-// "managed" the timer stays stopped (the center schedules the cycles).
+// Trigger runs one cycle immediately with the daemon's saved iterations;
+// returns an error when paused or when a cycle is already in flight (HTTP 409).
+// In "running" the timer is re-anchored so the next automatic cycle is one
+// interval after this manual one; in "managed" the timer stays stopped (the
+// center schedules the cycles).
 func (d *Daemon) Trigger() error {
-	return d.TriggerWithToken("")
+	return d.TriggerWithOptions(d.Iterations(), "")
 }
 
-// TriggerWithToken is Trigger with a center-issued round token: the token is
-// carried through the cycle and echoed back with the op_metric report so the
-// center can reject a late report from an older round.
-func (d *Daemon) TriggerWithToken(roundToken string) error {
+// TriggerWithOptions runs one cycle with an explicit per-cycle iteration count.
+// The value is used by THIS cycle only and does not modify the daemon's saved
+// self-run value. roundToken is carried through the cycle and echoed back with
+// the op_metric report so the center can reject a late report from an older
+// round.
+func (d *Daemon) TriggerWithOptions(iterations int, roundToken string) error {
+	if err := d.validateIterations(iterations); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "paused" {
@@ -630,7 +633,7 @@ func (d *Daemon) TriggerWithToken(roundToken string) error {
 	if d.cycleInFlight {
 		return fmt.Errorf("a cycle is already running")
 	}
-	d.startCycle(roundToken)
+	d.startCycle(iterations, roundToken)
 	if d.state == "running" {
 		d.resetTimer()
 	}
@@ -658,7 +661,7 @@ func (d *Daemon) Stop() {
 // Match establishes a managed relationship with a center. The daemon stops
 // self-scheduling (state=managed), records the center/key/business/daemon and
 // starts the reverse heartbeat. Returns an error if already managed.
-func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time.Duration, iterations int) error {
+func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time.Duration) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == "managed" {
@@ -673,9 +676,6 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time
 		if interval > 0 {
 			d.centerInterval = interval
 		}
-		if iterations > 0 {
-			d.applyCenterIterations(iterations)
-		}
 		d.logf("re-matched by center %s (business=%s daemon=%s)", centerAddr, business, daemonID)
 		return nil
 	}
@@ -685,9 +685,6 @@ func (d *Daemon) Match(centerAddr, key, business, daemonID string, interval time
 	d.daemonID = daemonID
 	if interval > 0 {
 		d.centerInterval = interval
-	}
-	if iterations > 0 {
-		d.applyCenterIterations(iterations)
 	}
 	d.state = "managed"
 	d.nextRun = time.Time{}

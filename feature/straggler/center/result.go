@@ -17,6 +17,7 @@ type cycleInfo struct {
 	WorldSize      int               `json:"world_size"`
 	Summary        map[string]int    `json:"summary"`
 	CategoryStatus map[string]string `json:"category_status,omitempty"`
+	Iterations     int               `json:"iterations,omitempty"`
 	TriggerReason  string            `json:"trigger_reason,omitempty"`
 	FailureReason  string            `json:"failure_reason,omitempty"`
 	Failed         bool              `json:"failed,omitempty"`
@@ -66,6 +67,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				WorldSize      int               `json:"world_size"`
 				Summary        map[string]int    `json:"summary"`
 				CategoryStatus map[string]string `json:"category_status"`
+				Iterations     int               `json:"iterations"`
 				TriggerReason  string            `json:"trigger_reason"`
 				FailureReason  string            `json:"failure_reason"`
 				Failed         bool              `json:"failed"`
@@ -81,6 +83,7 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 					ci.Summary = m.Summary
 				}
 				ci.CategoryStatus = m.CategoryStatus
+				ci.Iterations = m.Iterations
 			}
 		}
 		out = append(out, ci)
@@ -91,17 +94,22 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 	c.mu.Lock()
 	var snap progressSnapshot
 	haveProgress := false
-	if b := c.biz[name]; b != nil && b.progress != nil {
-		snap = b.progress.snapshot()
-		haveProgress = true
+	inflightIterations := 0
+	if b := c.biz[name]; b != nil {
+		inflightIterations = businessIterations(b)
+		if b.progress != nil {
+			snap = b.progress.snapshot()
+			haveProgress = true
+		}
 	}
 	c.mu.Unlock()
 	if haveProgress && snap.InFlight {
 		out = append([]cycleInfo{{
-			Ts:        snap.StartTs,
-			StartedAt: snap.Started,
-			Running:   true,
-			Summary:   map[string]int{},
+			Ts:         snap.StartTs,
+			StartedAt:  snap.Started,
+			Running:    true,
+			Summary:    map[string]int{},
+			Iterations: inflightIterations,
 		}}, out...)
 	}
 	return out

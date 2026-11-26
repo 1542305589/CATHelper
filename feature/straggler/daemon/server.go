@@ -419,15 +419,11 @@ func (d *Daemon) handleDaemonInterval(w http.ResponseWriter, r *http.Request) {
 	}{req.IntervalSec})
 }
 
-// handleDaemonSetIterations changes the dyno nputrace iteration count for the
-// next cycle. When the daemon is managed by a center, only the matched center
-// (correct X-Match-Key) may change it; local edits get 409 so the center stays
-// the single source of truth. Applies from the next cycle onward.
+// handleDaemonSetIterations changes the daemon's saved self-run iteration count.
+// It is always allowed (including while managed): center-triggered cycles carry
+// their own iteration count and are unaffected, so this only changes what the
+// daemon will use after it leaves managed mode (or if it is unmanaged).
 func (d *Daemon) handleDaemonSetIterations(w http.ResponseWriter, r *http.Request) {
-	if d.IsManaged() && !d.KeyMatches(r.Header.Get("X-Match-Key")) {
-		http.Error(w, "managed: iterations is controlled by the center", http.StatusConflict)
-		return
-	}
 	var req struct {
 		Iterations int `json:"iterations"`
 	}
@@ -468,13 +464,21 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 	if !d.requireManagedKey(w, r) {
 		return
 	}
-	// Optional body: {"round_token": "..."}. Old centers send no body; the
-	// daemon then reports without a token and the center falls back to time.
+	// Required body: {"iterations": N, "round_token": "..."}. The iteration
+	// count is per-cycle: it does not change the daemon's saved self-run value.
 	var req struct {
+		Iterations int    `json:"iterations"`
 		RoundToken string `json:"round_token"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	if err := d.TriggerWithToken(req.RoundToken); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `invalid body: {"iterations": 3, "round_token": "..."}`, http.StatusBadRequest)
+		return
+	}
+	if err := d.validateIterations(req.Iterations); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := d.TriggerWithOptions(req.Iterations, req.RoundToken); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -501,15 +505,14 @@ func (d *Daemon) handleDaemonMatch(w http.ResponseWriter, r *http.Request) {
 		Business    string `json:"business"`
 		Daemon      string `json:"daemon"`
 		IntervalSec int64  `json:"interval_sec"`
-		Iterations  int    `json:"iterations"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CenterAddr == "" || req.Key == "" {
-		http.Error(w, `invalid body: {"center_addr","key","business","daemon","interval_sec","iterations"}`, http.StatusBadRequest)
+		http.Error(w, `invalid body: {"center_addr","key","business","daemon","interval_sec"}`, http.StatusBadRequest)
 		return
 	}
 	// The center may self-report a loopback/unspecified host; override the host
 	// with the request's source IP so the reverse heartbeat reaches it.
-	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon, time.Duration(req.IntervalSec)*time.Second, req.Iterations); err != nil {
+	if err := d.Match(resolveCenterAddr(req.CenterAddr, r), req.Key, req.Business, req.Daemon, time.Duration(req.IntervalSec)*time.Second); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -593,6 +596,7 @@ func toCycleSummary(c *CycleResult) *cycleSummary {
 		DumpDir:        c.DumpDir,
 		Summary:        c.Summary,
 		CategoryStatus: c.CategoryStatus,
+		Iterations:     c.Iterations,
 		KPIStatus:      c.KPIStatus,
 		Error:          c.Error,
 	}

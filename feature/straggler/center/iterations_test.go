@@ -15,11 +15,13 @@ import (
 
 // fakeControlDaemon records the control requests the center sends to a daemon.
 type fakeControlDaemon struct {
-	mu        sync.Mutex
-	lastIter  int
-	lastKey   string
-	matchBody map[string]any
-	srv       *httptest.Server
+	mu          sync.Mutex
+	lastIter    int
+	lastKey     string
+	matchBody   map[string]any
+	triggerBody map[string]any
+	triggerKey  string
+	srv         *httptest.Server
 }
 
 func newFakeControlDaemon(t *testing.T) *fakeControlDaemon {
@@ -42,6 +44,12 @@ func newFakeControlDaemon(t *testing.T) *fakeControlDaemon {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.matchBody = body
 			writeJSON(w, map[string]any{"status": "matched", "collect_wait": 60})
+		case "/daemon/trigger":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.triggerBody = body
+			f.triggerKey = r.Header.Get("X-Match-Key")
+			writeJSON(w, map[string]string{"status": "triggered"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -70,6 +78,12 @@ func (f *fakeControlDaemon) snapshot() (int, string, map[string]any) {
 	return f.lastIter, f.lastKey, f.matchBody
 }
 
+func (f *fakeControlDaemon) triggerSnapshot() (map[string]any, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.triggerBody, f.triggerKey
+}
+
 func newIterTestCenter(t *testing.T) *Center {
 	t.Helper()
 	c := New(Config{DataDir: t.TempDir(), Port: 1})
@@ -92,7 +106,9 @@ func TestAddBusinessDefaultsIterations(t *testing.T) {
 	}
 }
 
-func TestBusinessIterationsAPIPushesToDaemons(t *testing.T) {
+// The business value is used only by center triggers; it must NOT be pushed to
+// daemons (each daemon keeps its own self-run value).
+func TestBusinessIterationsAPIUpdatesOnlyBusiness(t *testing.T) {
 	f := newFakeControlDaemon(t)
 	host, port := f.addr(t)
 	c := newIterTestCenter(t)
@@ -107,8 +123,8 @@ func TestBusinessIterationsAPIPushesToDaemons(t *testing.T) {
 		t.Fatalf("business iterations = %d, want 5", b.Iterations)
 	}
 	got, key, _ := f.snapshot()
-	if got != 5 || key != "secret" {
-		t.Fatalf("daemon got iterations=%d key=%q, want 5/secret", got, key)
+	if got != 0 || key != "" {
+		t.Fatalf("daemon received a push (iterations=%d key=%q), want none", got, key)
 	}
 
 	rr = serveCenter(c, http.MethodPost, "/center/business/biz/iterations", `{"iterations":0}`, nil)
@@ -151,7 +167,9 @@ func TestLoadDefaultsBusinessIterations(t *testing.T) {
 	}
 }
 
-func TestMatchRequestCarriesBusinessIterations(t *testing.T) {
+// The match request must not carry iterations: matching does not overwrite the
+// daemon's saved self-run value.
+func TestMatchRequestDoesNotPushIterations(t *testing.T) {
 	f := newFakeControlDaemon(t)
 	host, port := f.addr(t)
 	c := newIterTestCenter(t)
@@ -164,8 +182,31 @@ func TestMatchRequestCarriesBusinessIterations(t *testing.T) {
 	if body == nil {
 		t.Fatal("daemon did not receive /daemon/match")
 	}
-	got, _ := body["iterations"].(float64)
-	if int(got) != 4 {
-		t.Fatalf("match iterations = %v, want 4", body["iterations"])
+	if _, ok := body["iterations"]; ok {
+		t.Fatalf("match body must not push iterations: %v", body["iterations"])
+	}
+}
+
+// Every center trigger carries the current business iteration count and the
+// round token, authenticated with the match key.
+func TestTriggerDaemonCarriesIterations(t *testing.T) {
+	f := newFakeControlDaemon(t)
+	host, port := f.addr(t)
+	c := newIterTestCenter(t)
+	d := &Daemon{IP: host, Port: port, Key: "secret"}
+	c.triggerDaemon(d, "round-1", 5)
+
+	body, key := f.triggerSnapshot()
+	if body == nil {
+		t.Fatal("daemon did not receive /daemon/trigger")
+	}
+	if got, _ := body["iterations"].(float64); int(got) != 5 {
+		t.Fatalf("trigger iterations = %v, want 5", body["iterations"])
+	}
+	if got, _ := body["round_token"].(string); got != "round-1" {
+		t.Fatalf("trigger round_token = %q, want round-1", body["round_token"])
+	}
+	if key != "secret" {
+		t.Fatalf("trigger key = %q, want secret", key)
 	}
 }

@@ -31,7 +31,7 @@ type Daemon struct {
 	lastReportAt       time.Time         // when the last report arrived
 	lastRoundToken     string            // round token that came with lastOpMetric ("" = legacy daemon)
 	tokenCapable       bool              // daemon echoes the round token (declared at match time)
-	reportedIterations int               // daemon-reported iterations (0 = unknown / old build)
+	reportedIterations int               // daemon-reported self-run iterations (0 = unknown / old build)
 }
 
 // Addr returns "ip:port".
@@ -53,7 +53,7 @@ type Business struct {
 	VLLMMetrics            string            `json:"vllm_metrics,omitempty"`              // vllm /metrics endpoint URL (one per business)
 	Thresholds             config.Thresholds `json:"thresholds"`                          // merged-detection thresholds (zero = inherit center default)
 	KPIDetectIntervalSec   int64             `json:"kpi_interval_sec,omitempty"`          // KPI detection period (independent of profiler)
-	Iterations             int               `json:"iterations,omitempty"`                // dyno nputrace iterations pushed to every daemon (0 = legacy, defaults to 3)
+	Iterations             int               `json:"iterations,omitempty"`                // center trigger iterations, sent with every /daemon/trigger
 	KPINSigma              KPINSigma         `json:"kpi_nsigma,omitempty"`                // per-metric KPI n-sigma thresholds
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio,omitempty"` // anomaly points admitted into reference (0..1)
 

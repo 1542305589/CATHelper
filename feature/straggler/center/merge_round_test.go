@@ -147,7 +147,7 @@ func TestWriteFailedCycleRecordsReasonAndNoArtifacts(t *testing.T) {
 	b := &Business{Name: "biz"}
 	startedAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
 	const reason = "no op_metric reported in round"
-	c.writeFailedCycle(b, startedAt, 1234, "timer", reason)
+	c.writeFailedCycle(b, startedAt, 1234, "timer", reason, 5)
 
 	cycleDir := filepath.Join(dir, "biz", startedAt.Format("20060102-150405"))
 	raw, err := os.ReadFile(filepath.Join(cycleDir, "cycle.json"))
@@ -169,6 +169,9 @@ func TestWriteFailedCycleRecordsReasonAndNoArtifacts(t *testing.T) {
 	}
 	if s, ok := m["summary"]; !ok || s != nil {
 		t.Fatalf("summary = %v, want nil", m["summary"])
+	}
+	if iter, _ := m["iterations"].(float64); int(iter) != 5 {
+		t.Fatalf("iterations = %v, want 5", m["iterations"])
 	}
 
 	for _, name := range []string{

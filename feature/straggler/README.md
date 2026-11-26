@@ -131,13 +131,13 @@ cd feature/straggler
 | `GET /straggler/results/history?limit=N` | 本次会话周期摘要（倒序） |
 | `GET /straggler/report/latest` | 最近一轮 Profiler 文本报告 |
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） |
-| `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） |
+| `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；已有周期在跑 → 409） |
 | `POST /daemon/stop` | 优雅关闭守护进程（删除全部落盘结果） |
 
 ```bash
 curl -s localhost:8080/status | jq
 curl -s localhost:8080/straggler/results/latest | jq
-curl -s -X POST localhost:8080/daemon/trigger
+curl -s -X POST localhost:8080/daemon/trigger -H 'Content-Type: application/json' -d '{"iterations": 3}'
 ```
 
 ### 2.2 拉起训练/推理业务
@@ -153,7 +153,7 @@ MSMONITOR_USE_DAEMON=1 vllm serve /path/to/model ...
 守护进程模式下，通过 curl 触发常驻进程开启一轮数据采集（`POST /daemon/trigger`；也可等待 `--interval` 周期自动触发）：
 
 ```bash
-curl -s -X POST localhost:8080/daemon/trigger
+curl -s -X POST localhost:8080/daemon/trigger -H 'Content-Type: application/json' -d '{"iterations": 3}'
 ```
 
 触发后整条链路**自动完成，无需人工干预**：
@@ -325,11 +325,11 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） | — |
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
-| `POST /daemon/iterations` | 修改 dyno 采集迭代数（下一轮生效；托管时仅中心可改） | `{"iterations": 3}`（3–100；<3 需 daemon 启动时加 `--allow-low-iterations`） |
+| `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改；中心触发以中心下发为准） | `{"iterations": 3}`（3–100；<3 需 daemon 启动时加 `--allow-low-iterations`） |
 | `GET /daemon/thresholds` | 读取当前检测阈值 | — |
 | `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
-| `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
-| `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon","interval_sec","iterations"}` |
+| `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；已有周期在跑 → 409） | `{"iterations": 3, "round_token": "..."}` |
+| `POST /daemon/match` | 被中心节点匹配（进入 managed 托管） | `{"center_addr","key","business","daemon","interval_sec"}` |
 | `POST /daemon/unmatch` | 解除托管（回到 running，需 `X-Match-Key`） | — |
 | `GET /daemon/match_status` | 查询匹配状态（`X-Match-Key` 匹配则确认归属） | — |
 
@@ -433,7 +433,7 @@ curl -s -X POST localhost:8080/daemon/stop
 
 ### 5.3 托管（managed）语义
 
-- 进入 managed 后，守护进程**停止自主调度**：`/daemon/start`、`/daemon/pause`、`/daemon/interval` 被拒绝；`/daemon/trigger` 必须带中心密钥（`X-Match-Key`）才能触发；`/daemon/iterations` 仅允许持有中心密钥的调用（本地控制台会禁用该输入），保证业务级参数只有中心一个权威来源。
+- 进入 managed 后，守护进程**停止自主调度**：`/daemon/start`、`/daemon/pause`、`/daemon/interval` 被拒绝；`/daemon/trigger` 必须带中心密钥（`X-Match-Key`）和 `iterations`。中心触发的每一轮都用请求里的 `iterations`，不会修改守护进程保存的自运行值；`/daemon/iterations` 在托管时仍可本地修改，但只影响退出托管后的手动/计时器自运行。
 - 中心按业务周期**并发 trigger** 业务内所有守护进程：各守护进程「采集 → 分析 → 本地检测 → 上报 op_metric」，中心收齐（或 `max(各守护进程 collect-wait)+60s` 超时）后合并检测。
 - **双向心跳**：中心每 5s 探守护进程 `/healthz` + `/daemon/match_status`（带密钥）；守护进程反向探中心 `/center/healthz`，中心挂则自动解除匹配回 `running`。
 
@@ -466,7 +466,7 @@ curl -s -X POST localhost:8080/daemon/stop
 | `POST /center/business/{name}/pause` | 暂停业务调度 |
 | `POST /center/business/{name}/start` | 恢复业务调度 |
 | `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |
-| `POST /center/business/{name}/iterations` | 修改业务采集迭代数并下发到所有守护进程 `{"iterations":3}`（3–100；离线节点重连后自动同步） |
+| `POST /center/business/{name}/iterations` | 修改中心触发迭代数（随每次 `/daemon/trigger` 下发，不修改守护进程自运行值） `{"iterations":3}`（3–100） |
 | `POST /center/business/{name}/thresholds` | 修改业务阈值 `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
 | `POST /center/business/{name}/vllm` | 设置业务 vllm `/metrics` 端点 `{"url"}` |
 | `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |

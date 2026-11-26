@@ -110,7 +110,7 @@
           采集迭代数:
           <input id="iterationsInput" type="number" min="3" max="100">
           <button id="btnIterations">设置</button>
-          <span id="iterationsHint" class="unit" style="display:none;">由中心统一管理</span>
+          <span id="iterationsHint" class="unit" style="display:none;">自运行默认值；中心触发以中心下发为准</span>
         </div>
       </div>
     </div>
@@ -149,7 +149,7 @@
       <h2>周期历史 <span id="histCount" style="color:var(--muted);font-weight:400;"></span></h2>
       <div style="overflow:auto; max-height:36vh;">
         <table>
-          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>DB</th><th>异常摘要</th><th>KPI</th><th>状态</th></tr></thead>
+          <thead><tr><th>#</th><th>开始时间</th><th>耗时</th><th>DB</th><th>状态</th><th>异常摘要</th><th>KPI</th><th>迭代数</th></tr></thead>
           <tbody id="histBody"></tbody>
         </table>
       </div>
@@ -242,8 +242,8 @@ function renderStatus(s) {
   $('vKpiDir').textContent = s.kpi_dir || '（未启用）';
   if (!$('intervalInput').value) $('intervalInput').value = s.interval_sec || 600;
   if (!$('iterationsInput').value) $('iterationsInput').value = s.iterations || 3;
-  $('iterationsInput').disabled = !!s.managed;
-  $('btnIterations').disabled = !!s.managed;
+  $('iterationsInput').disabled = false;
+  $('btnIterations').disabled = false;
   $('iterationsHint').style.display = s.managed ? 'inline' : 'none';
   $('btnStart').disabled = s.state === 'running';
   $('btnPause').disabled = s.state !== 'running';
@@ -288,12 +288,14 @@ function renderHistory(cycles) {
       timeFmt(c.started_at),
       c.running ? '进行中…' : msFmt(c.duration_ms),
       c.dbs != null ? c.dbs : '—',
-      c.running ? '<span class="ptag on">运行中</span>' : (c.error ? `<span class="err">失败</span>` : renderSummary(null, c.summary, c.category_status)),
+      c.running ? '<span class="ptag on">运行中</span>' : (c.error ? '<span class="err">失败</span>' : '完成'),
+      c.running ? '—' : renderSummary(null, c.summary, c.category_status),
       c.kpi_status || '—',
+      c.iterations ? c.iterations : '—',
     ];
     cells.forEach((h, i) => {
       const td = document.createElement('td');
-      if (i === 4) td.innerHTML = h; else td.textContent = h;
+      if (i === 4 || i === 5) td.innerHTML = h; else td.textContent = h;
       tr.appendChild(td);
     });
     $('histBody').appendChild(tr);
@@ -379,7 +381,11 @@ async function control(kind) {
     if (kind === 'stop') {
       if (!confirm('确定关闭守护进程？关闭后将删除所有落盘结果。')) return;
     }
-    await post('/daemon/' + kind);
+    // /daemon/trigger now requires the per-cycle iteration count.
+    const body = kind === 'trigger'
+      ? { iterations: parseInt($('iterationsInput').value, 10) || 3 }
+      : undefined;
+    await post('/daemon/' + kind, body);
     toast('已发送：' + kind, true);
     setTimeout(refresh, 500);
   } catch (e) {

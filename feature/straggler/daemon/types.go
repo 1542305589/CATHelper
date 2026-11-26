@@ -59,6 +59,7 @@ type CycleResult struct {
 	Result         *utils.NodeOutput         `json:"-"`
 	Summary        map[string]int            `json:"summary"`
 	CategoryStatus map[string]string         `json:"category_status,omitempty"` // cal/comm/cpu -> ok|partial|no_data
+	Iterations     int                       `json:"iterations"`                // dyno nputrace iterations used by THIS cycle
 	Report         string                    `json:"-"`
 	RoundToken     string                    `json:"-"` // center-issued round token, echoed back with the report
 	Error          string                    `json:"error,omitempty"`
@@ -138,6 +139,7 @@ type cycleSummary struct {
 	DumpDir        string            `json:"dump_dir"`
 	Summary        map[string]int    `json:"summary"`
 	CategoryStatus map[string]string `json:"category_status,omitempty"`
+	Iterations     int               `json:"iterations"`
 	KPIStatus      string            `json:"kpi_status,omitempty"`
 	Error          string            `json:"error,omitempty"`
 	Running        bool              `json:"running,omitempty"` // in-flight cycle, prepended to history

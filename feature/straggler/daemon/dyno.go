@@ -140,10 +140,9 @@ func parseDynologPort() int {
 
 // triggerCollection runs the dyno nputrace command that starts profiler capture
 // on the matched vllm processes, and verifies it took effect via commandStatus.
-func (d *Daemon) triggerCollection() error {
+func (d *Daemon) triggerCollection(iterations int) error {
 	d.mu.Lock()
 	port := d.dynologPort
-	iterations := d.iterations
 	d.mu.Unlock()
 
 	args := []string{

@@ -75,14 +75,14 @@ type daemonStatus struct {
 	Port        int    `json:"port"`
 	State       string `json:"state"` // healthy / unmatched / other / disconnected
 	CollectWait int64  `json:"collect_wait"`
-	Iterations  int    `json:"iterations,omitempty"` // daemon-reported current value (0 = unknown / old build)
+	Iterations  int    `json:"iterations,omitempty"` // daemon's saved self-run value (0 = unknown / old build)
 }
 
 // businessStatus is the web-visible view of one business.
 type businessStatus struct {
 	Name                   string            `json:"name"`
 	IntervalSec            int64             `json:"interval_sec"`
-	Iterations             int               `json:"iterations"` // dyno nputrace iterations applied to every daemon
+	Iterations             int               `json:"iterations"` // center trigger iterations for this business
 	KPIDetectIntervalSec   int64             `json:"kpi_interval_sec"`
 	KPINSigma              KPINSigma         `json:"kpi_nsigma"`
 	KPIReferenceAdmitRatio float64           `json:"kpi_reference_admit_ratio"`
@@ -563,10 +563,9 @@ func (c *Center) handleBusinessInterval(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]any{"interval_sec": req.IntervalSec})
 }
 
-// handleBusinessIterations updates the dyno nputrace iteration count for the
-// whole business and pushes it to every matched daemon. A daemon that is offline
-// now receives the value on its next match (the match request carries it), so
-// the stored business value is the source of truth.
+// handleBusinessIterations updates the business-level iteration count used by
+// EVERY center trigger (manual, timer, KPI-triggered). It is carried by the
+// /daemon/trigger request and does not modify any daemon's saved self-run value.
 func (c *Center) handleBusinessIterations(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Iterations int `json:"iterations"`
@@ -584,22 +583,10 @@ func (c *Center) handleBusinessIterations(w http.ResponseWriter, r *http.Request
 		return
 	}
 	b.Iterations = req.Iterations
-	targets := make([]iterationsTarget, 0, len(b.Daemons))
-	for _, d := range b.Daemons {
-		if d.Key == "" {
-			continue // never matched: the next match carries the value
-		}
-		targets = append(targets, iterationsTarget{url: d.BaseURL() + "/daemon/iterations", key: d.Key})
-	}
 	c.save()
 	c.mu.Unlock()
 
-	pushed, failed := pushIterations(targets, req.Iterations)
-	writeJSON(w, map[string]any{
-		"iterations": req.Iterations,
-		"pushed":     pushed,
-		"failed":     failed,
-	})
+	writeJSON(w, map[string]any{"iterations": req.Iterations})
 }
 
 // handleBusinessThresholds updates a business's merged-detection thresholds.

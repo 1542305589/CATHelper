@@ -536,8 +536,8 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | `POST /daemon/pause` | 暂停（在跑周期跑完） | 200 `{"state":"paused"}` | — |
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | 200 `{"status":"stopping"}` | — |
 | `POST /daemon/interval` | 改周期 | 200 `{"interval_sec":N}` | 400 越界 [60,86400] / body 非法 |
-| `POST /daemon/iterations` | 改 dyno 采集迭代数（下一轮生效；托管时需中心密钥） | 200 `{"iterations":N}` | 400 越界 [3,100] / body 非法 / <3 未开 `--allow-low-iterations`；托管且无密钥 409 |
-| `POST /daemon/trigger` | 立即补跑一轮 | 200 `{"status":"triggered"}` | 409 已有周期在跑 / 已暂停 |
+| `POST /daemon/iterations` | 改守护进程自运行迭代数（托管时也可改，只影响退出托管后的自运行） | 200 `{"iterations":N}` | 400 越界 [3,100] / body 非法 / <3 未开 `--allow-low-iterations` |
+| `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；托管时需中心密钥） | 200 `{"status":"triggered"}` | 400 缺 `iterations` / 越界；409 已有周期在跑 / 已暂停 |
 
 **查询数据源 = 本次会话内存 store**：latest/history/{id} 从进程内 store 读（daemon 重启即空，看不到历史；latest/{id} 的 JSON 内容经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 文件读取）；结果在 `--profiler-dir` 之外，`--profiler-dir` 周期结束时整个删除，互不影响。
 

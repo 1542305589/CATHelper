@@ -837,8 +837,8 @@ bash build.sh          # 首次构建
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
 | `POST /daemon/pause` | 暂停（在跑的周期跑完，不再排新的） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
-| `POST /daemon/iterations` | 修改 dyno 采集迭代数（下一轮生效；托管时仅中心可改） | `{"iterations": 3}`（3–100） |
-| `POST /daemon/trigger` | 立即补跑一轮（已有周期在跑 → 409） | — |
+| `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改，只影响退出托管后的自运行） | `{"iterations": 3}`（3–100） |
+| `POST /daemon/trigger` | 立即补跑一轮（必须带 `iterations`；已有周期在跑 → 409） | `{"iterations": 3, "round_token": "..."}` |
 | `POST /daemon/stop` | 优雅关闭守护进程（幂等）：关 HTTP server、等在跑周期结束、清理 dynolog 子进程，并**删除全部 `daemon_results/` 归档结果** | — |
 
 #### 5.6.4 数据落盘与重启
