@@ -32,6 +32,9 @@ type Daemon struct {
 	lastRoundToken     string            // round token that came with lastOpMetric ("" = legacy daemon)
 	tokenCapable       bool              // daemon echoes the round token (declared at match time)
 	reportedIterations int               // daemon-reported self-run iterations (0 = unknown / old build)
+	lastReportStatus   string            // ok / failed / busy / paused ("" = legacy bare map)
+	lastReportReason   string
+	lastReportStage    string
 }
 
 // Addr returns "ip:port".
@@ -95,6 +98,20 @@ const (
 	minBusinessIterations = 3
 	maxBusinessIterations = 100
 )
+
+// p0ReportTimeout is the fixed P0 wait for all daemon reports. It covers the
+// .87 (156s) and .88 stage-A latency. P1 replaces this with the daemon-measured
+// report ETA + 60s (120..1800, default 300).
+const p0ReportTimeout = 480 * time.Second
+
+// roundMeta is the per-round collection summary written to cycle.json/history.
+type roundMeta struct {
+	ReportTimeoutSec int
+	ReportedDaemons  int
+	FailedDaemons    []string
+	Partial          bool
+	ReportLatencyMs  int64
+}
 
 // NormalizedKPIReferenceAdmitRatio fills invalid values with the default.
 func (b *Business) NormalizedKPIReferenceAdmitRatio() float64 {

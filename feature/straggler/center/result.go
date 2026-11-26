@@ -11,17 +11,22 @@ import (
 // history endpoint (ts + trigger time + duration + total rank count +
 // per-category anomaly counts).
 type cycleInfo struct {
-	Ts             string            `json:"ts"`
-	StartedAt      string            `json:"started_at"`
-	DurationMs     int64             `json:"duration_ms"`
-	WorldSize      int               `json:"world_size"`
-	Summary        map[string]int    `json:"summary"`
-	CategoryStatus map[string]string `json:"category_status,omitempty"`
-	Iterations     int               `json:"iterations,omitempty"`
-	TriggerReason  string            `json:"trigger_reason,omitempty"`
-	FailureReason  string            `json:"failure_reason,omitempty"`
-	Failed         bool              `json:"failed,omitempty"`
-	Running        bool              `json:"running,omitempty"` // in-flight round, prepended to history
+	Ts               string            `json:"ts"`
+	StartedAt        string            `json:"started_at"`
+	DurationMs       int64             `json:"duration_ms"`
+	WorldSize        int               `json:"world_size"`
+	Summary          map[string]int    `json:"summary"`
+	CategoryStatus   map[string]string `json:"category_status,omitempty"`
+	Iterations       int               `json:"iterations,omitempty"`
+	ReportTimeoutSec int               `json:"report_timeout_sec,omitempty"`
+	ReportedDaemons  int               `json:"reported_daemons,omitempty"`
+	FailedDaemons    []string          `json:"failed_daemons,omitempty"`
+	Partial          bool              `json:"partial,omitempty"`
+	ReportLatencyMs  int64             `json:"report_latency_ms,omitempty"`
+	TriggerReason    string            `json:"trigger_reason,omitempty"`
+	FailureReason    string            `json:"failure_reason,omitempty"`
+	Failed           bool              `json:"failed,omitempty"`
+	Running          bool              `json:"running,omitempty"` // in-flight round, prepended to history
 }
 
 // latestResultDir returns the newest per-cycle result dir under a business, or
@@ -62,15 +67,20 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 		ci := cycleInfo{Ts: ts, Summary: map[string]int{}}
 		if raw, err := os.ReadFile(filepath.Join(base, ts, "cycle.json")); err == nil {
 			var m struct {
-				StartedAt      string            `json:"started_at"`
-				DurationMs     int64             `json:"duration_ms"`
-				WorldSize      int               `json:"world_size"`
-				Summary        map[string]int    `json:"summary"`
-				CategoryStatus map[string]string `json:"category_status"`
-				Iterations     int               `json:"iterations"`
-				TriggerReason  string            `json:"trigger_reason"`
-				FailureReason  string            `json:"failure_reason"`
-				Failed         bool              `json:"failed"`
+				StartedAt        string            `json:"started_at"`
+				DurationMs       int64             `json:"duration_ms"`
+				WorldSize        int               `json:"world_size"`
+				Summary          map[string]int    `json:"summary"`
+				CategoryStatus   map[string]string `json:"category_status"`
+				Iterations       int               `json:"iterations"`
+				ReportTimeoutSec int               `json:"report_timeout_sec"`
+				ReportedDaemons  int               `json:"reported_daemons"`
+				FailedDaemons    []string          `json:"failed_daemons"`
+				Partial          bool              `json:"partial"`
+				ReportLatencyMs  int64             `json:"report_latency_ms"`
+				TriggerReason    string            `json:"trigger_reason"`
+				FailureReason    string            `json:"failure_reason"`
+				Failed           bool              `json:"failed"`
 			}
 			if json.Unmarshal(raw, &m) == nil {
 				ci.StartedAt = m.StartedAt
@@ -84,6 +94,11 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 				}
 				ci.CategoryStatus = m.CategoryStatus
 				ci.Iterations = m.Iterations
+				ci.ReportTimeoutSec = m.ReportTimeoutSec
+				ci.ReportedDaemons = m.ReportedDaemons
+				ci.FailedDaemons = m.FailedDaemons
+				ci.Partial = m.Partial
+				ci.ReportLatencyMs = m.ReportLatencyMs
 			}
 		}
 		out = append(out, ci)
@@ -105,11 +120,12 @@ func (c *Center) cycleInfos(name string) []cycleInfo {
 	c.mu.Unlock()
 	if haveProgress && snap.InFlight {
 		out = append([]cycleInfo{{
-			Ts:         snap.StartTs,
-			StartedAt:  snap.Started,
-			Running:    true,
-			Summary:    map[string]int{},
-			Iterations: inflightIterations,
+			Ts:               snap.StartTs,
+			StartedAt:        snap.Started,
+			Running:          true,
+			Summary:          map[string]int{},
+			Iterations:       inflightIterations,
+			ReportTimeoutSec: int(p0ReportTimeout.Seconds()),
 		}}, out...)
 	}
 	return out

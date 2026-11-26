@@ -461,9 +461,6 @@ func (d *Daemon) handleDaemonSetThresholds(w http.ResponseWriter, r *http.Reques
 }
 
 func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
-	if !d.requireManagedKey(w, r) {
-		return
-	}
 	// Required body: {"iterations": N, "round_token": "..."}. The iteration
 	// count is per-cycle: it does not change the daemon's saved self-run value.
 	var req struct {
@@ -476,6 +473,30 @@ func (d *Daemon) handleDaemonTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := d.validateIterations(req.Iterations); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// A round token means the request came from a center. An unmanaged daemon
+	// must not accept center-originated triggers; a managed daemon must always
+	// carry one so the report can be matched to the round.
+	if req.RoundToken != "" && !d.IsManaged() {
+		http.Error(w, "daemon is not managed by this center", http.StatusConflict)
+		return
+	}
+	if d.IsManaged() && req.RoundToken == "" {
+		http.Error(w, "managed: round_token is required", http.StatusConflict)
+		return
+	}
+	if !d.requireManagedKey(w, r) {
+		return
+	}
+	d.mu.Lock()
+	paused := d.state == "paused"
+	d.mu.Unlock()
+	if paused {
+		if req.RoundToken != "" {
+			d.postReport(req.RoundToken, "paused", "paused", "", nil)
+		}
+		http.Error(w, "daemon is paused", http.StatusConflict)
 		return
 	}
 	if err := d.TriggerWithOptions(req.Iterations, req.RoundToken); err != nil {

@@ -62,6 +62,10 @@ type CycleResult struct {
 	Iterations     int                       `json:"iterations"`                // dyno nputrace iterations used by THIS cycle
 	Report         string                    `json:"-"`
 	RoundToken     string                    `json:"-"` // center-issued round token, echoed back with the report
+	ReportEtaMs    int64                     `json:"report_eta_ms,omitempty"`
+	ReportStatus   string                    `json:"report_status,omitempty"` // ok / failed / paused / skipped
+	ReportReason   string                    `json:"report_reason,omitempty"`
+	ReportStage    string                    `json:"report_stage,omitempty"`
 	Error          string                    `json:"error,omitempty"`
 }
 

@@ -32,9 +32,15 @@ func TestMergeOpMetricSkipsUnreportedDaemons(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{unreported, reported}}
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "")
+	merged, okCount, failed, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "")
 	if reportedDaemons != 1 {
 		t.Fatalf("reported daemons = %d, want 1", reportedDaemons)
+	}
+	if okCount != 1 {
+		t.Fatalf("ok daemons = %d, want 1", okCount)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed daemons = %v, want 1", failed)
 	}
 	if len(merged) != 2 {
 		t.Fatalf("merged ranks = %d, want 2 (only daemon B)", len(merged))
@@ -63,9 +69,12 @@ func TestMergeOpMetricNoReportReturnsEmpty(t *testing.T) {
 			lastOpMetric: nil, lastReportAt: time.Time{}},
 	}}
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "")
+	merged, okCount, failed, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "")
 	if reportedDaemons != 0 {
 		t.Fatalf("reported daemons = %d, want 0", reportedDaemons)
+	}
+	if okCount != 0 || len(failed) != 2 {
+		t.Fatalf("ok=%d failed=%v, want 0/2", okCount, failed)
 	}
 	if len(merged) != 0 {
 		t.Fatalf("merged ranks = %d, want 0", len(merged))
@@ -86,9 +95,9 @@ func TestMergeOpMetricRejectsStaleRoundToken(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{stale}}
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "new-round")
-	if reportedDaemons != 0 {
-		t.Fatalf("reported daemons = %d, want 0 (stale token)", reportedDaemons)
+	merged, okCount, failed, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "new-round")
+	if reportedDaemons != 0 || okCount != 0 || len(failed) != 1 {
+		t.Fatalf("stale token: reported=%d ok=%d failed=%v, want 0/0/1", reportedDaemons, okCount, failed)
 	}
 	if len(merged) != 0 {
 		t.Fatalf("merged ranks = %d, want 0 (stale token)", len(merged))
@@ -106,9 +115,35 @@ func TestMergeOpMetricAcceptsLegacyNoToken(t *testing.T) {
 	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
 	b := &Business{Name: "biz", Daemons: []*Daemon{legacy}}
 
-	merged, reportedDaemons := c.mergeOpMetric(b, triggerAt, "new-round")
-	if reportedDaemons != 1 || len(merged) != 1 {
-		t.Fatalf("legacy report dropped: reported=%d merged=%d", reportedDaemons, len(merged))
+	merged, okCount, _, reportedDaemons, _ := c.mergeOpMetric(b.Daemons, triggerAt, "new-round")
+	if reportedDaemons != 1 || okCount != 1 || len(merged) != 1 {
+		t.Fatalf("legacy report dropped: reported=%d ok=%d merged=%d", reportedDaemons, okCount, len(merged))
+	}
+}
+
+// A failed report is counted as reported but must never contribute cached data.
+func TestMergeOpMetricSkipsFailedReport(t *testing.T) {
+	triggerAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	failedDaemon := &Daemon{
+		IP: "10.0.0.1", Port: 8080, matchState: "reported_failed",
+		lastOpMetric:     detector.OpMetric{"0": &detector.OpMetricRank{}},
+		lastReportAt:     triggerAt.Add(time.Second),
+		lastReportStatus: "failed",
+		lastReportReason: "no_dump_after_collect",
+		lastReportStage:  "collect",
+	}
+	c := &Center{biz: map[string]*Business{}, logf: noopLogf}
+	b := &Business{Name: "biz", Daemons: []*Daemon{failedDaemon}}
+
+	merged, okCount, failed, reported, _ := c.mergeOpMetric(b.Daemons, triggerAt, "round-1")
+	if reported != 1 {
+		t.Fatalf("reported = %d, want 1 (failed still counts as reported)", reported)
+	}
+	if okCount != 0 || len(failed) != 1 {
+		t.Fatalf("ok=%d failed=%v, want 0/1", okCount, failed)
+	}
+	if len(merged) != 0 {
+		t.Fatalf("failed report leaked cached op_metric: %+v", merged)
 	}
 }
 
@@ -147,7 +182,14 @@ func TestWriteFailedCycleRecordsReasonAndNoArtifacts(t *testing.T) {
 	b := &Business{Name: "biz"}
 	startedAt := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
 	const reason = "no op_metric reported in round"
-	c.writeFailedCycle(b, startedAt, 1234, "timer", reason, 5)
+	meta := roundMeta{
+		ReportTimeoutSec: 480,
+		ReportedDaemons:  1,
+		FailedDaemons:    []string{"10.0.0.1:8080"},
+		Partial:          false,
+		ReportLatencyMs:  123,
+	}
+	c.writeFailedCycle(b, startedAt, 1234, "timer", reason, 5, meta)
 
 	cycleDir := filepath.Join(dir, "biz", startedAt.Format("20060102-150405"))
 	raw, err := os.ReadFile(filepath.Join(cycleDir, "cycle.json"))
@@ -172,6 +214,18 @@ func TestWriteFailedCycleRecordsReasonAndNoArtifacts(t *testing.T) {
 	}
 	if iter, _ := m["iterations"].(float64); int(iter) != 5 {
 		t.Fatalf("iterations = %v, want 5", m["iterations"])
+	}
+	if to, _ := m["report_timeout_sec"].(float64); int(to) != 480 {
+		t.Fatalf("report_timeout_sec = %v, want 480", m["report_timeout_sec"])
+	}
+	if rd, _ := m["reported_daemons"].(float64); int(rd) != 1 {
+		t.Fatalf("reported_daemons = %v, want 1", m["reported_daemons"])
+	}
+	if partial, _ := m["partial"].(bool); partial {
+		t.Fatalf("partial = true, want false")
+	}
+	if lat, _ := m["report_latency_ms"].(float64); int64(lat) != 123 {
+		t.Fatalf("report_latency_ms = %v, want 123", m["report_latency_ms"])
 	}
 
 	for _, name := range []string{

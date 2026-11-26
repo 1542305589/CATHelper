@@ -107,6 +107,8 @@ func daemonState(d *Daemon) string {
 		return "other"
 	case "report_failed":
 		return "report_failed"
+	case "reported_failed":
+		return "reported_failed"
 	default:
 		return "disconnected"
 	}
@@ -368,25 +370,60 @@ func (c *Center) handleOpMetric(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		body, _ := io.ReadAll(r.Body)
-		// Preferred envelope: {"round_token": "...", "ranks": {...}}. Also accept
-		// the legacy {cycle,dir,ranks} envelope and the bare rank map.
-		var roundToken string
-		var op detector.OpMetric
+		// New envelope: {"round_token","status","reason","stage","ranks"}.
+		// Also accept the legacy {cycle,dir,ranks} envelope and the bare rank map.
 		var env struct {
 			RoundToken string            `json:"round_token"`
+			Status     string            `json:"status"`
+			Reason     string            `json:"reason"`
+			Stage      string            `json:"stage"`
 			Ranks      detector.OpMetric `json:"ranks"`
 		}
-		if err := json.Unmarshal(body, &env); err == nil && env.Ranks != nil {
-			roundToken = env.RoundToken
-			op = env.Ranks
+		var op detector.OpMetric
+		var roundToken, status, reason, stage string
+		if err := json.Unmarshal(body, &env); err == nil && (env.Ranks != nil || env.Status != "" || env.RoundToken != "") {
+			roundToken, status, reason, stage, op = env.RoundToken, env.Status, env.Reason, env.Stage, env.Ranks
 		} else if err := json.Unmarshal(body, &op); err != nil || op == nil {
 			c.logf("op_metric decode error: %v", err)
 			http.Error(w, "invalid op_metric JSON", http.StatusBadRequest)
 			return
 		}
-		d.lastOpMetric = op
+		if status == "" {
+			status = "ok" // legacy daemon
+		}
+		switch status {
+		case "ok", "failed", "busy", "paused":
+		default:
+			http.Error(w, "invalid report status: "+status, http.StatusBadRequest)
+			return
+		}
+		if status == "ok" && op == nil {
+			http.Error(w, "ok report requires ranks", http.StatusBadRequest)
+			return
+		}
+		// A report after the round closed, or carrying another round's token,
+		// must not affect this round (or a later one).
+		if !b.triggering {
+			c.logf("late op_metric ignored: business=%q daemon=%q status=%s token=%q", business, daemon, status, roundToken)
+			writeJSON(w, map[string]string{"status": "ignored"})
+			return
+		}
+		if roundToken != "" && b.pendingToken != "" && roundToken != b.pendingToken {
+			c.logf("stale op_metric ignored: business=%q daemon=%q token=%q pending=%q", business, daemon, roundToken, b.pendingToken)
+			writeJSON(w, map[string]string{"status": "ignored"})
+			return
+		}
 		d.lastReportAt = time.Now()
 		d.lastRoundToken = roundToken
+		d.lastReportStatus = status
+		d.lastReportReason = reason
+		d.lastReportStage = stage
+		if status == "ok" {
+			d.lastOpMetric = op
+		} else {
+			// Never let a later round reuse a cached payload from a failed report.
+			d.lastOpMetric = nil
+		}
 		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}

@@ -59,6 +59,8 @@ type Daemon struct {
 	// On losing the center the daemon aligns its own self-trigger cadence to it
 	// (so it neither bursts nor drifts while unmanaged).
 	centerInterval time.Duration
+	// reportEtas is the last 10 successful op_metric report latencies (ms).
+	reportEtas []int64
 }
 
 // New creates a Daemon. detect is the shared profiler pipeline
@@ -232,7 +234,7 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 
 	// 1. Collect: dyno trigger -> verify commandStatus -> wait for the dump.
 	if err := d.triggerCollection(cr.Iterations); err != nil {
-		cr.Error = err.Error()
+		d.failCycle(cr, "collect", dynoFailureReason(err), err)
 		return
 	}
 	d.progress.step("采集已触发，等待 %s ...", d.cfg.CollectWait)
@@ -240,17 +242,25 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 	root := d.cfg.ProfilerDir
 	d.progress.step("采集完成")
 
+	// Fail fast when the collector produced no raw dump at all: analyse on an
+	// empty root costs 60-75s and cannot succeed.
+	if !hasMasterDump(root) {
+		d.failCycle(cr, "collect", "no_dump_after_collect",
+			fmt.Errorf("no master_* dump under %s", root))
+		return
+	}
+
 	// 2. Convert the raw dump to .db (torch_npu analyse) over the whole root.
 	d.progress.step("转换 .db (torch_npu analyse)")
 	if err := runAnalyse(root, d.logf); err != nil {
-		cr.Error = err.Error()
+		d.failCycle(cr, "analyse", "no_db_after_analyse", err)
 		return
 	}
 
 	// 3. Discover the .db files (recursive across all rank subdirs).
 	dbFiles := findDBs(root)
 	if len(dbFiles) == 0 {
-		cr.Error = d.noDBsErr().Error()
+		d.failCycle(cr, "analyse", "no_db_after_analyse", d.noDBsErr())
 		return
 	}
 	cr.DBs = len(dbFiles)
@@ -265,7 +275,7 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 	dataparse.ResetFileWriteOnce()
 	d.progress.step("解析 profiler 数据")
 	if err := dataparse.StartProcess(dbFiles, root); err != nil {
-		cr.Error = fmt.Sprintf("StartProcess: %v", err)
+		d.failCycle(cr, "parse", "parse_failed", err)
 		return
 	}
 	d.progress.step("解析完成")
@@ -281,35 +291,57 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 	}
 	d.progress.step("回填完成")
 
-	// 5. KPI detection (--kpi-dir, JSONL). Status is recorded on the cycle so
-	//    whether KPI ran (and its outcome) is visible in history: "ok" means
-	//    detection executed; disabled/skipped/failed carry the reason.
-	d.progress.step("KPI 检测")
-	cr.KPI, cr.KPIStatus = d.detectKPI()
-	d.progress.step("KPI 检测完成 (%s)", cr.KPIStatus)
+	// 5. Stage B1: archive op_metric and report it to the center immediately.
+	//    KPI/Profiler detection below must not delay this report.
+	if err := d.archiveOpMetric(root, archive); err != nil {
+		d.logf("cycle %d archive op_metric: %v", cr.ID, err)
+	}
+	d.progress.step("上报 op_metric 到中心")
+	d.reportCycle(cr, "ok", "", "")
 
-	// 6. Profiler detection (shared pipeline; sets config.FilePath internally).
-	// Thresholds are runtime-adjustable via POST /daemon/thresholds; snapshot
-	// them under the lock and apply to the global config before detecting.
+	// 6. Stage B2: KPI and Profiler detection are independent post-processing;
+	//    run them in parallel after the report. config.Apply happens once before
+	//    the goroutines; neither goroutine mutates package-level config.
 	d.mu.Lock()
 	th := d.thresholds
 	d.mu.Unlock()
 	config.Apply(th)
-	d.progress.step("Profiler 检测 (阈值 cal=%.2f cpu=%.2f)", th.Cal, th.CPU)
-	res, derr := d.detect(root, d.cfg.DebugOutput)
-	if derr != nil {
-		cr.Error = fmt.Sprintf("profiler detection: %v", derr)
+
+	var kpiRes *resource.DetectionResult
+	var kpiStatus string
+	var profRes *DetectResult
+	var profErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.progress.step("KPI 检测")
+		kpiRes, kpiStatus = d.detectKPI()
+		d.progress.step("KPI 检测完成 (%s)", kpiStatus)
+	}()
+	go func() {
+		defer wg.Done()
+		d.progress.step("Profiler 检测 (阈值 cal=%.2f cpu=%.2f)", th.Cal, th.CPU)
+		profRes, profErr = d.detect(root, d.cfg.DebugOutput)
+	}()
+	wg.Wait()
+	cr.KPI, cr.KPIStatus = kpiRes, kpiStatus
+
+	if profErr != nil {
+		// The center already received the op_metric; this only marks the local
+		// history cycle as failed.
+		cr.Error = fmt.Sprintf("profiler detection: %v", profErr)
 		return
 	}
-	cr.Result = res.NodeOutput
-	cr.Summary = res.Summary
-	cr.CategoryStatus = res.CategoryStatus
-	if res.AllNoData() && cr.KPI == nil {
+	cr.Result = profRes.NodeOutput
+	cr.Summary = profRes.Summary
+	cr.CategoryStatus = profRes.CategoryStatus
+	if profRes.AllNoData() && cr.KPI == nil {
 		cr.Error = "no valid profiler data (no_data)"
 		return
 	}
 	d.progress.step("Profiler 检测完成: cal=%d comm=%d cpu=%d",
-		res.Summary["cal"], res.Summary["comm"], res.Summary["cpu"])
+		profRes.Summary["cal"], profRes.Summary["comm"], profRes.Summary["cpu"])
 	// Merge the KPI anomaly counts (per metric) into the cycle summary so
 	// history shows both dimensions; the kpi segment is absent when KPI
 	// detection produced no result. Summary is a flat map: the profiler
@@ -318,7 +350,7 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 	if cr.KPI != nil {
 		mergeSummary(cr.Summary, kpiMetricCounts(cr.KPI, d.cfg.DebugOutput))
 	}
-	cr.Report = res.Report
+	cr.Report = profRes.Report
 
 	// 7. Write the combined result JSON + cycle meta into the per-cycle archive
 	//    dir (cr.DumpDir = ./daemon_results/<start>/), OUTSIDE the raw dump
@@ -355,24 +387,7 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 		}
 	}
 
-	// 9. Copy op_metric/ into the archive dir as the durable detector-input
-	//    snapshot (group_info_*.json, host_info_*.json, global_rank_*.csv).
-	//    cleanupDump (deferred below) removes the whole --profiler-dir, so
-	//    without this copy the per-rank topology + metric CSVs are gone every
-	//    cycle. Best effort — detection already produced cr.Report/Result.
-	srcOpMetric := filepath.Join(root, "op_metric")
-	if fileExistsDir(srcOpMetric) {
-		if err := copyDir(srcOpMetric, archive); err != nil {
-			d.logf("cycle %d copy op_metric: %v", cr.ID, err)
-		}
-	}
-
-	// 10. When managed, report the aggregated op_metric JSON to the center so it
-	//     can run detection across the whole business. Best effort.
-	if d.IsManaged() {
-		d.progress.step("上报 op_metric 到中心")
-		d.reportOpMetric(cr)
-	}
+	// op_metric/ was archived before the report (stage B1); no second copy.
 }
 
 // detectKPI reads the latest KPI data from --kpi-dir and runs the same
@@ -767,13 +782,52 @@ func (d *Daemon) heartbeatLoop() {
 	}
 }
 
-// reportOpMetric posts the cycle's aggregated op_metric JSON (rank → artifacts)
-// to the matched center. Best-effort: failures are logged, never fatal.
-func (d *Daemon) reportOpMetric(cr *CycleResult) {
-	d.mu.Lock()
-	if d.state != "managed" || d.centerAddr == "" {
-		d.mu.Unlock()
+// reportCycle sends this cycle's op_metric report to the matched center. status
+// is ok (ranks filled from the archived op_metric), or failed with reason/stage.
+// Best-effort: the center's timeout is the final fallback. Self-run cycles are
+// not reported (ReportStatus=skipped).
+func (d *Daemon) reportCycle(cr *CycleResult, status, reason, stage string) {
+	cr.ReportStatus = status
+	cr.ReportReason = reason
+	cr.ReportStage = stage
+	if cr.RoundToken == "" || !d.IsManaged() {
+		cr.ReportStatus = "skipped"
 		return
+	}
+	var ranks any
+	if status == "ok" {
+		view, err := buildOpMetricView(cr)
+		if err != nil || len(view.Ranks) == 0 {
+			if err != nil {
+				d.logf("cycle %d op_metric view: %v", cr.ID, err)
+			} else {
+				d.logf("cycle %d op_metric view is empty", cr.ID)
+			}
+			status, reason, stage = "failed", "report_build_failed", "backfill"
+			cr.ReportStatus, cr.ReportReason, cr.ReportStage = status, reason, stage
+		} else {
+			ranks = view.Ranks
+		}
+	}
+	start := time.Now()
+	if err := d.postReport(cr.RoundToken, status, reason, stage, ranks); err != nil {
+		d.logf("cycle %d report (%s/%s): %v", cr.ID, status, stage, err)
+		return
+	}
+	if status == "ok" {
+		cr.ReportEtaMs = time.Since(cr.StartedAt).Milliseconds()
+		d.recordReportEta(cr.ReportEtaMs)
+		d.logf("cycle %d report ok: eta=%dms http=%dms", cr.ID, cr.ReportEtaMs, time.Since(start).Milliseconds())
+	}
+}
+
+// postReport posts one report (5s timeout, one retry). It is a no-op when the
+// daemon is not managed or has no round token (self-run).
+func (d *Daemon) postReport(roundToken, status, reason, stage string, ranks any) error {
+	d.mu.Lock()
+	if d.state != "managed" || d.centerAddr == "" || roundToken == "" {
+		d.mu.Unlock()
+		return nil
 	}
 	center := d.centerAddr
 	key := d.matchKey
@@ -781,42 +835,107 @@ func (d *Daemon) reportOpMetric(cr *CycleResult) {
 	daemonID := d.daemonID
 	d.mu.Unlock()
 
-	view, err := buildOpMetricView(cr)
+	payload := map[string]any{
+		"round_token": roundToken,
+		"status":      status,
+		"ranks":       ranks,
+	}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	if stage != "" {
+		payload["stage"] = stage
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
-		d.logf("cycle %d op_metric view: %v", cr.ID, err)
+		return err
+	}
+	target := strings.TrimRight(center, "/") + "/center/op_metric/" + url.PathEscape(business) + "/" + url.PathEscape(daemonID)
+	timeout := 5 * time.Second
+	if status == "ok" {
+		// The ok payload carries the full rank and artifact maps; keep the old
+		// 10s budget for it. Failure/busy/paused payloads stay at 5s.
+		timeout = 10 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, rerr := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
+		if rerr != nil {
+			return rerr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Match-Key", key)
+		resp, rerr := client.Do(req)
+		if rerr == nil {
+			rb, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			lastErr = fmt.Errorf("center returned %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+		} else {
+			lastErr = rerr
+		}
+	}
+	return lastErr
+}
+
+func (d *Daemon) recordReportEta(ms int64) {
+	if ms <= 0 {
 		return
 	}
-	// Report only the rank→artifacts map + round token (the center parses ranks
-	// as detector.OpMetric). Old centers accept the same envelope via their
-	// {ranks:...} fallback, so this stays backward compatible.
-	payload, err := json.Marshal(map[string]any{
-		"round_token": cr.RoundToken,
-		"ranks":       view.Ranks,
-	})
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.reportEtas = append(d.reportEtas, ms)
+	if len(d.reportEtas) > 10 {
+		d.reportEtas = d.reportEtas[len(d.reportEtas)-10:]
+	}
+}
+
+// failCycle records the local failure and reports it to the center immediately,
+// then returns (the caller skips all later stages).
+func (d *Daemon) failCycle(cr *CycleResult, stage, reason string, cause error) {
+	if cause != nil {
+		cr.Error = fmt.Sprintf("%s: %v", reason, cause)
+	} else {
+		cr.Error = reason
+	}
+	d.progress.step("上报失败到中心 (%s/%s)", stage, reason)
+	d.reportCycle(cr, "failed", reason, stage)
+}
+
+func dynoFailureReason(err error) string {
+	if err != nil && strings.Contains(err.Error(), "processesMatched empty") {
+		return "no_target_process"
+	}
+	return "dyno_trigger_failed"
+}
+
+func hasMasterDump(root string) bool {
+	entries, err := os.ReadDir(root)
 	if err != nil {
-		d.logf("cycle %d marshal op_metric: %v", cr.ID, err)
-		return
+		return false
 	}
-	url := strings.TrimRight(center, "/") + "/center/op_metric/" + url.PathEscape(business) + "/" + url.PathEscape(daemonID)
-	d.logf("cycle %d report op_metric: ranks=%d bytes=%d url=%s", cr.ID, len(view.Ranks), len(payload), url)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		d.logf("cycle %d build report request: %v", cr.ID, err)
-		return
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "master_") {
+			return true
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Match-Key", key)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		d.logf("cycle %d report op_metric: %v", cr.ID, err)
-		return
+	return false
+}
+
+// archiveOpMetric copies <root>/op_metric into the per-cycle archive before the
+// report, so the report is not delayed by KPI/Profiler post-processing.
+func (d *Daemon) archiveOpMetric(root, archive string) error {
+	src := filepath.Join(root, "op_metric")
+	if !fileExistsDir(src) {
+		return fmt.Errorf("op_metric missing under %s", root)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		d.logf("cycle %d report op_metric: center returned %d: %s", cr.ID, resp.StatusCode, strings.TrimSpace(string(body)))
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		return err
 	}
+	return copyDir(src, archive)
 }
 
 // centerAlive checks a center's /center/healthz endpoint.
