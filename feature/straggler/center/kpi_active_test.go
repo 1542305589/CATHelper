@@ -47,6 +47,13 @@ func TestLoadSnapshotMinEngineRunning(t *testing.T) {
 	if got := m.LoadSnapshot("biz", now).MinEngineRunning; got != 3 {
 		t.Fatalf("MinEngineRunning with stale engine = %v, want 3", got)
 	}
+	// Engines can report at different timestamps inside the window: each
+	// engine's own latest value counts, so one idle engine still makes the
+	// business not_active even though it is not the latest scrape.
+	m.series["biz"]["e2"].points = []metricPoint{{Ts: now - 10, Running: 0}}
+	if got := m.LoadSnapshot("biz", now).MinEngineRunning; got != 0 {
+		t.Fatalf("MinEngineRunning with in-window idle engine = %v, want 0", got)
+	}
 	// An engine that DID report at the latest timestamp with running=0 still
 	// makes the business not_active.
 	m.series["biz"]["e2"].points = []metricPoint{{Ts: now - 5, Running: 0}}

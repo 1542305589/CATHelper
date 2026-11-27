@@ -295,30 +295,28 @@ func (m *metricsStore) LoadSnapshot(business string, now int64) loadSnapshot {
 		ratio = reqs / baseline
 	}
 	fresh := m.lastAt[business] > 0 && now-m.lastAt[business] <= 60
-	// "Every engine's latest running >= 1", using only engines that reported at
-	// the business's latest scrape timestamp. A stale engine is ignored rather
-	// than counted as running=0 (one quiet engine must not hide the others).
-	latestTs := int64(-1)
+	// "Every engine's latest running >= 1": take each engine's most recent
+	// observation inside the window. An engine with no data in the window is
+	// not a participant (its state is unknown); every participating engine must
+	// have running >= 1, even if it reported before the business's latest
+	// scrape timestamp.
+	minRunning := math.Inf(1)
+	participants := 0
 	for _, e := range eng {
+		latestTs := int64(-1)
+		latestRunning := 0.0
 		for _, p := range e.points {
 			if p.Ts >= since && p.Ts <= now && p.Ts > latestTs {
 				latestTs = p.Ts
+				latestRunning = p.Running
 			}
 		}
-	}
-	minRunning := math.Inf(1)
-	participants := 0
-	if latestTs >= 0 {
-		for _, e := range eng {
-			for _, p := range e.points {
-				if p.Ts == latestTs {
-					participants++
-					if p.Running < minRunning {
-						minRunning = p.Running
-					}
-					break
-				}
-			}
+		if latestTs < 0 {
+			continue
+		}
+		participants++
+		if latestRunning < minRunning {
+			minRunning = latestRunning
 		}
 	}
 	if participants == 0 || math.IsInf(minRunning, 1) {
