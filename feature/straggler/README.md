@@ -120,7 +120,7 @@ cd feature/straggler
 **启动后行为**：
 - 拉起 dynolog、启动 HTTP 服务；首个周期在 `--interval` 之后运行（想立即跑一轮用 `POST /daemon/trigger`）。
 - 匹配到中心节点后，高频检测 `--kpi-dir` 最新文件的追加内容，只把带 `vals` 的 NPU 样本事件驱动上报到 `POST /center/kpi/{business}/{daemon}`（不再暴露 Prometheus `/kpi/metrics`）。未匹配时只推进 offset 并丢弃新增行，不缓存；匹配后从当前时刻开始上报，不会补发历史。
-- 周期结束删除整个 `--profiler-dir`（dyno 下次采集自动重建），防止数据堆积影响后续定位。开启 `--dump-profiler-data` 时，会在删除前把原始数据复制到结果目录；复制失败会保留原目录，下一轮采集前改名为 `<profiler-dir>.stale-<时间戳>` 供人工分析，`.stale-*` 不会自动删除。`--profiler-dir` 不应是挂载点。
+- 每轮开始先清空并重建 `--profiler-dir`（dyno 随后写入），周期结束再删除整个目录，防止 `collect_wait` 之后才到达的数据泄漏到下一轮。开启 `--dump-profiler-data` 时，会在删除前把原始数据复制到结果目录；复制失败会保留原目录供当轮排查，下一轮开始时清掉。历史遗留的 `.stale-*` 目录启动时只会告警，不会自动删除。`--profiler-dir` 不应是挂载点。
 - `--dump-profiler-data` 是 debug 开关：不设保留份数、不做磁盘检查、不自动清理，可能很快占满磁盘；需要人工清理。开启时 `POST /daemon/stop` 不会删除 `daemon_results`，避免丢掉证据。
 - `Ctrl-C` / `SIGTERM` 优雅退出：停 HTTP、等当轮周期结束（≤10 分钟）、杀掉自己拉起的 dynolog。
 
