@@ -99,13 +99,9 @@ const DefaultKPIReferenceAdmitRatio = 0.1
 // business (and for legacy businesses.json entries without the field).
 const defaultBusinessIterations = 3
 
-// minBusinessIterations / maxBusinessIterations bound the runtime control API.
-// Below 3 is only allowed on a daemon started with --allow-low-iterations, which
-// a business-wide value cannot assume, so the center never pushes <3.
-const (
-	minBusinessIterations = 3
-	maxBusinessIterations = 100
-)
+// minBusinessIterations bounds the runtime control API (a collection must run
+// at least one iteration). There is no upper bound.
+const minBusinessIterations = 1
 
 // defaultReportTimeoutSec is the fallback collection window when no daemon has
 // a fresh report ETA (360s covers .85/.88 stage A; .87 reports ~156s).

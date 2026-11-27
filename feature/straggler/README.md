@@ -108,7 +108,7 @@ cd feature/straggler
 | `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL）；缺省则每轮只跑 Profiler |
 | `--interval` | 否 | 600 | 检测周期（秒，≥60） |
 | `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | 否 | 3 | dyno nputrace 每轮采集迭代数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
+| `--profiler-iterations` | 否 | 3 | dyno nputrace 每轮采集迭代数（>=1 任意，无上限） |
 | `--dump-profiler-data` | 否 | 假 | debug 功能：把每轮原始 profiler 数据复制到 `daemon_results/<start>/profiler_data/`；不设保留份数、不做磁盘检查、不自动删除；仅 daemon 模式、启动时生效 |
 | `--daemon-port` | 否 | 8080 | HTTP 端口 |
 | `--cal-threshold` | 否 | 1.3 | 慢计算阈值 |
@@ -327,7 +327,7 @@ CSV/JSONL 解析 → 10 秒聚合 → 空间检测(最后一点 peer 对比) →
 | `POST /daemon/pause` | 暂停（在跑周期跑完，不再排新的） | — |
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog；默认删除全部落盘结果，`--dump-profiler-data` 开启时保留 `daemon_results`） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
-| `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改；中心触发以中心下发为准） | `{"iterations": 3}`（3–100；<3 需 daemon 启动时加 `--allow-low-iterations`） |
+| `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改；中心触发以中心下发为准） | `{"iterations": 3}`（>=1 任意） |
 | `GET /daemon/thresholds` | 读取当前检测阈值 | — |
 | `POST /daemon/thresholds` | 修改检测阈值（只影响后续检测，不改历史结果） | `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
 | `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；`queue_if_busy=true` 且已有周期在跑 → 202 排队；否则 409 + `busy_eta_ms`） | `{"iterations":3,"round_token":"...","queue_if_busy":true,"report_timeout_sec":372}` |
@@ -468,7 +468,7 @@ curl -s -X POST localhost:8080/daemon/stop
 | `POST /center/business/{name}/pause` | 暂停业务调度 |
 | `POST /center/business/{name}/start` | 恢复业务调度 |
 | `POST /center/business/{name}/interval` | 修改业务触发周期 `{"interval_sec":600}` |
-| `POST /center/business/{name}/iterations` | 修改中心触发迭代数（随每次 `/daemon/trigger` 下发，不修改守护进程自运行值） `{"iterations":3}`（3–100） |
+| `POST /center/business/{name}/iterations` | 修改中心触发迭代数（随每次 `/daemon/trigger` 下发，不修改守护进程自运行值） `{"iterations":3}`（>=1 任意） |
 | `POST /center/business/{name}/thresholds` | 修改业务阈值 `{"cal","cpu","comm_threshold","comm_min_count","comm_count_floor"}` |
 | `POST /center/business/{name}/vllm` | 设置业务 vllm `/metrics` 端点 `{"url"}` |
 | `DELETE /center/business/{name}/vllm` | 清除 vllm 端点 |
@@ -594,7 +594,7 @@ daemon_results/<start>/
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 检测周期（秒，≥60） |
 | `--collect-wait` | int | 否 | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | int | 否 | 3 | dyno nputrace 每轮采集迭代数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
+| `--profiler-iterations` | int | 否 | 3 | dyno nputrace 每轮采集迭代数（>=1 任意，无上限） |
 
 ### 中心节点参数（`--center`）
 

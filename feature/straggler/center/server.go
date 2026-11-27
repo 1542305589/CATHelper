@@ -659,8 +659,8 @@ func (c *Center) handleBusinessIterations(w http.ResponseWriter, r *http.Request
 		Iterations int `json:"iterations"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-		req.Iterations < minBusinessIterations || req.Iterations > maxBusinessIterations {
-		http.Error(w, fmt.Sprintf(`invalid body: {"iterations": 3} (range [%d, %d])`, minBusinessIterations, maxBusinessIterations), http.StatusBadRequest)
+		req.Iterations < minBusinessIterations {
+		http.Error(w, fmt.Sprintf(`invalid body: {"iterations": 3} (must be >= %d)`, minBusinessIterations), http.StatusBadRequest)
 		return
 	}
 	c.mu.Lock()

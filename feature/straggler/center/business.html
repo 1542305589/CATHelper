@@ -142,7 +142,7 @@
         </div>
         <div class="interval-form">
           中心触发迭代数:
-          <input id="iterationsInput" type="number" min="3" max="100">
+          <input id="iterationsInput" type="number" min="1">
           <button id="btnIterations">设置</button>
         </div>
         <div class="interval-form">
@@ -1062,7 +1062,7 @@ $('btnInterval').onclick = () => {
 };
 $('btnIterations').onclick = async () => {
   const v = parseInt($('iterationsInput').value, 10);
-  if (!v || v < 3 || v > 100) { toast('中心触发迭代数需在 [3, 100] 之间', false); return; }
+  if (!v || v < 1) { toast('中心触发迭代数需 >= 1', false); return; }
   try {
     await post('/center/business/' + encodeURIComponent(BIZ) + '/iterations', { iterations: v });
     toast('中心触发迭代数已更新（下一轮生效）', true);

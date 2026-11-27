@@ -20,7 +20,7 @@ func TestSetIterationsRuntime(t *testing.T) {
 	if got := d.Iterations(); got != 5 {
 		t.Fatalf("iterations = %d, want 5", got)
 	}
-	for _, bad := range []int{0, -1, 101} {
+	for _, bad := range []int{0, -1} {
 		if err := d.SetIterations(bad); err == nil {
 			t.Fatalf("SetIterations(%d) = nil, want error", bad)
 		}
@@ -28,16 +28,28 @@ func TestSetIterationsRuntime(t *testing.T) {
 	if got := d.Iterations(); got != 5 {
 		t.Fatalf("iterations changed after invalid input: %d", got)
 	}
-	// Below 3 needs the daemon's startup debug switch.
-	if err := d.SetIterations(2); err == nil {
-		t.Fatalf("SetIterations(2) without --allow-low-iterations = nil, want error")
+	// Any positive value is accepted (no low-iteration guard, no upper bound).
+	for _, n := range []int{1, 2, 1000} {
+		if err := d.SetIterations(n); err != nil {
+			t.Fatalf("SetIterations(%d): %v", n, err)
+		}
+		if got := d.Iterations(); got != n {
+			t.Fatalf("iterations = %d, want %d", got, n)
+		}
 	}
-	low := New(Config{Iterations: 3, AllowLowIterations: true}, nil)
-	if err := low.SetIterations(2); err != nil {
-		t.Fatalf("SetIterations(2) with --allow-low-iterations: %v", err)
+}
+
+func TestValidateIterationsAllowsAnyPositive(t *testing.T) {
+	d := New(Config{}, nil)
+	for _, n := range []int{1, 2, 3, 100, 1000} {
+		if err := d.validateIterations(n); err != nil {
+			t.Fatalf("validateIterations(%d): %v", n, err)
+		}
 	}
-	if got := low.Iterations(); got != 2 {
-		t.Fatalf("low iterations = %d, want 2", got)
+	for _, n := range []int{0, -1} {
+		if err := d.validateIterations(n); err == nil {
+			t.Fatalf("validateIterations(%d) = nil, want error", n)
+		}
 	}
 }
 
@@ -93,8 +105,6 @@ func TestTriggerRejectsMissingOrInvalidIterations(t *testing.T) {
 		`{"round_token":"t"}`,
 		`{"iterations":0}`,
 		`{"iterations":-1}`,
-		`{"iterations":101}`,
-		`{"iterations":2}`, // <3 without --allow-low-iterations
 	} {
 		d := New(Config{Iterations: 3}, nil)
 		rr := httptest.NewRecorder()

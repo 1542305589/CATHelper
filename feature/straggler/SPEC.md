@@ -60,7 +60,7 @@ slowNodeDetection path=/data/dir [--cal-threshold=1.3] [--cpu-threshold=2.5] [--
 ```
 slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] \
     [--daemon-port=8080] [--interval=600] [--collect-wait=60] \
-    [--profiler-iterations=3] [--allow-low-iterations] [--cal-threshold=1.3] [--cpu-threshold=2.5] [--debug-output]
+    [--profiler-iterations=3] [--cal-threshold=1.3] [--io-threshold=2.5] [--debug-output]
 ```
 
 | 参数 | 类型 | 必需 | 默认 | 说明 |
@@ -71,7 +71,7 @@ slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] \
 | `--daemon-port` | int | 否 | 8080 | HTTP 端口 |
 | `--interval` | int | 否 | 600 | 周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | int | 否 | 60 | 触发后等待采集完成的秒数 |
-| `--profiler-iterations` | int | 否 | 3 | dyno nputrace 采集迭代数（传给 dyno 的 `--iterations`；<3 需显式加 `--allow-low-iterations`，仅供调试） |
+| `--profiler-iterations` | int | 否 | 3 | dyno nputrace 采集迭代数（传给 dyno 的 `--iterations`；>=1 任意，无上限） |
 
 `--daemon` 未提供 `--profiler-dir` → 打印用法并退出（`--kpi-dir` 可选，缺省只跑 Profiler；见[第三章](#三守护进程模式daemon)）。
 
@@ -536,7 +536,7 @@ Profiler 结果写入 `straggler_output.json` 的 `profiler` 键（顶层 `{"pro
 | `POST /daemon/pause` | 暂停（在跑周期跑完） | 200 `{"state":"paused"}` | — |
 | `POST /daemon/stop` | 优雅关闭守护进程（停 HTTP、等周期结束、杀 dynolog、删除全部落盘结果） | 200 `{"status":"stopping"}` | — |
 | `POST /daemon/interval` | 改周期 | 200 `{"interval_sec":N}` | 400 越界 [60,86400] / body 非法 |
-| `POST /daemon/iterations` | 改守护进程自运行迭代数（托管时也可改，只影响退出托管后的自运行） | 200 `{"iterations":N}` | 400 越界 [3,100] / body 非法 / <3 未开 `--allow-low-iterations` |
+| `POST /daemon/iterations` | 改守护进程自运行迭代数（托管时也可改，只影响退出托管后的自运行） | 200 `{"iterations":N}` | 400 body 非法 / `iterations < 1` |
 | `POST /daemon/trigger` | 立即补跑一轮（body 必须带 `iterations`；托管时需中心密钥） | 200 `{"status":"triggered"}` | 400 缺 `iterations` / 越界；409 已有周期在跑 / 已暂停 |
 
 **查询数据源 = 本次会话内存 store**：latest/history/{id} 从进程内 store 读（daemon 重启即空，看不到历史；latest/{id} 的 JSON 内容经 `JSONPath` 指向的 `daemon_results/<start>/straggler_output.json` 文件读取）；结果在 `--profiler-dir` 之外，`--profiler-dir` 周期结束时整个删除，互不影响。

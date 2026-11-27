@@ -112,7 +112,7 @@
         </div>
         <div class="interval-form" style="margin-top:8px;">
           采集迭代数:
-          <input id="iterationsInput" type="number" min="3" max="100">
+          <input id="iterationsInput" type="number" min="1">
           <button id="btnIterations">设置</button>
           <span id="iterationsHint" class="unit" style="display:none;">自运行默认值；中心触发以中心下发为准</span>
         </div>
@@ -436,7 +436,7 @@ $('btnInterval').onclick = async () => {
 };
 $('btnIterations').onclick = async () => {
   const v = parseInt($('iterationsInput').value, 10);
-  if (!v || v < 3 || v > 100) { toast('采集迭代数需在 [3, 100] 之间（<3 需节点启动时加 --allow-low-iterations）', false); return; }
+  if (!v || v < 1) { toast('采集迭代数需 >= 1', false); return; }
   try {
     await post('/daemon/iterations', { iterations: v });
     toast('采集迭代数已更新为 ' + v + '（下一轮生效）', true);

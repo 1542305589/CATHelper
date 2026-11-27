@@ -33,26 +33,25 @@ type Daemon struct {
 	st     *store
 	logf   func(format string, args ...any)
 
-	mu                 sync.Mutex
-	state              string            // "running" | "paused" | "managed"
-	interval           time.Duration     // current cycle period (POST /daemon/interval updates it)
-	iterations         int               // saved self-run iterations (POST /daemon/iterations updates it); center triggers carry their own value
-	allowLowIterations bool              // --allow-low-iterations: permit iterations <3 at runtime (debug-only)
-	thresholds         config.Thresholds // current detection thresholds (CLI initial, POST /daemon/thresholds updates them)
-	nextRun            time.Time         // when the next cycle starts (zero when paused)
-	cycleID            int               // per-process id, starting from 1
-	cycleInFlight      bool
-	cycleStartedAt     time.Time // start of the in-flight cycle (busy_eta_ms)
-	pending            bool      // one queued next-cycle trigger
-	pendingIterations  int
-	pendingToken       string
-	pendingDeadline    time.Time
-	timer              *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
-	dynolog            *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
-	dynologPort        int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
-	stopOnce           sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
-	stopCh             chan struct{} // closed by POST /daemon/stop to request graceful shutdown
-	removeResults      bool          // set by Stop(): delete all daemon_results/ on shutdown
+	mu                sync.Mutex
+	state             string            // "running" | "paused" | "managed"
+	interval          time.Duration     // current cycle period (POST /daemon/interval updates it)
+	iterations        int               // saved self-run iterations (POST /daemon/iterations updates it); center triggers carry their own value
+	thresholds        config.Thresholds // current detection thresholds (CLI initial, POST /daemon/thresholds updates them)
+	nextRun           time.Time         // when the next cycle starts (zero when paused)
+	cycleID           int               // per-process id, starting from 1
+	cycleInFlight     bool
+	cycleStartedAt    time.Time // start of the in-flight cycle (busy_eta_ms)
+	pending           bool      // one queued next-cycle trigger
+	pendingIterations int
+	pendingToken      string
+	pendingDeadline   time.Time
+	timer             *time.Timer   // cycle timer; stopped while paused, re-armed by Start/Trigger
+	dynolog           *exec.Cmd     // dynolog child, left running on shutdown (nil = reusing existing)
+	dynologPort       int           // dynolog's -port (passed to dyno as --port); 0 = unknown/not set
+	stopOnce          sync.Once     // guards stopCh so POST /daemon/stop closes it exactly once
+	stopCh            chan struct{} // closed by POST /daemon/stop to request graceful shutdown
+	removeResults     bool          // set by Stop(): delete all daemon_results/ on shutdown
 
 	progress *progressLog // live per-cycle stage log shown terminal-style in the console
 
@@ -96,17 +95,16 @@ func New(cfg Config, detect DetectFunc) *Daemon {
 		}
 	}
 	return &Daemon{
-		cfg:                cfg,
-		detect:             detect,
-		st:                 newStore(),
-		logf:               func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
-		state:              "running",
-		interval:           cfg.Interval,
-		iterations:         cfg.Iterations,
-		allowLowIterations: cfg.AllowLowIterations,
-		thresholds:         cfg.Thresholds,
-		stopCh:             make(chan struct{}),
-		progress:           newProgressLog(),
+		cfg:        cfg,
+		detect:     detect,
+		st:         newStore(),
+		logf:       func(format string, args ...any) { fmt.Fprintf(os.Stderr, "[DAEMON] "+format+"\n", args...) },
+		state:      "running",
+		interval:   cfg.Interval,
+		iterations: cfg.Iterations,
+		thresholds: cfg.Thresholds,
+		stopCh:     make(chan struct{}),
+		progress:   newProgressLog(),
 	}
 }
 
@@ -702,23 +700,19 @@ func (d *Daemon) Iterations() int {
 	return d.iterations
 }
 
-// validateIterations enforces the iteration range and the low-iteration
-// debug guardrail shared by the saved value and per-trigger overrides.
+// validateIterations enforces the only hard requirement: a collection must run
+// at least one iteration. There is no upper bound and no low-iteration guard.
 func (d *Daemon) validateIterations(n int) error {
-	if n < 1 || n > 100 {
-		return fmt.Errorf("iterations out of range [1, 100]")
-	}
-	if n < 3 && !d.allowLowIterations {
-		return fmt.Errorf("iterations below 3 require --allow-low-iterations at daemon startup")
+	if n < 1 {
+		return fmt.Errorf("iterations must be >= 1")
 	}
 	return nil
 }
 
-// SetIterations updates the daemon's saved self-run iteration count, validating
-// [1, 100]. Values below 3 are only accepted when the daemon was started with
-// --allow-low-iterations. This value is used by the daemon's own timer/manual
-// trigger when it is not managed by a center; a center-triggered cycle uses the
-// value carried by the trigger request instead.
+// SetIterations updates the daemon's saved self-run iteration count. Any value
+// >= 1 is accepted. This value is used by the daemon's own timer/manual trigger
+// when it is not managed by a center; a center-triggered cycle uses the value
+// carried by the trigger request instead.
 func (d *Daemon) SetIterations(n int) error {
 	if err := d.validateIterations(n); err != nil {
 		return err
@@ -726,9 +720,6 @@ func (d *Daemon) SetIterations(n int) error {
 	d.mu.Lock()
 	d.iterations = n
 	d.mu.Unlock()
-	if n < 3 {
-		d.logf("WARNING: iterations=%d (<3) may sample too few steps and make a round look normal", n)
-	}
 	return nil
 }
 

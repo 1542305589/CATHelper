@@ -131,12 +131,17 @@ func TestBusinessIterationsAPIUpdatesOnlyBusiness(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("invalid iterations status = %d, want 400", rr.Code)
 	}
-	rr = serveCenter(c, http.MethodPost, "/center/business/biz/iterations", `{"iterations":2}`, nil)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("low iterations status = %d, want 400", rr.Code)
-	}
 	if b.Iterations != 5 {
 		t.Fatalf("business iterations changed on invalid input: %d", b.Iterations)
+	}
+	// Any positive value is accepted (no low-iteration guard, no upper bound).
+	rr = serveCenter(c, http.MethodPost, "/center/business/biz/iterations", `{"iterations":2}`, nil)
+	if rr.Code != http.StatusOK || b.Iterations != 2 {
+		t.Fatalf("iterations=2 status = %d, value = %d", rr.Code, b.Iterations)
+	}
+	rr = serveCenter(c, http.MethodPost, "/center/business/biz/iterations", `{"iterations":1000}`, nil)
+	if rr.Code != http.StatusOK || b.Iterations != 1000 {
+		t.Fatalf("iterations=1000 status = %d, value = %d", rr.Code, b.Iterations)
 	}
 }
 

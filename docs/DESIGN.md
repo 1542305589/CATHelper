@@ -837,7 +837,7 @@ bash build.sh          # 首次构建
 | `POST /daemon/start` | 恢复运行（paused → running） | — |
 | `POST /daemon/pause` | 暂停（在跑的周期跑完，不再排新的） | — |
 | `POST /daemon/interval` | 修改检测周期 | `{"interval_sec": 300}`（60–86400） |
-| `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改，只影响退出托管后的自运行） | `{"iterations": 3}`（3–100） |
+| `POST /daemon/iterations` | 修改守护进程自运行迭代数（托管时也可改，只影响退出托管后的自运行） | `{"iterations": 3}`（>=1 任意） |
 | `POST /daemon/trigger` | 立即补跑一轮（必须带 `iterations`；已有周期在跑 → 409） | `{"iterations": 3, "round_token": "..."}` |
 | `POST /daemon/stop` | 优雅关闭守护进程（幂等）：关 HTTP server、等在跑周期结束、清理 dynolog 子进程，并**删除全部 `daemon_results/` 归档结果** | — |
 
@@ -870,7 +870,7 @@ slowNodeDetection [path=<profiler_dir>] [degradation=0.3] \
 # 守护进程模式
 slowNodeDetection --daemon --profiler-dir=<dir> [--kpi-dir=<dir>] \
     [--daemon-port=8080] [--interval=600] [--collect-wait=60] \
-    [--profiler-iterations=3] [--allow-low-iterations] [degradation=0.3]
+    [--profiler-iterations=3] [degradation=0.3]
 ```
 
 | 参数 | 默认 | 说明 |
@@ -887,7 +887,7 @@ slowNodeDetection --daemon --profiler-dir=<dir> [--kpi-dir=<dir>] \
 | `--daemon-port` | 8080 | HTTP 端口 |
 | `--interval` | 600 | 检测周期（秒，≥60，非法回退默认） |
 | `--collect-wait` | 60 | dyno 触发成功后的等待秒数 |
-| `--profiler-iterations` | 3 | 透传 dyno `nputrace` 的采集迭代步数（<3 需显式加 `--allow-low-iterations`，仅供调试） |
+| `--profiler-iterations` | 3 | 透传 dyno `nputrace` 的采集迭代步数（>=1 任意，无上限） |
 
 > `--baseline-hours`/`--detection-hours`/`--faultsub-url`/`--space-method`/`--space-z-threshold`/`--time-z-threshold`/`--time-weight`/`--no-trend`/`--no-fallback`/`--always-profiling` 等旧 flag 已移除。
 

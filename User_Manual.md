@@ -334,7 +334,7 @@ bash build.sh          # 首次：架构检查 + 装 dyno/dynolog(.deb) + Python
     --interval=600 \                       # 可选：检测周期（秒，≥60，默认 600）
     --collect-wait=60 \                    # 可选：触发成功后等待采集完成秒数
     --daemon-port=8080 \                   # 可选：HTTP 端口（默认 8080）
-    --profiler-iterations=3 \              # 可选：dyno 采集迭代数（默认 3；<3 需 --allow-low-iterations）
+    --profiler-iterations=3 \              # 可选：dyno 采集迭代数（默认 3；>=1 任意）
     --degradation=0.3                      # 可选：灵敏度（与一次性模式同义）
 ```
 
@@ -348,7 +348,7 @@ bash build.sh          # 首次：架构检查 + 装 dyno/dynolog(.deb) + Python
 | `GET /straggler/op_metric/latest` / `/{id}` / `/{id}/{file}` | 最近/指定周期 op_metric 聚合视图 / 该周期归档的原始 op_metric 文件 |
 | `POST /daemon/start` / `/pause` / `/trigger` | 恢复 / 暂停 / 立即补跑一轮（`/trigger` 必须带 `iterations`；已有周期在跑 → 409） |
 | `POST /daemon/interval` | 改周期（body `{"interval_sec":300}`，60–86400） |
-| `POST /daemon/iterations` | 改守护进程自运行迭代数（body `{"iterations":3}`，3–100；托管时也可改，只影响退出托管后的自运行） |
+| `POST /daemon/iterations` | 改守护进程自运行迭代数（body `{"iterations":3}`，>=1 任意；托管时也可改，只影响退出托管后的自运行） |
 | `POST /daemon/stop` | 优雅关闭守护进程（关闭时删除全部 `daemon_results/` 归档结果，需保留请先消费/备份） |
 
 ### 6.3 第二道 Profiler 检测（按需，独立）

@@ -57,7 +57,6 @@ func main() {
 	intervalSec := 600
 	collectWait := 60
 	profilerIterations := 3
-	allowLowIterations := false
 	dumpProfilerData := false
 	profilerDir := ""
 	kpiDir := ""
@@ -84,10 +83,6 @@ func main() {
 		}
 		if arg == "--center" {
 			centerMode = true
-			continue
-		}
-		if arg == "--allow-low-iterations" {
-			allowLowIterations = true
 			continue
 		}
 		if arg == "--dump-profiler-data" {
@@ -200,19 +195,12 @@ func main() {
 	// Daemon mode: resident service (dynolog/dyno collection + HTTP).
 	// ─────────────────────────────────────────────────────────────────
 	if daemonMode {
-		if profilerIterations < 3 {
-			if !allowLowIterations {
-				fmt.Fprintf(os.Stderr, "ERROR: --profiler-iterations=%d is too low: a single idle step can make the whole round look normal. Use the default 3, or pass --allow-low-iterations for debugging.\n", profilerIterations)
-				os.Exit(1)
-			}
-			fmt.Fprintf(os.Stderr, "[SLOWNODE ALGO] WARNING: --profiler-iterations=%d (<3) allowed by --allow-low-iterations; results may be unreliable\n", profilerIterations)
-		}
 		if intervalSec < 300 {
 			fmt.Fprintf(os.Stderr, "ERROR: --interval=%d below minimum 300s (report_eta + 130s)\n", intervalSec)
 			os.Exit(1)
 		}
 		if profilerDir == "" {
-			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=3] [--allow-low-iterations] [--dump-profiler-data]\n")
+			fmt.Fprintf(os.Stderr, "Usage: slowNodeDetection --daemon --profiler-dir=/dir [--kpi-dir=/dir] [--daemon-port=8080] [--interval=600] [--collect-wait=60] [--profiler-iterations=3] [--dump-profiler-data]\n")
 			fmt.Fprintf(os.Stderr, "ERROR: --daemon requires --profiler-dir (--kpi-dir is optional; omit to run profiler-only cycles)\n")
 			os.Exit(1)
 		}
@@ -238,7 +226,6 @@ func main() {
 		cfg.Interval = time.Duration(intervalSec) * time.Second
 		cfg.CollectWait = time.Duration(collectWait) * time.Second
 		cfg.Iterations = profilerIterations
-		cfg.AllowLowIterations = allowLowIterations
 		cfg.DumpProfilerData = dumpProfilerData
 		cfg.DynoBin = dynoBin
 		cfg.DynologBin = dynologBin

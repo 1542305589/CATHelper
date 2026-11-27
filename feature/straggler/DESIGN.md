@@ -379,7 +379,7 @@ go run . --daemon \
 | `--kpi-dir` | 否 | — | KPI 数据目录（CATMonitor JSONL，同 `--kpi-jsonl-dir` 语义；缺省只跑 Profiler） |
 | `--interval` | 否 | 600 | 循环周期（秒），默认 600 |
 | `--collect-wait` | 否 | 60 | dyno 触发成功后的等待秒数，默认 60 |
-| `--profiler-iterations` | 否 | 3 | dyno nputrace 采集迭代数（传给 dyno 的 `--iterations`；<3 需显式加 `--allow-low-iterations`，仅供调试） |
+| `--profiler-iterations` | 否 | 3 | dyno nputrace 采集迭代数（传给 dyno 的 `--iterations`；>=1 任意，无上限） |
 | `--daemon-port` | 否 | 8080 | HTTP 监听端口 |
 
 > 注意：命令为可直接执行写法（续行 `\` 后不留注释/空格）；参数语义见上表。

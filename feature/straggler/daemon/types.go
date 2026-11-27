@@ -14,18 +14,17 @@ import (
 
 // Config holds the daemon's run-time configuration (the --daemon CLI flags).
 type Config struct {
-	ProfilerDir        string            // profiler 采集落盘根目录（--profiler-dir=，必填；传给 dyno 的 --log-file）
-	KpiDir             string            // KPI 数据目录（--kpi-dir=，可选；空 = 每轮只跑 Profiler 检测）
-	Interval           time.Duration     // 循环周期，默认 600s
-	Port               int               // HTTP 端口，默认 8080
-	CollectWait        time.Duration     // dyno 触发成功后的等待秒数，默认 60s
-	Iterations         int               // dyno nputrace 采集迭代数（--profiler-iterations=，默认 3）
-	AllowLowIterations bool              // --allow-low-iterations：允许运行时/启动时使用 <3（仅调试）
-	DynoBin            string            // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
-	DynologBin         string            // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
-	Thresholds         config.Thresholds // independent detection thresholds (per-daemon, adjustable at runtime)
-	DebugOutput        bool              // --debug-output：结果含所有正常卡的诊断分
-	DumpProfilerData   bool              // --dump-profiler-data：把原始 profiler 数据复制到每轮结果目录
+	ProfilerDir      string            // profiler 采集落盘根目录（--profiler-dir=，必填；传给 dyno 的 --log-file）
+	KpiDir           string            // KPI 数据目录（--kpi-dir=，可选；空 = 每轮只跑 Profiler 检测）
+	Interval         time.Duration     // 循环周期，默认 600s
+	Port             int               // HTTP 端口，默认 8080
+	CollectWait      time.Duration     // dyno 触发成功后的等待秒数，默认 60s
+	Iterations       int               // dyno nputrace 采集迭代数（--profiler-iterations=，默认 3，>=1 任意）
+	DynoBin          string            // dyno 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
+	DynologBin       string            // dynolog 可执行路径（build.sh 用 .deb 装到系统，启动时 PATH 解析）
+	Thresholds       config.Thresholds // independent detection thresholds (per-daemon, adjustable at runtime)
+	DebugOutput      bool              // --debug-output：结果含所有正常卡的诊断分
+	DumpProfilerData bool              // --dump-profiler-data：把原始 profiler 数据复制到每轮结果目录
 }
 
 // DefaultConfig returns a Config with sensible defaults (CLI overrides).
