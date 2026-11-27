@@ -271,7 +271,6 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 		cr.ProfilerDataStatus = "disabled"
 	}
 	d.progress.begin(id)
-	d.progress.step("触发采集 (dyno)")
 	// This cycle's analysed results (combined JSON, meta, report) are written
 	// to ./daemon_results/<start>/ — OUTSIDE the --profiler-dir root — and
 	// that archive dir is the cycle's dump_dir. The --profiler-dir root is only
@@ -302,15 +301,16 @@ func (d *Daemon) runCycle(id, iterations int, roundToken string) {
 		d.cleanupDump(cr)
 	}()
 
-	// A raw dump left by a failed profiler_data copy must be moved aside before
-	// dyno writes into the root. If it cannot be moved, fail without collecting.
-	if err := d.prepareProfilerRoot(); err != nil {
-		cr.keepRawDump = true
-		cr.ProfilerDataStatus = "failed"
-		cr.ProfilerDataError = fmt.Sprintf("stale_dump_present: %v", err)
-		d.failCycle(cr, "collect", "stale_dump_present", err)
+	// Start every cycle from a clean --profiler-dir. A collection window with no
+	// requests produces no .db, but requests arriving after collect_wait can
+	// still write files into the root; without this reset they would leak into
+	// the next cycle. End-of-cycle cleanup alone cannot guarantee a clean start.
+	if err := d.resetProfilerRoot(); err != nil {
+		d.failCycle(cr, "collect", "profiler_dir_clear_failed", err)
 		return
 	}
+
+	d.progress.step("触发采集 (dyno)")
 
 	// 1. Collect: dyno trigger -> verify commandStatus -> wait for the dump.
 	if err := d.triggerCollection(cr.Iterations); err != nil {
@@ -1097,14 +1097,15 @@ func (d *Daemon) busyEtaMsLocked() int64 {
 }
 
 // failCycle records the local failure and reports it to the center immediately,
-// then returns (the caller skips all later stages).
+// then returns (the caller skips all later stages). The console keeps the
+// straggler-detector-3 format: only the plain error is shown; reason/stage are
+// protocol fields sent to the center, not display text.
 func (d *Daemon) failCycle(cr *CycleResult, stage, reason string, cause error) {
 	if cause != nil {
-		cr.Error = fmt.Sprintf("%s: %v", reason, cause)
+		cr.Error = cause.Error()
 	} else {
 		cr.Error = reason
 	}
-	d.progress.step("上报失败到中心 (%s/%s)", stage, reason)
 	d.reportCycle(cr, "failed", reason, stage, "")
 }
 
@@ -1252,8 +1253,8 @@ func (d *Daemon) cleanupDump(cr *CycleResult) {
 			}
 		}
 	}
-	// A failed copy (or a stale-dump rename failure) keeps the raw root as
-	// evidence; the next cycle moves it aside before dyno runs.
+	// A failed copy keeps the raw root for the operator to inspect; the next
+	// cycle clears it as its first action.
 	if res.KeepDump {
 		d.logf("cycle %d kept raw profiler dump for diagnosis: %s", cr.ID, d.cfg.ProfilerDir)
 		return

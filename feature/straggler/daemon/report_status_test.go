@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,21 @@ import (
 	"testing"
 	"time"
 )
+
+// The console keeps the straggler-detector-3 failure format: only the bare
+// error text is stored/displayed; reason/stage stay protocol-only fields.
+func TestFailCycleKeepsOldErrorFormat(t *testing.T) {
+	d := New(Config{}, nil)
+	d.logf = noopLogf
+	cr := &CycleResult{ID: 1}
+	d.failCycle(cr, "analyse", "no_db_after_analyse", errors.New("no .db files found under /data"))
+	if cr.Error != "no .db files found under /data" {
+		t.Fatalf("cr.Error = %q, want the bare error text", cr.Error)
+	}
+	if cr.ReportReason != "no_db_after_analyse" || cr.ReportStage != "analyse" {
+		t.Fatalf("report fields = %q/%q", cr.ReportReason, cr.ReportStage)
+	}
+}
 
 func TestReportCycleFailurePayloadAndRetry(t *testing.T) {
 	var mu sync.Mutex

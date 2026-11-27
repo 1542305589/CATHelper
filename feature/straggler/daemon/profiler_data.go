@@ -9,46 +9,21 @@ import (
 	"time"
 )
 
-// copyProfilerDataFn and renameFn are test seams.
-var (
-	copyProfilerDataFn = copyProfilerData
-	renameFn           = os.Rename
-)
+// copyProfilerDataFn is a test seam.
+var copyProfilerDataFn = copyProfilerData
 
-// prepareProfilerRoot moves a leftover raw dump aside before dyno runs. A
-// rename failure must fail the cycle rather than letting dyno write into a
-// dirty root.
-func (d *Daemon) prepareProfilerRoot() error {
-	if !d.cfg.DumpProfilerData {
-		return nil
-	}
+// resetProfilerRoot clears --profiler-dir before a new collection starts. dyno
+// can keep writing .db files after collect_wait (a request may arrive late), so
+// end-of-cycle cleanup alone cannot guarantee a clean root for the next cycle.
+func (d *Daemon) resetProfilerRoot() error {
 	root := d.cfg.ProfilerDir
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if len(entries) == 0 {
+	if root == "" {
 		return nil
 	}
-	base := root + ".stale-" + time.Now().Format("20060102-150405")
-	target := base
-	for i := 1; ; i++ {
-		if _, err := os.Stat(target); os.IsNotExist(err) {
-			break
-		} else if err != nil {
-			return err
-		}
-		target = fmt.Sprintf("%s-%d", base, i)
-	}
-	if err := renameFn(root, target); err != nil {
+	if err := os.RemoveAll(root); err != nil {
 		return err
 	}
-	d.logf("moved stale profiler data: %s -> %s", root, target)
-	warnStaleProfilerDirs(root, d.logf)
-	return nil
+	return os.MkdirAll(root, 0o755)
 }
 
 type profilerDataResult struct {
@@ -67,15 +42,6 @@ func (d *Daemon) applyProfilerDataPolicy(cr *CycleResult) profilerDataResult {
 	res := profilerDataResult{Dump: d.cfg.DumpProfilerData}
 	if !d.cfg.DumpProfilerData {
 		res.Status = "disabled"
-		return res
-	}
-	if cr.keepRawDump {
-		res.Status = "failed"
-		res.Error = cr.ProfilerDataError
-		if res.Error == "" {
-			res.Error = "stale_dump_present"
-		}
-		res.KeepDump = true
 		return res
 	}
 	root := d.cfg.ProfilerDir

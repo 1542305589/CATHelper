@@ -74,7 +74,6 @@ type CycleResult struct {
 	ProfilerDataBytes       int64  `json:"profiler_data_bytes"`
 	ProfilerDataSourceBytes int64  `json:"profiler_data_source_bytes"`
 	ProfilerDataError       string `json:"profiler_data_error"`
-	keepRawDump             bool   `json:"-"`
 }
 
 // dynoResponse is the JSON snippet embedded in the dyno trigger command's
